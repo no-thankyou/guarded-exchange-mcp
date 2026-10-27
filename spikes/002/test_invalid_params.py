@@ -26,16 +26,19 @@ from mcp.server.extension import Extension
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolRequestParams, CallToolResult, InputRequiredResult, TextContent
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import AfterValidator, BaseModel, Field, ValidationError
 
 
 def invalid_params_result(error: ValidationError) -> CallToolResult:
     """The shape ``interface/mcp/errors.py`` would build; never echoes the rejected values."""
     problems = [(".".join(str(p) for p in e["loc"]), e["type"], e["msg"]) for e in error.errors()]
     field, kind, _ = problems[0]
+    # Built-in pydantic messages describe the rule, not the value. A custom validator's message
+    # (type ``value_error``) is free text that may quote the input, so only loc + type are sent.
+    parts = [f"{loc}: {t}" if t == "value_error" else f"{loc}: {msg}" for loc, t, msg in problems]
     payload = {
         "code": "invalid_params",
-        "message": "; ".join(f"{loc}: {msg}" for loc, _, msg in problems),
+        "message": "; ".join(parts),
         "next_step": "Fix the arguments according to the tool's input schema and call again.",
         "details": {"field": field, "reason": kind},
     }
@@ -62,6 +65,12 @@ class Seen(BaseModel):
     qty: str
 
 
+def _no_secret(value: str) -> str:
+    if "sk-" in value:
+        raise ValueError(f"looks like an API key: {value}")  # a careless validator echoing the input
+    return value
+
+
 def register(mcp: MCPServer[Any]) -> None:
     @mcp.tool(name="place_order")
     async def place_order(
@@ -70,6 +79,10 @@ def register(mcp: MCPServer[Any]) -> None:
         qty: Annotated[Decimal, Field(gt=0, description="base asset amount")],
     ) -> Seen:
         return Seen(symbol=symbol, category=category, qty=repr(qty))
+
+    @mcp.tool(name="set_note")
+    async def set_note(note: Annotated[str, AfterValidator(_no_secret)]) -> str:
+        return note
 
     @mcp.tool(name="buggy")
     async def buggy() -> str:
@@ -159,3 +172,11 @@ async def test_extension_interceptor_only_sees_text_for_the_same_failure() -> No
     assert result.content[0].text.startswith("Error executing tool place_order: 1 validation error")
     # Side effect: an Extension is also advertised to every client as a protocol extension.
     assert advertised is not None and "dev.spike/spy" in advertised
+
+
+async def test_custom_validator_message_is_not_echoed() -> None:
+    result = await call({"note": "my key sk-SECRET"}, tool="set_note")
+    assert result.structured_content is not None
+    assert result.structured_content["details"] == {"field": "note", "reason": "value_error"}
+    assert result.structured_content["message"] == "note: value_error"
+    assert "SECRET" not in str(result.structured_content)

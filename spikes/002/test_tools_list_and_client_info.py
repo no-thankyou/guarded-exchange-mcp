@@ -67,7 +67,7 @@ def register_tools(mcp: MCPServer[Any]) -> None:
 
     @mcp.tool(name="place_order")
     async def place_order(symbol: str, ctx: Context) -> CallToolResult | InputRequiredResult:
-        if ctx.input_responses is None:
+        if ctx.request_state is None:  # round 2 is recognised by our sealed state (ADR-005, D-1)
             return InputRequiredResult(
                 input_requests={
                     "confirm": ElicitRequest(
@@ -114,13 +114,14 @@ async def test_list_tools_override_filters_by_principal(user: str, expected_hidd
         async with Client(build()) as client:
             listed = await client.session.list_tools()
             visible = await names(client)
-            # Hidden is not forbidden: a direct tools/call still reaches the tool (use case must refuse).
-            called = await client.call_tool("get_ticker" if expected_hidden else "whoami", {"symbol": "X"})
+            # Hidden is not forbidden: a direct tools/call of place_order still reaches its body
+            # (here: round 1 of MRTR), so the use case must refuse with permission_denied.
+            called = await client.session.call_tool("place_order", {"symbol": "X"}, allow_input_required=True)
     finally:
         current_user.reset(token)
     assert {"get_ticker", "place_order", "whoami"} - visible == expected_hidden
     assert (listed.ttl_ms, listed.cache_scope) == (0, "private")
-    assert called.is_error is False
+    assert isinstance(called, InputRequiredResult)
 
 
 async def test_middleware_alternative_also_filters_but_is_provisional() -> None:

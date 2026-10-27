@@ -47,7 +47,7 @@ def build_server(name: str, security: RequestStateSecurity | None) -> MCPServer[
 
     @mcp.tool(name="place_order")
     async def place_order(symbol: str, ctx: Context) -> CallToolResult | InputRequiredResult:
-        if ctx.input_responses is None:
+        if ctx.request_state is None:  # round 2 is recognised by our sealed state (ADR-005, D-1)
             return InputRequiredResult(
                 input_requests={
                     "confirm": ElicitRequest(

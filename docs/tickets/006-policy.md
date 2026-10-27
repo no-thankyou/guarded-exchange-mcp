@@ -11,9 +11,10 @@
 - Таблица `policies`, репозиторий, use cases `ReadPolicy`, `SetCeiling` (admin), `TightenPolicy` (user); всё в журнал.
 - CLI (typer): `policy show`, `admin policy set-ceiling`, `policy tighten`.
 - MCP `get_my_policy` (только чтение, FR-44); проверка профиля в одном месте application (FR-11) — `permission_denied`.
+- Фильтрованный `tools/list` по профилю (ADR-012, спайк 002): `GuardedMCPServer.list_tools()` скрывает торговые инструменты от read-only; principal — `get_access_token()` / локальный пользователь; набор разрешённых инструментов даёт application.
 
 ## Non-scope
-- Kill switch (015), mainnet-переключение (027), фильтрация tools/list (по итогам 002, отдельно).
+- Kill switch (015), mainnet-переключение (027).
 
 ## Acceptance criteria
 - [ ] Unit (параметризованный): strictest по каждому полю — allowlist пересечение, AND/OR флагов, min чисел, объединение правил подтверждения.
@@ -21,6 +22,7 @@
 - [ ] Unit: новый пользователь — read_only, пустой allowlist, testnet (FR-45); дефолты FR-18.
 - [ ] E2E: `get_my_policy` возвращает эффективную политику; в MCP нет инструментов изменения политики (FR-44, проверка реестра).
 - [ ] Integration: изменения политики пишутся в журнал.
+- [ ] E2E: read-only пользователь не видит торговых инструментов в `tools/list` (`cacheScope: private`), а прямой `tools/call` скрытого инструмента получает `permission_denied` (FR-11).
 
 ## Заметки
 —

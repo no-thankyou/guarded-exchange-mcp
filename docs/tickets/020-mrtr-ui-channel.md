@@ -7,7 +7,7 @@
 Если политика доверяет UI клиента и клиент объявил elicitation, подтверждение идёт в UI клиента в рамках вызова; агент получает результат действия. Проходит сценарий AC-1.
 
 ## Scope
-- Реализация по итогам спайков 002/003 (high-level или low-level `Server`).
+- Реализация на high-level `MCPServer` по шаблону PLAN «Спайк 002» (раздел 4) и итогам 003: признак второго раунда — только `ctx.request_state is not None`; `inputResponses` без `requestState` → `invalid_params`; подтверждение — только `ElicitResult` с `action == "accept"` и `content.confirm is True`, всё остальное — отказ; `RequestStateSecurity(keys=[подключ request_state], audience="guarded-exchange")`.
 - D-1: второй раунд — отдельная ветка до идемпотентности, не тратит write-токен; повтор первого раунда при PENDING → тот же pending.
 - D-2: один CAS `PENDING→EXECUTING` + общий `ExecuteConfirmed`; второй раунд, заставший не-PENDING, возвращает статус/результат.
 - D-4/D-5: digest, principal = `pending.user_id`, канал на момент решения, `cancel` → CANCELLED, ключ `request_state` из master key.
@@ -19,6 +19,7 @@
 ## Acceptance criteria
 - [ ] E2E (in-process Client): AC-1 — `get_positions` → `set_trading_stop` −3% → форма → accept → результат + журнал с каналом.
 - [ ] E2E: второй раунд с изменёнными аргументами → отказ (FR-22).
+- [ ] E2E: первый вызов с `inputResponses` без `requestState` → `invalid_params`, pending не создан; ретрай только с `requestState` → тот же pending; accept с `confirm=false` / без поля → не подтверждение.
 - [ ] E2E: повтор второго раунда после исполнения → тот же результат, одно исполнение.
 - [ ] Unit: гонка UI-accept и CLI approve → исполнение одно, канал победителя в журнале.
 - [ ] Unit: mainnet / `prefer_external_channel` → UI не используется.

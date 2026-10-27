@@ -22,6 +22,7 @@ import pytest
 from mcp import Client
 from mcp.client import ClientRequestContext
 from mcp.server import MCPServer
+from mcp.server.elicitation import AcceptedElicitation
 from mcp.server.mcpserver import Context
 from mcp.shared.exceptions import MCPError
 from mcp.types import (
@@ -55,9 +56,41 @@ class Observed:
 
     def __init__(self) -> None:
         self.rounds: list[dict[str, Any]] = []
+        self.pending_created = 0
+
+
+def is_confirmed(responses: InputResponses | None) -> bool:
+    """Fail closed: only an explicit accept with ``confirm is True`` confirms; anything else refuses."""
+    answer = (responses or {}).get("confirm")
+    return (
+        isinstance(answer, ElicitResult)
+        and answer.action == "accept"
+        and (answer.content or {}).get("confirm") is True
+    )
+
+
+def invalid_params(message: str) -> CallToolResult:
+    payload = {"code": "invalid_params", "message": message, "next_step": "Call the tool again without them."}
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)], structured_content=payload, is_error=True
+    )
+
+
+def ask(symbol: str, qty: str, pending_id: str) -> InputRequiredResult:
+    return InputRequiredResult(
+        input_requests={
+            "confirm": ElicitRequest(
+                params=ElicitRequestFormParams(
+                    message=f"Buy {qty} {symbol} at market?", requested_schema=CONFIRM_SCHEMA
+                )
+            )
+        },
+        request_state=json.dumps({"pending_id": pending_id}),
+    )
 
 
 def build_server(observed: Observed) -> MCPServer[Any]:
+    """The template for ADR-005 / D-1: round 2 is recognised by ``request_state``, never by answers."""
     mcp: MCPServer[Any] = MCPServer("spike-002")
 
     @mcp.tool(name="place_order", description="Spike: confirm through client UI, then execute.")
@@ -74,23 +107,24 @@ def build_server(observed: Observed) -> MCPServer[Any]:
                 "request_state": ctx.request_state,
             }
         )
+        if ctx.request_state is None:
+            if ctx.input_responses is not None:
+                # Answers we never asked for (no sealed state to tie them to): fail closed.
+                return invalid_params("inputResponses without requestState are not accepted.")
+            # Round 1: the real server creates the pending row here (ADR-005, step 1).
+            observed.pending_created += 1
+            return ask(symbol, qty, f"p-{observed.pending_created}")
+        # Round 2: request_state is the plaintext we minted, verified by the SDK.
+        pending_id = json.loads(ctx.request_state)["pending_id"]
         if ctx.input_responses is None:
-            # Round 1: the real server would create the pending row here (ADR-005, step 1).
-            return InputRequiredResult(
-                input_requests={
-                    "confirm": ElicitRequest(
-                        params=ElicitRequestFormParams(
-                            message=f"Buy {qty} {symbol} at market?", requested_schema=CONFIRM_SCHEMA
-                        )
-                    )
-                },
-                request_state=json.dumps({"pending_id": "p-1"}),
-            )
-        # Round 2: answers keyed like input_requests; request_state is the plaintext we minted.
-        answer = ctx.input_responses["confirm"]
-        assert isinstance(answer, ElicitResult)
-        state = json.loads(ctx.request_state or "{}")
-        out = OrderOut(status="executed", pending_id=state["pending_id"], decision=answer.action)
+            # State-only retry (D-1): re-ask for the SAME pending, never create a new one.
+            return ask(symbol, qty, pending_id)
+        answer = ctx.input_responses.get("confirm")
+        out = OrderOut(
+            status="executed" if is_confirmed(ctx.input_responses) else "rejected",
+            pending_id=pending_id,
+            decision=answer.action if isinstance(answer, ElicitResult) else "missing",
+        )
         return CallToolResult(
             content=[TextContent(type="text", text=out.model_dump_json())],
             structured_content=out.model_dump(mode="json"),
@@ -143,8 +177,7 @@ async def test_decline_reaches_the_tool_as_action() -> None:
     observed: Observed = Observed()
     async with Client(build_server(observed), elicitation_callback=make_callback("decline", [])) as client:
         result = await client.call_tool("place_order", {"symbol": "BTCUSDT", "qty": "0.01"})
-    assert result.structured_content is not None
-    assert result.structured_content["decision"] == "decline"
+    assert result.structured_content == {"status": "rejected", "pending_id": "p-1", "decision": "decline"}
 
 
 async def test_client_without_callback_declares_no_elicitation_and_fails_on_input_required() -> None:
@@ -154,7 +187,8 @@ async def test_client_without_callback_declares_no_elicitation_and_fails_on_inpu
             await client.call_tool("place_order", {"symbol": "BTCUSDT", "qty": "0.01"})
     # The server could have seen this and picked the external channel (ADR-005 step 2).
     assert observed.rounds[0]["client_elicitation"] is None
-    assert "elicitation" in info.value.error.message.lower()
+    assert info.value.error.code == -32600
+    assert info.value.error.message == "Elicitation not supported"
 
 
 async def test_manual_loop_sees_sealed_state_and_binding_to_arguments() -> None:
@@ -215,8 +249,11 @@ def build_dual_era_server() -> MCPServer[Any]:
         message = f"Buy {symbol}?"
         if ctx.protocol_version == "2025-11-25":
             answer = await ctx.elicit(message, Confirm)  # server->client request inside the call
-            decision = answer.action
-        elif ctx.input_responses is None:
+            decision: str = answer.action
+            confirmed = isinstance(answer, AcceptedElicitation) and answer.data.confirm is True
+        elif ctx.request_state is None:
+            if ctx.input_responses is not None:
+                return invalid_params("inputResponses without requestState are not accepted.")
             return InputRequiredResult(
                 input_requests={
                     "confirm": ElicitRequest(
@@ -228,10 +265,10 @@ def build_dual_era_server() -> MCPServer[Any]:
                 request_state="p-1",
             )
         else:
-            response = ctx.input_responses["confirm"]
-            assert isinstance(response, ElicitResult)
-            decision = response.action
-        out = OrderOut(status="executed", pending_id="p-1", decision=decision)
+            response = (ctx.input_responses or {}).get("confirm")
+            decision = response.action if isinstance(response, ElicitResult) else "missing"
+            confirmed = is_confirmed(ctx.input_responses)
+        out = OrderOut(status="executed" if confirmed else "rejected", pending_id="p-1", decision=decision)
         return CallToolResult(content=[], structured_content=out.model_dump(mode="json"))
 
     return mcp
@@ -261,3 +298,60 @@ async def test_push_elicit_is_refused_on_the_modern_protocol() -> None:
     # NoBackChannelError is an MCPError, so it surfaces as a protocol error, not a tool result.
     assert info.value.error.code == -32600
     assert "no back-channel" in info.value.error.message
+
+
+ARGS = {"symbol": "BTCUSDT", "qty": "0.01"}
+ACCEPT: InputResponses = {"confirm": ElicitResult(action="accept", content={"confirm": True})}
+
+
+async def test_answers_without_state_reach_the_tool_and_the_template_refuses_them() -> None:
+    observed = Observed()
+    async with Client(build_server(observed)) as client:
+        result = await client.session.call_tool("place_order", ARGS, input_responses=ACCEPT)
+    # SDK fact: nothing ties inputResponses to a requestState; the body sees answers on "round 1".
+    assert observed.rounds[0]["request_state"] is None
+    assert observed.rounds[0]["input_responses"] is not None
+    # Our template: fail closed, no pending created, nothing executed.
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "invalid_params"
+    assert observed.pending_created == 0
+
+
+async def test_state_only_retry_re_asks_for_the_same_pending() -> None:
+    observed = Observed()
+    async with Client(build_server(observed)) as client:
+        first = await client.session.call_tool("place_order", ARGS, allow_input_required=True)
+        assert isinstance(first, InputRequiredResult)
+        again = await client.session.call_tool(
+            "place_order", ARGS, request_state=first.request_state, allow_input_required=True
+        )
+        assert isinstance(again, InputRequiredResult)
+        done = await client.session.call_tool(
+            "place_order", ARGS, input_responses=ACCEPT, request_state=again.request_state
+        )
+    assert observed.pending_created == 1
+    assert done.structured_content == {"status": "executed", "pending_id": "p-1", "decision": "accept"}
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        {"confirm": ElicitResult(action="accept", content={"confirm": False})},
+        {"confirm": ElicitResult(action="accept", content={})},
+        {"confirm": ElicitResult(action="accept")},
+        {"other": ElicitResult(action="accept", content={"confirm": True})},
+        {"confirm": ElicitResult(action="cancel")},
+    ],
+    ids=["confirm-false", "no-confirm-field", "no-content", "wrong-key", "cancel"],
+)
+async def test_only_accept_with_confirm_true_confirms(answers: InputResponses) -> None:
+    async with Client(build_server(Observed())) as client:
+        first = await client.session.call_tool("place_order", ARGS, allow_input_required=True)
+        assert isinstance(first, InputRequiredResult)
+        result = await client.session.call_tool(
+            "place_order", ARGS, input_responses=answers, request_state=first.request_state
+        )
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "rejected"
