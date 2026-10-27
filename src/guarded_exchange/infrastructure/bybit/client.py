@@ -104,6 +104,9 @@ class BybitClient:
             raise _Retryable(unavailable(f"timeout ({type(exc).__name__})")) from exc
         except httpx2.TransportError as exc:
             raise _Retryable(unavailable(f"network error ({type(exc).__name__})")) from exc
+        except (httpx2.HTTPError, httpx2.InvalidURL, httpx2.StreamError) as exc:
+            # Decoding errors, redirects, bad URL/config: repeating the same request will not help.
+            raise unavailable(f"HTTP client error ({type(exc).__name__})") from exc
 
         if response.status_code >= _HTTP_SERVER_ERROR:
             raise _Retryable(unavailable(f"HTTP {response.status_code}"))

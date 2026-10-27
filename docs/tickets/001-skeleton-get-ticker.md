@@ -43,6 +43,15 @@
 - structlog: кэш логгеров выключен (иначе логгер, использованный до `configure_logging`, навсегда пишет в stdout — опасно для stdio). `configure_logging` вызывается до `MCPServer()`, т.к. тот вызывает `logging.basicConfig`.
 - Live-проверка руками (не в CI): по stdio против api-demo.bybit.com `get_ticker` BTCUSDT/linear, ethusdt/spot — успех; NOPEUSDT → `invalid_params` с `untrusted_text`.
 
+Ревью, раунд 1 (APPROVE с minor, закрыто в этом тикете):
+- Адаптер ловит все `httpx2.HTTPError` (+`InvalidURL`, `StreamError`): не-транспортные ошибки (decoding, redirects) → `exchange_unavailable` без retry; тест с `DecodingError`/`TooManyRedirects`.
+- `run_tool`: любое неожиданное исключение → `log.exception` + `code=internal_error` с `details.request_id`, без текста исключения; e2e-тест с `FakeExchange`, бросающим `RuntimeError`.
+- CI: порог покрытия domain+application ≥ 90% (`coverage report --include=... --fail-under=90`), сейчас 100%.
+- Имя поля `retry_after_s` (секунды) зафиксировано в PLAN ADR-013/ADR-011 и тикете 022; оставшиеся `httpx`/`respx` в PLAN заменены на `httpx2`/`httpx2.MockTransport`.
+- `.env` из текущего каталога больше не читается: только `--env-file` или `GX_ENV_FILE` (опция главнее), отсутствующий явный файл → ошибка и exit 2 (fail closed); тесты `tests/unit/test_config.py`, README обновлён.
+- stdio-e2e: подпроцессу переданы `HTTPS_PROXY/HTTP_PROXY/ALL_PROXY=http://127.0.0.1:9`, `NO_PROXY=127.0.0.1,localhost` (проверено руками: с мёртвым прокси реальный сервер получает `exchange_unavailable` вместо похода на Bybit).
+- Allowlist для `bybit_base_url` не делался — вынесено на решение пользователя.
+
 Предложения (вне scope):
 - Единый маппинг pydantic-ошибок аргументов SDK в `invalid_params` (через `Extension.intercept_tool_call` или middleware) — проверить в спайке 002, чтобы не дублировать схему и проверку в каждом инструменте.
 - Лицензия в `pyproject.toml`/README не указана — решить при релизе (033).

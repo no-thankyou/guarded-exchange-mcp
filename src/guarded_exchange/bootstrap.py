@@ -1,8 +1,10 @@
 """Composition root: the only module that reads configuration and wires adapters to use cases."""
 
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -11,7 +13,7 @@ import structlog
 from mcp.server import MCPServer
 
 from guarded_exchange.application.read_market import GetTicker
-from guarded_exchange.config import Settings
+from guarded_exchange.config import ConfigError, Settings, load_settings
 from guarded_exchange.infrastructure.bybit.client import BybitClient, RetryPolicy
 from guarded_exchange.infrastructure.bybit.http import make_http_client
 from guarded_exchange.infrastructure.logging import configure_logging
@@ -59,8 +61,13 @@ async def _serve_stdio(settings: Settings) -> None:
         await serve_stdio(mcp)
 
 
-def serve(transport: Transport) -> None:
-    settings = Settings()
+def serve(transport: Transport, env_file: Path | None = None) -> None:
+    try:
+        settings = load_settings(env_file)
+    except ConfigError as exc:
+        # Logging is not configured yet; stdout belongs to the protocol, so stderr only.
+        print(f"guarded-exchange: configuration error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
     configure_logging(settings.log_level)  # before MCPServer(): it calls logging.basicConfig
     structlog.get_logger(__name__).info(
         "server_starting",

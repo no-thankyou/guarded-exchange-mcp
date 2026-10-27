@@ -126,3 +126,21 @@ async def test_server_works_on_fake_exchange_without_any_bybit_code() -> None:
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["code"] == "exchange_unavailable"
+
+
+@pytest.mark.req("FR-28")
+async def test_unexpected_exception_becomes_internal_error_without_leaking_details() -> None:
+    exchange = FakeExchange(fail_with=RuntimeError("db password=hunter2 at /srv/secret.py:42"))
+    mcp = create_server(UseCases(get_ticker=GetTicker(exchange)))
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("get_ticker", {"symbol": "BTCUSDT", "category": "linear"})
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "internal_error"
+    assert result.structured_content["next_step"]
+    assert result.structured_content["details"]["request_id"]
+    dumped = result.model_dump_json()
+    assert "hunter2" not in dumped
+    assert "RuntimeError" not in dumped

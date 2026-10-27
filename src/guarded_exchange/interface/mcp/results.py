@@ -9,7 +9,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel
 
 from guarded_exchange.domain.errors import DomainError
-from guarded_exchange.interface.mcp.errors import error_result
+from guarded_exchange.interface.mcp.errors import error_result, internal_error_result
 
 log = structlog.get_logger(__name__)
 
@@ -25,8 +25,8 @@ def success_result(output: BaseModel) -> CallToolResult:
 async def run_tool(tool: str, mcp_request_id: str | None, call: Awaitable[BaseModel]) -> CallToolResult:
     """Await ``call`` with a fresh ``request_id`` bound to every log line, map domain errors.
 
-    Unexpected exceptions propagate: the SDK logs the traceback and returns a generic
-    ``isError`` result without leaking internals to the model.
+    Any other exception is a bug: its traceback goes to the log and the model gets
+    ``code=internal_error`` with the ``request_id`` only, never the exception text.
     """
     request_id = uuid.uuid4().hex
     started = time.perf_counter()
@@ -38,6 +38,9 @@ async def run_tool(tool: str, mcp_request_id: str | None, call: Awaitable[BaseMo
         except DomainError as exc:
             log.info("tool_error", code=exc.code, duration_ms=_ms(started))
             return error_result(exc)
+        except Exception:
+            log.exception("tool_crashed", duration_ms=_ms(started))
+            return internal_error_result(request_id)
         log.info("tool_ok", duration_ms=_ms(started))
         return success_result(output)
 

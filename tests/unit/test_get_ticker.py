@@ -59,12 +59,16 @@ async def test_invalid_category_is_rejected_without_calling_port(category: str) 
 
 @pytest.mark.req("FR-28")
 async def test_port_failure_surfaces_as_domain_exception() -> None:
+    """Contract: adapters translate failures into domain exceptions (the port docstring), and the
+    use case neither swallows nor rewraps them - the agent sees the adapter's code unchanged."""
     exchange = FakeExchange(fail_with=ExchangeUnavailable("the exchange is unavailable: timeout"))
 
     with pytest.raises(ExchangeUnavailable) as err:
         await _use_case(exchange)("BTCUSDT", "linear")
 
     assert err.value.code == "exchange_unavailable"
+    assert err.value is exchange.fail_with
+    assert exchange.calls == [("BTCUSDT", Category.LINEAR)]
 
 
 @pytest.mark.req("FR-28")

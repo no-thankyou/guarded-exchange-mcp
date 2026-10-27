@@ -249,3 +249,23 @@ def test_http_client_has_explicit_split_timeouts() -> None:
     assert http.timeout.connect == 2.5
     assert http.timeout.read == 7.0
     assert str(http.base_url) == "https://api-demo.bybit.com"
+
+
+@pytest.mark.req("FR-28")
+@pytest.mark.parametrize(
+    "error",
+    [httpx2.DecodingError("bad gzip stream"), httpx2.TooManyRedirects("redirect loop")],
+    ids=["decoding", "redirects"],
+)
+async def test_non_transport_http_errors_are_exchange_unavailable_without_retry(
+    error: httpx2.HTTPError,
+) -> None:
+    recorder = Recorder(error)
+    client, sleep = _client(recorder, attempts=3)
+
+    with pytest.raises(ExchangeUnavailable) as err:
+        await client.get_ticker("BTCUSDT", Category.LINEAR)
+
+    assert type(error).__name__ in err.value.message
+    assert len(recorder.requests) == 1
+    assert sleep.delays == []

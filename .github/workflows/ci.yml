@@ -60,6 +60,10 @@ jobs:
       - run: uv sync --locked
       - name: pytest
         run: uv run pytest --cov --cov-report=term
+      - name: coverage of domain + application >= 90% (PLAN section 8)
+        run: >-
+          uv run coverage report --no-skip-covered --fail-under=90
+          --include='*/guarded_exchange/domain/*,*/guarded_exchange/application/*'
       - name: traceability table is up to date
         run: |
           uv run pytest --collect-only -q --traceability=docs/traceability.md > /dev/null

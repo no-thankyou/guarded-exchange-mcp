@@ -4,7 +4,7 @@
 Требования: FR-34, FR-35, FR-28
 
 ## Цель
-Пользователь или зациклившийся агент не исчерпывает лимиты сервера и биржи; при приближении — `rate_limited` с `retry_after`.
+Пользователь или зациклившийся агент не исчерпывает лимиты сервера и биржи; при приближении — `rate_limited` с `retry_after_s` (секунды, поле ошибки по ADR-013).
 
 ## Scope
 - `ratelimit.py`: бакеты на пользователя (read/write), на UID биржи, глобальный IP (ADR-011, PLAN раздел 6); отмены, `activate_kill_switch`, `cancel_confirmation`, второй раунд MRTR не тратят write.
@@ -15,7 +15,7 @@
 - FR-46 (023).
 
 ## Acceptance criteria
-- [ ] Unit (FakeClock): исчерпание бакета → `rate_limited` с корректным `retry_after`; пополнение.
+- [ ] Unit (FakeClock): исчерпание бакета → `rate_limited` с корректным `retry_after_s`; пополнение.
 - [ ] Unit: отмены не тратят write-бакет.
 - [ ] Integration: заголовки биржи обновляют остаток; 10006 открывает breaker до reset timestamp.
 

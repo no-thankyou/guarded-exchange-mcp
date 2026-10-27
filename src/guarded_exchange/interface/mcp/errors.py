@@ -40,3 +40,14 @@ def error_result(exc: DomainError) -> CallToolResult:
         structured_content=payload.model_dump(mode="json", exclude_none=True),
         is_error=True,
     )
+
+
+def internal_error_result(request_id: str) -> CallToolResult:
+    """A bug or unanticipated failure: no exception text reaches the model, only a log reference."""
+    return error_result(
+        DomainError(
+            "internal server error",
+            next_step="Do not retry in a loop; tell the user, quoting the request_id for the server logs.",
+            details={"request_id": request_id},
+        )
+    )

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from guarded_exchange.domain.errors import DomainError, NotFound
+from guarded_exchange.domain.errors import NotFound
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.market import Ticker
 
@@ -35,7 +35,7 @@ class FakeExchange:
     """``ExchangeClient`` with a configurable set of tickers and an optional forced failure."""
 
     tickers: dict[tuple[str, Category], Ticker] = field(default_factory=dict)
-    fail_with: DomainError | None = None
+    fail_with: Exception | None = None
     calls: list[tuple[str, Category]] = field(default_factory=list)
 
     async def get_ticker(self, symbol: str, category: Category) -> Ticker:

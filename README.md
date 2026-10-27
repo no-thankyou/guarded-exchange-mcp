@@ -34,11 +34,11 @@ Example call: `get_ticker {"symbol": "BTCUSDT", "category": "linear"}` returns a
  "change_24h_pct": "0.7311", "mark_price": "80610.84", "funding_rate_pct": "0.01", "observed_at": "2026-10-27T18:57:44.688Z", "...": "..."}
 ```
 
-Errors are tool results with `isError: true` and a stable shape `{code, message, next_step, details?, untrusted_text?}`; text that comes from the exchange is returned only in `untrusted_text`.
+Errors are tool results with `isError: true` and a stable shape `{code, message, next_step, retry_after_s?, details?, untrusted_text?}`; unexpected server failures return `code: "internal_error"` with a `request_id` and no internals; text that comes from the exchange is returned only in `untrusted_text`.
 
 ### Configuration
 
-Environment variables (or a `.env` file in the working directory):
+Environment variables with the `GX_` prefix. A dotenv file is read only when given explicitly: `guarded-exchange serve --env-file path/to/gx.env` or `GX_ENV_FILE=path/to/gx.env` (the option wins). A `.env` in the working directory is deliberately ignored: MCP clients start the server from arbitrary directories. A missing explicit file stops the server with an error.
 
 | Variable | Default | Meaning |
 |---|---|---|

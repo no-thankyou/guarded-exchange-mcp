@@ -73,8 +73,14 @@ async def test_stdio_server_answers_and_keeps_stdout_protocol_only(
             "GX_BYBIT_GET_MAX_ATTEMPTS": "1",
             "GX_LOG_LEVEL": "INFO",
             "PYTHONPATH": "",
+            # Belt and braces for NFR-2: the conftest socket guard does not reach the
+            # subprocess, so any request that is not to the loopback stub goes to a dead proxy.
+            "HTTPS_PROXY": "http://127.0.0.1:9",
+            "HTTP_PROXY": "http://127.0.0.1:9",
+            "ALL_PROXY": "http://127.0.0.1:9",
+            "NO_PROXY": "127.0.0.1,localhost",
         },
-        cwd=tmp_path,  # no stray .env is picked up
+        cwd=tmp_path,
     )
 
     async with Client(params, read_timeout_seconds=20) as client:
