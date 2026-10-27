@@ -50,6 +50,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "PLR2004", "S603", "S607"]
+"spikes/**" = ["S101", "PLR2004", "PT018"]  # throwaway experiments run with pytest, not shipped
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
@@ -58,7 +59,7 @@ ban-relative-imports = "all"
 strict = true
 python_version = "3.12"
 mypy_path = "src"
-files = ["src", "tests"]
+files = ["src", "tests", "spikes"]
 plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
