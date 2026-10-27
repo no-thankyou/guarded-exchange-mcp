@@ -1,0 +1,118 @@
+[project]
+name = "guarded-exchange-mcp"
+version = "0.1.0"
+description = "MCP server giving AI agents guarded access to a crypto exchange: least privilege, risk limits, human confirmation, audit log."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "mcp==2.3.0",
+    "httpx2>=2.16.0,<3",
+    "pydantic>=2.14.1,<3",
+    "pydantic-settings>=2.16.1,<3",
+    "structlog>=26.1.0",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+guarded-exchange = "guarded_exchange.bootstrap:cli"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.3",
+    "mypy>=2.4.0",
+    "import-linter>=2.15",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.1",
+    "pytest-cov>=7.1.0",
+    "pre-commit>=4.7.0",
+    "jsonschema>=4.26.0",
+    "types-jsonschema>=4.26.0.20261006",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/guarded_exchange"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "N", "ASYNC", "S", "PT", "TID", "DTZ", "PL", "C4"]
+ignore = [
+    "PLR0913",
+    "N818",  # domain exceptions are named after FR-28 error codes (InvalidParams), not *Error
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "S603", "S607"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+mypy_path = "src"
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers -m 'not testnet'"
+markers = [
+    "req(id): requirement(s) from docs/SPEC.md covered by this test (feeds docs/traceability.md)",
+    "testnet: manual tests against the exchange test environment; never run in CI",
+]
+
+[tool.coverage.run]
+source = ["guarded_exchange"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.importlinter]
+root_package = "guarded_exchange"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Layers: bootstrap -> interface | infrastructure -> application -> domain"
+type = "layers"
+layers = [
+    "guarded_exchange.bootstrap",
+    "guarded_exchange.interface | guarded_exchange.infrastructure",
+    "guarded_exchange.application",
+    "guarded_exchange.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "Only the composition root reads configuration"
+type = "forbidden"
+source_modules = [
+    "guarded_exchange.domain",
+    "guarded_exchange.application",
+    "guarded_exchange.infrastructure",
+    "guarded_exchange.interface",
+]
+forbidden_modules = ["guarded_exchange.config"]
+
+[[tool.importlinter.contracts]]
+name = "Domain is pure Python"
+type = "forbidden"
+source_modules = ["guarded_exchange.domain"]
+forbidden_modules = ["mcp", "mcp_types", "httpx2", "pydantic", "pydantic_settings", "structlog", "typer"]
+
+[[tool.importlinter.contracts]]
+name = "Application knows no transport, SDK or HTTP"
+type = "forbidden"
+source_modules = ["guarded_exchange.application"]
+forbidden_modules = ["mcp", "mcp_types", "httpx2", "pydantic_settings", "typer"]

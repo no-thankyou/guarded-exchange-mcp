@@ -26,22 +26,22 @@
 | Компонент | Выбор | Версия | Источник |
 |---|---|---|---|
 | Язык | Python | 3.12 | ENGINEERING.md |
-| Пакеты, lock | uv | актуальная на тикет 001 | — |
-| MCP | `mcp` (Python SDK v2, `from mcp.server import MCPServer`), протокол 2026-07-28 | 2.3.0 | research/mcp-protocol.md |
-| HTTP-клиент биржи | `httpx` (`AsyncClient`, `MockTransport` в тестах) | актуальная на 001 | research/exchange.md |
+| Пакеты, lock | uv (`uv.lock`) | 0.12.23 | тикет 001 |
+| MCP | `mcp` (Python SDK v2, `from mcp.server import MCPServer`), протокол 2026-07-28 | 2.3.0 (закреплена `==`) | research/mcp-protocol.md |
+| HTTP-клиент биржи | `httpx2` (`AsyncClient`, `MockTransport` в тестах) — продолжение `httpx` под опекой Pydantic, тот же API, импорт `httpx2`. Выбран в тикете 001 вместо `httpx`: `mcp` 2.3.0 сам зависит от `httpx2`, а `httpx` застыл на 0.28.1 — один HTTP-стек на процесс | 2.16.0 | research/exchange.md, PyPI 2026-10-27 |
 | Биржа | Bybit V5 REST, свой клиент (pybit 5.16.0 — только эталон подписи при отладке) | — | research/exchange.md |
 | БД | SQLAlchemy 2.1 Core async (без ORM) + Alembic | 2.1.6 / 1.20.1 | research/storage-audit.md |
 | Драйверы | `aiosqlite` (локально), `psycopg` 3 (удалённо) | 0.22.1 / 3.3.6 | research/storage-audit.md |
 | Шифрование | `cryptography` (AES-256-GCM, HKDF) | 50.x | research/storage-audit.md |
 | Telegram | `aiogram` (Bot API 10.3, long polling) | 3.31.0 | research/confirmation-channel.md |
 | LLM (агент-клиент, evals) | `openai` (Responses API), `anthropic` (Messages) | 3.39.0 / 2.3.0 | research/clients-and-agent.md |
-| Конфиг, валидация | `pydantic` v2, `pydantic-settings` | актуальные на 001 | ENGINEERING.md |
-| CLI | `typer` | актуальная на 001 | — (выбор по умолчанию) |
-| Логи | `structlog` (JSON в stderr; на stdio stdout занят протоколом) | актуальная на 001 | NFR-3, research/mcp-protocol.md |
-| Тесты | `pytest`, `pytest-asyncio`, `respx`/`httpx.MockTransport`, `testcontainers[postgres]` | testcontainers 4.15.0 | research/storage-audit.md |
-| Качество | `ruff`, `mypy --strict`, `pre-commit`, GitHub Actions | — | ENGINEERING.md |
+| Конфиг, валидация | `pydantic` v2, `pydantic-settings` | 2.14.1 / 2.16.1 | ENGINEERING.md, PyPI 2026-10-27 |
+| CLI | `typer` | 0.27.3 | PyPI 2026-10-27 |
+| Логи | `structlog` (JSON в stderr; на stdio stdout занят протоколом) | 26.1.0 | NFR-3, research/mcp-protocol.md, PyPI 2026-10-27 |
+| Тесты | `pytest`, `pytest-asyncio`, `pytest-cov`, `httpx2.MockTransport` (`respx` не нужен: он рассчитан на `httpx`), `jsonschema` (проверка `outputSchema` в e2e), `testcontainers[postgres]` | 9.1.1 / 1.4.1 / 7.1.0 / — / 4.26.0 / 4.15.0 | research/storage-audit.md, PyPI 2026-10-27 |
+| Качество | `ruff`, `mypy --strict`, `import-linter`, `pre-commit`, GitHub Actions (`actions/checkout@v7`, `astral-sh/setup-uv@v10`) | 0.17.3 / 2.4.0 / 2.15 / 4.7.0 | ENGINEERING.md, PyPI и GitHub releases 2026-10-27 |
 
-Версии без числа проверяются и фиксируются в тикете 001 (не вспоминать — смотреть PyPI).
+Версии проверены на PyPI 2026-10-27 и зафиксированы в тикете 001 (`uv.lock`); в `pyproject.toml` — нижние границы, `mcp` закреплён точно (SDK 2.x быстро меняется, раздел 9).
 
 ## 3. Структура и слои
 
@@ -50,6 +50,7 @@ src/guarded_exchange/
   domain/
     money.py            # Decimal-типы: Price, Qty, Notional, Percent; округление к шагу
     instruments.py      # Instrument, InstrumentRules (tick, qty step, min qty/notional, max leverage), validate (FR-10)
+    market.py           # рыночные value objects: Ticker (тикет 001), позже Orderbook, Candle
     actions.py          # TradingAction (PlaceOrder, AmendOrder, CancelOrder, CancelAll, SetTradingStop, ClosePosition, SetLeverage)
     risk.py             # classify(action, position) -> RiskDirection; reduce-only clamp (FR-43)
     policy.py           # AdminCeiling, UserOverrides, EffectivePolicy = strictest(...) (FR-12, FR-18, FR-42, FR-45)

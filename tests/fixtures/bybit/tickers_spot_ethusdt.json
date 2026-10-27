@@ -1,0 +1,26 @@
+{
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "category": "spot",
+        "list": [
+            {
+                "symbol": "ETHUSDT",
+                "bid1Price": "2343.49",
+                "bid1Size": "9.91589",
+                "ask1Price": "2343.5",
+                "ask1Size": "2.63974",
+                "lastPrice": "2343.49",
+                "prevPrice24h": "2314.71",
+                "price24hPcnt": "0.0124",
+                "highPrice24h": "2357.99",
+                "lowPrice24h": "2297.57",
+                "turnover24h": "135144201.3146719",
+                "volume24h": "58113.55599",
+                "usdIndexPrice": "2340.607233"
+            }
+        ]
+    },
+    "retExtInfo": {},
+    "time": 1793127223820
+}
