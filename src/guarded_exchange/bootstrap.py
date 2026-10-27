@@ -5,19 +5,31 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import anyio
 import httpx2
 import structlog
 from mcp.server import MCPServer
 
+from guarded_exchange.application.admin import InitializeInstallation, InitResult, MasterKeyMissing
+from guarded_exchange.application.auth import PrincipalUnavailable, ResolveLocalPrincipal
 from guarded_exchange.application.read_market import GetTicker
 from guarded_exchange.config import ConfigError, Settings, load_settings
+from guarded_exchange.domain.errors import DomainError
 from guarded_exchange.infrastructure.bybit.client import BybitClient, RetryPolicy
 from guarded_exchange.infrastructure.bybit.http import make_http_client
+from guarded_exchange.infrastructure.clock import SystemClock, UuidGenerator
+from guarded_exchange.infrastructure.db.migrate import (
+    StorageNotReady,
+    check_storage,
+    install_lock,
+    upgrade_to_head,
+)
+from guarded_exchange.infrastructure.db.uow import SqlUnitOfWorkFactory, create_sqlite_async_engine
 from guarded_exchange.infrastructure.logging import configure_logging
-from guarded_exchange.interface.cli.main import Transport, build_cli
+from guarded_exchange.infrastructure.master_key import FileMasterKeyStore, MasterKeyError
+from guarded_exchange.interface.cli.main import InitReport, Transport, build_cli
 from guarded_exchange.interface.mcp.server import UseCases, create_server, serve_stdio
 
 
@@ -56,27 +68,99 @@ async def app_server(
         yield create_server(build_use_cases(settings, http), version=_version())
 
 
+@asynccontextmanager
+async def open_storage(settings: Settings) -> AsyncIterator[SqlUnitOfWorkFactory]:
+    engine = create_sqlite_async_engine(settings.db_path, busy_timeout_ms=settings.sqlite_busy_timeout_ms)
+    try:
+        yield SqlUnitOfWorkFactory(engine)
+    finally:
+        await engine.dispose()
+
+
+def _fail(what: str, exc: BaseException, code: int) -> NoReturn:
+    # stdout belongs to the MCP protocol (serve) or to the report (init): errors go to stderr.
+    print(f"guarded-exchange: {what}: {exc}", file=sys.stderr)
+    raise SystemExit(code) from exc
+
+
+def _load_settings(env_file: Path | None) -> Settings:
+    try:
+        return load_settings(env_file)
+    except ConfigError as exc:
+        _fail("configuration error", exc, 2)
+
+
+# --- init ---------------------------------------------------------------------------------
+
+
+async def _initialize(settings: Settings) -> InitResult:
+    async with open_storage(settings) as uow:
+        use_case = InitializeInstallation(
+            uow, SystemClock(), UuidGenerator(), FileMasterKeyStore(settings.master_key_file)
+        )
+        return await use_case(settings.local_user)
+
+
+def run_init(settings: Settings) -> InitReport:
+    """Migrate to head, verify, then create the master key and local user (PLAN D-11).
+
+    The whole sequence holds an exclusive host-wide lock, so parallel ``init`` runs are safe.
+    """
+    busy = settings.sqlite_busy_timeout_ms
+    with install_lock(settings.db_path):
+        upgrade_to_head(settings.db_path, busy_timeout_ms=busy)
+        revision = check_storage(settings.db_path, busy_timeout_ms=busy)
+        result = anyio.run(_initialize, settings)
+    return InitReport(
+        db_path=settings.db_path,
+        schema_revision=revision,
+        master_key_file=settings.master_key_file,
+        master_key_created=result.master_key_created,
+        user_name=result.user.name,
+        user_id=result.user.id,
+        user_created=result.user_created,
+    )
+
+
+def init(env_file: Path | None = None) -> InitReport:
+    settings = _load_settings(env_file)
+    configure_logging(settings.log_level)
+    try:
+        return run_init(settings)
+    except (StorageNotReady, MasterKeyMissing, MasterKeyError, DomainError) as exc:
+        _fail("init failed", exc, 1)
+
+
+# --- serve --------------------------------------------------------------------------------
+
+
 async def _serve_stdio(settings: Settings) -> None:
-    async with app_server(settings) as mcp:
-        await serve_stdio(mcp)
+    async with open_storage(settings) as uow:
+        principal = await ResolveLocalPrincipal(uow)(settings.local_user)
+        structlog.get_logger(__name__).info("principal_resolved", user_id=principal.id, user=principal.name)
+        async with app_server(settings) as mcp:
+            await serve_stdio(mcp)
 
 
 def serve(transport: Transport, env_file: Path | None = None) -> None:
-    try:
-        settings = load_settings(env_file)
-    except ConfigError as exc:
-        # Logging is not configured yet; stdout belongs to the protocol, so stderr only.
-        print(f"guarded-exchange: configuration error: {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
+    settings = _load_settings(env_file)
     configure_logging(settings.log_level)  # before MCPServer(): it calls logging.basicConfig
-    structlog.get_logger(__name__).info(
+    log = structlog.get_logger(__name__)
+    log.info(
         "server_starting",
         transport=transport,
         exchange_base_url=str(settings.bybit_base_url),
+        db_path=str(settings.db_path),
         version=_version(),
     )
-    anyio.run(_serve_stdio, settings)
+    try:
+        # Never migrate here (D-11): clients start several server processes at once.
+        check_storage(settings.db_path, busy_timeout_ms=settings.sqlite_busy_timeout_ms)
+        anyio.run(_serve_stdio, settings)
+    except (StorageNotReady, PrincipalUnavailable, DomainError) as exc:
+        log.error("startup_refused", reason=str(exc))
+        _fail("cannot start", exc, 2)
 
 
 def cli() -> None:
-    build_cli(serve)()
+    build_cli(serve, init)()

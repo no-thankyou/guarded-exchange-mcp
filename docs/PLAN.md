@@ -30,8 +30,8 @@
 | MCP | `mcp` (Python SDK v2, `from mcp.server import MCPServer`), протокол 2026-07-28 | 2.3.0 (закреплена `==`) | research/mcp-protocol.md |
 | HTTP-клиент биржи | `httpx2` (`AsyncClient`, `MockTransport` в тестах) — продолжение `httpx` под опекой Pydantic, тот же API, импорт `httpx2`. Выбран в тикете 001 вместо `httpx`: `mcp` 2.3.0 сам зависит от `httpx2`, а `httpx` застыл на 0.28.1 — один HTTP-стек на процесс | 2.16.0 | research/exchange.md, PyPI 2026-10-27 |
 | Биржа | Bybit V5 REST, свой клиент (pybit 5.16.0 — только эталон подписи при отладке) | — | research/exchange.md |
-| БД | SQLAlchemy 2.1 Core async (без ORM) + Alembic | 2.1.6 / 1.20.1 | research/storage-audit.md |
-| Драйверы | `aiosqlite` (локально), `psycopg` 3 (удалённо) | 0.22.1 / 3.3.6 | research/storage-audit.md |
+| БД | SQLAlchemy 2.1 Core async (без ORM; extra `asyncio` ставит `greenlet`) + Alembic | 2.1.6 (`>=2.1.6,<2.2`) / 1.20.1 / greenlet 3.5.6 | research/storage-audit.md, PyPI 2026-10-27 (тикет 005) |
+| Драйверы | `aiosqlite` (локально; миграции и проверка при старте — stdlib `sqlite3`, SQLite ≥ 3.35), `psycopg` 3 (удалённо, тикет 028) | 0.22.1 / 3.3.6 | research/storage-audit.md, PyPI 2026-10-27 (тикет 005) |
 | Шифрование | `cryptography` (AES-256-GCM, HKDF) | 50.x | research/storage-audit.md |
 | Telegram | `aiogram` (Bot API 10.3, long polling) | 3.31.0 | research/confirmation-channel.md |
 | LLM (агент-клиент, evals) | `openai` (Responses API), `anthropic` (Messages) | 3.39.0 / 2.3.0 | research/clients-and-agent.md |
@@ -56,25 +56,28 @@ src/guarded_exchange/
     policy.py           # AdminCeiling, UserOverrides, EffectivePolicy = strictest(...) (FR-12, FR-18, FR-42, FR-45)
     limits.py           # check_limits(action, policy, market) -> Decision | LimitViolation (FR-13–17)
     confirmation.py     # PendingConfirmation + конечный автомат, action_digest (FR-22, FR-23, FR-47)
-    audit.py            # AuditEvent, canonical JSON (FR-36)
+    audit.py            # AuditEvent, AuditRecord, canonical JSON (FR-36), цепочки user_id | "system"
+    users.py            # User, Environment, UserStatus, new_user — дефолты FR-45 (тикет 005)
     errors.py           # доменные исключения ↔ коды FR-28
   application/
-    ports.py            # ExchangeClient, *Repository, UnitOfWork, ConfirmationChannel, CredentialCipher, Clock, IdGenerator, RateLimiter
+    ports.py            # ExchangeClient, *Repository, UnitOfWork(Factory), MasterKeyStore (005), ConfirmationChannel, CredentialCipher, Clock, IdGenerator, RateLimiter
     read_market.py, read_account.py, read_policy.py, read_audit.py
     submit_action.py    # единый путь любого торгового действия: auth → [второй раунд MRTR → resolve, D-1] → повтор/идемпотентность (D-20) → rate limit → rules → policy/limits → confirm? → execute
     resolve_confirmation.py   # человек одобрил/отклонил (только не-MCP каналы)
     execute_confirmed.py      # перепроверка FR-48 + исполнение + разведка исхода FR-27
-    admin.py            # users, tokens, ceilings, mainnet, kill switch, revoke (FR-29, FR-32, FR-44)
+    admin.py            # InitializeInstallation (005); users, tokens, ceilings, mainnet, kill switch, revoke (FR-29, FR-32, FR-44)
+    auth.py             # ResolveLocalPrincipal (005); позже порт Authenticator (ADR-004)
     credentials.py      # add/replace/delete ключа + проверка прав (FR-30, FR-49)
     audit_verify.py     # проверка цепочки (FR-50)
   infrastructure/
     bybit/              # client.py (подпись, таймауты, X-Bapi-Limit-*), mapper.py (DTO → domain), errors.py (retCode → domain)
-    db/                 # schema.py (Table), repositories.py, uow.py, dialect.py (lock_user, upsert, Decimal/UTC TypeDecorator), migrations/
+    db/                 # schema.py (Table), repositories.py, uow.py (engines, UnitOfWork), dialect.py (lock_user, upsert, Decimal/UTC TypeDecorator, pragmas, BEGIN IMMEDIATE), migrate.py (init под flock, проверка при старте), migrations/
+    master_key.py       # файл master key 0600 вне каталога БД (005); шифрование — crypto.py (007)
     crypto.py           # AES-GCM + HKDF keyring
     audit_chain.py      # HMAC-цепочка, checkpoints
     telegram/           # бот: уведомления, callback Approve/Reject, pairing
     ratelimit.py        # token buckets in-memory
-    clock.py
+    clock.py            # SystemClock (мс), UuidGenerator
   interface/
     mcp/                # server.py (MCPServer, транспорт), tools/*.py (тонкие), schemas.py (pydantic I/O), errors.py (единый маппинг)
     cli/                # admin и user команды (typer)
