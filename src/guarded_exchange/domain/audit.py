@@ -25,6 +25,7 @@ class AuditEventType(StrEnum):
     USER_CREATED = "user_created"
     POLICY_CEILING_SET = "policy_ceiling_set"
     POLICY_TIGHTENED = "policy_tightened"
+    POLICY_OVERRIDES_RESET = "policy_overrides_reset"
     ACCESS_TOKEN_ISSUED = "access_token_issued"  # noqa: S105 - event names, not secrets
     ACCESS_TOKEN_REVOKED = "access_token_revoked"  # noqa: S105
     CREDENTIAL_ADDED = "credential_added"

@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from guarded_exchange.application.admin import IssuedToken, RevokedToken
 from guarded_exchange.application.credentials import StoredCredential
-from guarded_exchange.application.policy import PolicyView
+from guarded_exchange.application.policy import OverridesReset, PolicyView
 from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.actions import ActionKind
 from guarded_exchange.domain.credentials import (
@@ -41,6 +41,7 @@ from guarded_exchange.interface.cli.main import (
     PolicyOptions,
     Transport,
     build_cli,
+    render_overrides_reset,
     render_policy,
 )
 
@@ -93,14 +94,30 @@ class PolicySpy:
     shown: list[tuple[Path | None, str | None]] = field(default_factory=list)
     tightened: list[PolicyPatch] = field(default_factory=list)
     ceilings: list[tuple[str | None, PolicyPatch]] = field(default_factory=list)
+    resets: list[tuple[str, frozenset[str] | None]] = field(default_factory=list)
+    own: PolicyPatch = NO_OVERRIDES  # the user's settings ``show`` reports
     fail_with: Exception | None = None
 
     def commands(self) -> PolicyCommands:
-        return PolicyCommands(show=self.show, tighten=self.tighten, set_ceiling=self.set_ceiling)
+        return PolicyCommands(
+            show=self.show,
+            tighten=self.tighten,
+            set_ceiling=self.set_ceiling,
+            reset_overrides=self.reset_overrides,
+        )
 
     def show(self, env_file: Path | None, user: str | None) -> PolicyView:
+        if self.fail_with is not None:
+            raise self.fail_with
         self.shown.append((env_file, user))
-        return make_view()
+        return make_view(self.own)
+
+    def reset_overrides(
+        self, env_file: Path | None, user: str, fields: frozenset[str] | None
+    ) -> OverridesReset:
+        self.resets.append((user, fields))
+        reset = tuple(name for name in self.own.changes() if fields is None or name in fields)
+        return OverridesReset(view=make_view(), reset_fields=reset)
 
     def tighten(self, env_file: Path | None, change: PolicyPatch) -> PolicyView:
         if self.fail_with is not None:
@@ -349,6 +366,112 @@ def test_refusal_from_the_use_case_propagates_to_the_composition_root() -> None:
     )
 
     assert isinstance(result.exception, PermissionDenied)  # bootstrap prints it and exits 1
+
+
+# --- admin policy reset-overrides (ticket 034) ------------------------------------------------
+
+OWN = PolicyPatch(profile=Profile.READ_ONLY, max_leverage=Decimal(2))
+
+
+def _policy_app(spy: PolicySpy) -> typer.Typer:
+    return build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands(), KeySpy().commands())
+
+
+@pytest.mark.req("FR-12")
+def test_reset_overrides_shows_what_it_removes_and_asks_first() -> None:
+    spy = PolicySpy(own=OWN)
+
+    declined = runner.invoke(
+        _policy_app(spy), ["admin", "policy", "reset-overrides", "--user", "bob"], input="n\n"
+    )
+    confirmed = runner.invoke(
+        _policy_app(spy),
+        ["admin", "policy", "reset-overrides", "--user", "bob", "--field", "max-leverage"],
+        input="y\n",
+    )
+
+    assert declined.exit_code == 1
+    assert "user setting of bob to remove: profile = read_only" in declined.stdout
+    assert "max_leverage = 2" in declined.stdout
+    assert "not confirmed: nothing changed" in declined.stderr
+    assert confirmed.exit_code == 0, confirmed.output
+    assert "profile = read_only" not in confirmed.stdout  # only the named field is shown
+    assert "reset to the ceiling: max_leverage" in confirmed.stdout
+    assert spy.resets == [("bob", frozenset({"max_leverage"}))]
+
+
+@pytest.mark.req("FR-12")
+def test_reset_overrides_without_yes_and_without_a_terminal_refuses() -> None:
+    spy = PolicySpy(own=OWN)
+
+    result = runner.invoke(
+        _policy_app(spy), ["admin", "policy", "reset-overrides", "--user", "bob"]
+    )  # no input
+
+    assert result.exit_code == 1
+    assert "pass --yes" in result.stderr
+    assert spy.resets == []
+
+
+def test_reset_overrides_with_yes_does_not_ask() -> None:
+    spy = PolicySpy(own=OWN)
+
+    result = runner.invoke(_policy_app(spy), ["admin", "policy", "reset-overrides", "--user", "bob", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "?" not in result.stdout
+    assert "reset to the ceiling: profile, max_leverage" in result.stdout
+    assert spy.resets == [("bob", None)]
+
+
+def test_reset_overrides_with_nothing_to_reset_neither_asks_nor_resets() -> None:
+    spy = PolicySpy(own=PolicyPatch(max_pending=1))
+
+    result = runner.invoke(
+        _policy_app(spy), ["admin", "policy", "reset-overrides", "--user", "bob", "--field", "profile"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "user bob has no own settings to reset; nothing changed"
+    assert spy.resets == []
+
+
+def test_reset_overrides_rejects_unknown_fields_and_needs_a_user() -> None:
+    spy = PolicySpy(own=OWN)
+
+    unknown = runner.invoke(
+        _policy_app(spy), ["admin", "policy", "reset-overrides", "--user", "bob", "--field", "withdrawals"]
+    )
+    no_user = runner.invoke(_policy_app(spy), ["admin", "policy", "reset-overrides", "--yes"])
+
+    assert unknown.exit_code == 2
+    assert "unknown policy settings: withdrawals" in unknown.stderr
+    assert no_user.exit_code == 2
+    assert "--user" in no_user.stderr
+    assert spy.shown == []
+    assert spy.resets == []
+
+
+def test_reset_overrides_failure_propagates_before_asking() -> None:
+    spy = PolicySpy(own=OWN, fail_with=NotFound("user 'ghost' does not exist"))
+
+    result = runner.invoke(_policy_app(spy), ["admin", "policy", "reset-overrides", "--user", "ghost"])
+
+    assert isinstance(result.exception, NotFound)  # bootstrap prints it and exits 1
+    assert spy.resets == []
+
+
+def test_rendered_reset_result_with_nothing_reset() -> None:
+    text = render_overrides_reset(OverridesReset(view=make_view(), reset_fields=()))
+
+    assert text == "user local has no own settings to reset; nothing changed"
+
+
+@pytest.mark.req("FR-44")
+def test_reset_overrides_is_an_admin_command_only() -> None:
+    result = runner.invoke(_policy_app(PolicySpy(own=OWN)), ["policy", "reset-overrides", "--yes"])
+
+    assert result.exit_code == 2  # the user's `policy` group has no such command
 
 
 @pytest.mark.req("FR-29")

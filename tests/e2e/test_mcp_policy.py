@@ -5,7 +5,7 @@ import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_type_hints
 
 import jsonschema
 import pytest
@@ -13,10 +13,11 @@ from mcp import Client
 from mcp.server import MCPServer
 from mcp.types import CallToolResult, Tool
 
-from guarded_exchange.application.policy import SetCeiling, TightenPolicy
+from guarded_exchange.application.policy import ReadPolicy, ResetOverrides, SetCeiling, TightenPolicy
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.policy import InstrumentRef, Permission, PolicyPatch, Profile
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS
+from guarded_exchange.interface.mcp.server import UseCases
 from tests.e2e.support import server_for
 from tests.fakes import FakeClock, InMemoryDatabase, InMemoryUnitOfWork
 
@@ -94,7 +95,7 @@ async def test_new_user_sees_read_only_with_no_instruments() -> None:
 
 # Anything about the policy itself; trading verbs like set_leverage are not policy changes.
 _POLICY_WORDS = re.compile(
-    r"polic|ceiling|override|allowlist|whitelist|permission|profile|limit|ttl|trust|tighten"
+    r"polic|ceiling|override|allowlist|whitelist|permission|profile|limit|ttl|trust|tighten|reset"
 )
 
 
@@ -114,6 +115,15 @@ async def test_the_registry_has_no_tool_that_changes_the_policy() -> None:
     assert get_my_policy.annotations is not None
     assert get_my_policy.annotations.read_only_hint is True
     assert get_my_policy.input_schema.get("properties", {}) == {}  # nothing to pass, nothing to change
+
+
+@pytest.mark.req("FR-44")
+def test_mcp_tools_cannot_reach_any_policy_changing_use_case() -> None:
+    """The admin reset (ticket 034), the ceiling and tightening are wired to the CLI only."""
+    reachable = set(get_type_hints(UseCases).values())
+
+    assert reachable.isdisjoint({SetCeiling, TightenPolicy, ResetOverrides})
+    assert ReadPolicy in reachable
 
 
 @pytest.mark.req("FR-11", "NFR-1")
