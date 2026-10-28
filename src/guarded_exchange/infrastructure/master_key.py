@@ -46,16 +46,35 @@ class FileMasterKeyStore:
         return True
 
     def create(self) -> None:
-        self._path.parent.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
+        """Write the key atomically: a crash leaves either no key file or a complete one.
+
+        The key goes to a temporary file in the same directory (fsync), is published with
+        ``link()`` - which, unlike ``rename()``, fails if the target exists, so a key is never
+        overwritten - and the directory is fsynced so the new name survives a power loss.
+        """
+        directory = self._path.parent
+        directory.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
         encoded = base64.urlsafe_b64encode(secrets.token_bytes(KEY_BYTES)) + b"\n"
-        # O_EXCL: never overwrite; O_NOFOLLOW: do not write through a planted symlink.
-        fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, FILE_MODE)
+        tmp = directory / f".{self._path.name}.{secrets.token_hex(8)}.tmp"
+        # O_EXCL + O_NOFOLLOW: never reuse or write through something planted at the temp name.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, FILE_MODE)
         try:
-            os.fchmod(fd, FILE_MODE)  # the umask may only have removed bits, but be explicit
-            os.write(fd, encoded)
-            os.fsync(fd)
+            try:
+                os.fchmod(fd, FILE_MODE)  # the umask may only have removed bits, but be explicit
+                os.write(fd, encoded)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            try:
+                os.link(tmp, self._path, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise MasterKeyError(
+                    f"master key {self._path} already exists (or a link was planted there); "
+                    "refusing to overwrite it"
+                ) from exc
         finally:
-            os.close(fd)
+            tmp.unlink(missing_ok=True)
+        _fsync_dir(directory)
 
     def _decode(self, raw: bytes) -> bytes:
         try:
@@ -65,3 +84,11 @@ class FileMasterKeyStore:
         if len(key) != KEY_BYTES:
             raise MasterKeyError(f"master key {self._path} is corrupt (expected {KEY_BYTES} bytes)")
         return key
+
+
+def _fsync_dir(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

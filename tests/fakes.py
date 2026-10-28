@@ -89,7 +89,7 @@ class FakeMasterKeyStore:
 
     def create(self) -> None:
         if self.present:
-            raise FileExistsError("master key exists")
+            raise RuntimeError("master key exists")
         self.present = True
         self.created += 1
 

@@ -25,4 +25,4 @@
 - [ ] E2E: read-only пользователь не видит торговых инструментов в `tools/list` (`cacheScope: private`), а прямой `tools/call` скрытого инструмента получает `permission_denied` (FR-11).
 
 ## Заметки
-—
+- Из 005: `lock_user` на SQLite — no-op (сериализацию даёт `BEGIN IMMEDIATE` write-UoW; вне write-UoW он падает). Значит, на SQLite «блокировка пользователя» = блокировка всей БД на время write-транзакции: держать их короткими, без сетевого I/O (D-10). Ветка Postgres (`FOR UPDATE`) — в 028.

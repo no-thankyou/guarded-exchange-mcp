@@ -6,7 +6,7 @@ An MCP server that gives AI agents guarded access to a crypto exchange (Bybit V5
 
 ## How to run the skeleton
 
-Requirements: [uv](https://docs.astral.sh/uv/) and Python 3.12 (uv installs it if missing).
+Requirements: [uv](https://docs.astral.sh/uv/) and Python 3.12 (uv installs it if missing). Linux or macOS: `init` serialises itself with `fcntl.flock`, so Windows is out of scope (use the Docker image or WSL).
 
 ```bash
 uv sync
@@ -16,7 +16,7 @@ uv run guarded-exchange serve          # MCP over stdio; JSON logs go to stderr
 
 `init` creates (or migrates) the SQLite database, generates a 256-bit master key in a file with mode `0600` in a directory **outside** the database directory, creates the local user (active, test environment) and records both in the append-only journal. Re-running it changes nothing and never replaces the key; if the installation exists but the key file is gone, `init` refuses instead of generating a new one. **Back up the master key**: without it, secrets stored later cannot be decrypted.
 
-`serve` never migrates (several MCP clients may start server processes at once). On start it checks SQLite >= 3.35, that the schema revision is exactly the one this version expects, that the append-only triggers on `audit_log` are in place and that the local user exists and is active; otherwise it exits with code 2 and a reason on stderr, e.g. ``guarded-exchange: cannot start: database not found at ...; run `guarded-exchange init` first``.
+`serve` never migrates (several MCP clients may start server processes at once) and opens the database read-only for its checks. On start it checks SQLite >= 3.35, that the schema revision is exactly the one this version expects, that the append-only triggers on `audit_log` (no UPDATE, no DELETE, no INSERT OR REPLACE over an existing record) are present and exactly as shipped and that the local user exists and is active; otherwise it exits with code 2 and a reason on stderr, e.g. ``guarded-exchange: cannot start: database not found at ...; run `guarded-exchange init` first``.
 
 The server talks to Bybit **Demo Trading** public market data (`https://api-demo.bybit.com`); no API keys are needed for `get_ticker`.
 

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import sqlite3
 import stat
 import subprocess
@@ -17,11 +18,10 @@ from guarded_exchange.infrastructure.db.migrate import (
     StorageNotReady,
     check_sqlite_version,
     check_storage,
+    head_revision,
     upgrade_to_head,
 )
 from tests.integration.conftest import BUSY_TIMEOUT_MS, make_settings
-
-pytestmark = pytest.mark.req("NFR-1")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -96,6 +96,7 @@ def test_second_init_is_idempotent_and_keeps_the_key(tmp_path: Path) -> None:
     assert _rows(settings.db_path, "SELECT count(*) FROM audit_log") == [(2,)]
 
 
+@pytest.mark.req("NFR-1")
 def test_init_refuses_to_replace_a_lost_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     settings = make_settings(tmp_path)
     bootstrap.run_init(settings)
@@ -115,7 +116,7 @@ def test_init_upgrades_an_older_schema(tmp_path: Path) -> None:
 
     report = bootstrap.run_init(settings)
 
-    assert report.schema_revision == "0002"
+    assert report.schema_revision == head_revision()
 
 
 def test_init_command_in_a_real_process(tmp_path: Path) -> None:
@@ -178,37 +179,69 @@ def _without_update_trigger(settings: Settings) -> None:
     _drop_trigger(settings.db_path, "audit_log_no_update")
 
 
-def _with_neutered_delete_trigger(settings: Settings) -> None:
+def _replace_trigger(settings: Settings, name: str, sql: str) -> None:
     bootstrap.run_init(settings)
-    _drop_trigger(settings.db_path, "audit_log_no_delete")
+    _drop_trigger(settings.db_path, name)
     conn = sqlite3.connect(settings.db_path)
-    conn.execute(
-        "CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log WHEN 0 "
-        "BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END"
-    )
+    conn.execute(sql)
     conn.commit()
     conn.close()
+
+
+def _with_when_0_delete_trigger(settings: Settings) -> None:
+    _replace_trigger(
+        settings,
+        "audit_log_no_delete",
+        "CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log WHEN 0 "
+        "BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END",
+    )
+
+
+def _with_where_0_update_trigger(settings: Settings) -> None:
+    _replace_trigger(
+        settings,
+        "audit_log_no_update",
+        "CREATE TRIGGER audit_log_no_update BEFORE UPDATE ON audit_log "
+        "BEGIN SELECT RAISE(ABORT, 'audit_log is append-only') WHERE 0; END",
+    )
+
+
+def _without_replace_trigger(settings: Settings) -> None:
+    bootstrap.run_init(settings)
+    _drop_trigger(settings.db_path, "audit_log_no_replace")
+
+
+def _corrupt_file(settings: Settings) -> None:
+    settings.db_path.parent.mkdir(parents=True)
+    settings.db_path.write_bytes(b"this is not an SQLite database, just some bytes " * 100)
 
 
 BROKEN_STATES = [
     pytest.param(_no_database, "database not found", id="no-database"),
     pytest.param(_empty_database, "schema is not initialised", id="no-migrations"),
-    pytest.param(_older_revision, "at revision '0001', this version needs '0002'", id="older-revision"),
+    pytest.param(_older_revision, "at revision '0001', this version needs", id="older-revision"),
     pytest.param(_unknown_revision, "revision '9999' is unknown", id="newer-revision"),
-    pytest.param(_without_update_trigger, "audit_log BEFORE UPDATE", id="no-update-trigger"),
-    pytest.param(_with_neutered_delete_trigger, "audit_log BEFORE DELETE", id="neutered-trigger"),
+    pytest.param(_without_update_trigger, "missing or altered (audit_log_no_update)", id="no-update-trigger"),
+    pytest.param(
+        _without_replace_trigger, "missing or altered (audit_log_no_replace)", id="no-replace-trigger"
+    ),
+    pytest.param(_with_when_0_delete_trigger, "altered (audit_log_no_delete)", id="when-0-trigger"),
+    pytest.param(_with_where_0_update_trigger, "altered (audit_log_no_update)", id="where-0-trigger"),
+    pytest.param(_corrupt_file, "cannot use the database", id="corrupt-file"),
 ]
 
 
+@pytest.mark.req("NFR-1")
 @pytest.mark.parametrize(("break_storage", "reason"), BROKEN_STATES)
 def test_storage_check_explains_why_it_refuses(tmp_path: Path, break_storage: object, reason: str) -> None:
     settings = make_settings(tmp_path)
     break_storage(settings)  # type: ignore[operator]
 
-    with pytest.raises(StorageNotReady, match=reason.replace("(", r"\(")):
+    with pytest.raises(StorageNotReady, match=re.escape(reason)):
         check_storage(settings.db_path, busy_timeout_ms=BUSY_TIMEOUT_MS)
 
 
+@pytest.mark.req("NFR-1", "FR-37")
 @pytest.mark.parametrize(("break_storage", "reason"), BROKEN_STATES)
 def test_server_does_not_start_and_says_why(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], break_storage: object, reason: str
@@ -220,11 +253,14 @@ def test_server_does_not_start_and_says_why(
         bootstrap.serve("stdio", _env_file(tmp_path, settings))
 
     assert exit_info.value.code == 2
-    err = capsys.readouterr().err
+    out, err = capsys.readouterr()
+    assert out == ""  # stdout belongs to the MCP protocol
     assert "guarded-exchange: cannot start:" in err
     assert reason in err
+    assert "Traceback" not in err
 
 
+@pytest.mark.req("NFR-1")
 def test_server_check_never_creates_or_migrates_the_database(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     _older_revision(settings)
@@ -238,6 +274,55 @@ def test_server_check_never_creates_or_migrates_the_database(tmp_path: Path) -> 
     assert not (tmp_path / "missing.db").exists()
 
 
+@pytest.mark.req("NFR-1")
+def test_server_check_does_not_write_to_an_empty_file(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    _empty_database(settings)
+
+    with pytest.raises(StorageNotReady, match="not initialised"):
+        check_storage(settings.db_path, busy_timeout_ms=BUSY_TIMEOUT_MS)
+
+    assert settings.db_path.stat().st_size == 0
+    assert sorted(p.name for p in settings.db_path.parent.iterdir()) == ["gx.db"]  # no -wal/-shm
+
+
+@pytest.mark.req("NFR-1")
+def test_server_check_reads_an_initialised_database_without_changing_it(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    bootstrap.run_init(settings)
+    before = settings.db_path.read_bytes()
+
+    assert check_storage(settings.db_path, busy_timeout_ms=BUSY_TIMEOUT_MS) == head_revision()
+    assert settings.db_path.read_bytes() == before
+
+
+@pytest.mark.req("NFR-1")
+@pytest.mark.parametrize(
+    ("break_storage", "reason"),
+    [
+        pytest.param(_corrupt_file, "cannot use the database", id="corrupt-file"),
+        pytest.param(_unknown_revision, "revision '9999' is unknown", id="newer-revision"),
+    ],
+)
+def test_init_refuses_a_database_it_cannot_use_and_leaves_it_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], break_storage: object, reason: str
+) -> None:
+    settings = make_settings(tmp_path)
+    break_storage(settings)  # type: ignore[operator]
+    before = settings.db_path.read_bytes()
+
+    with pytest.raises(SystemExit) as exit_info:
+        bootstrap.init(_env_file(tmp_path, settings))
+
+    assert exit_info.value.code == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "guarded-exchange: init failed:" in err
+    assert reason in err
+    assert settings.db_path.read_bytes() == before
+
+
+@pytest.mark.req("NFR-1")
 def test_server_without_its_local_user_does_not_start(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -253,6 +338,7 @@ def test_server_without_its_local_user_does_not_start(
     assert "local user 'alice' does not exist" in capsys.readouterr().err
 
 
+@pytest.mark.req("NFR-1")
 def test_server_refuses_in_a_real_process_without_touching_stdout(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
 
@@ -272,12 +358,14 @@ def test_server_refuses_in_a_real_process_without_touching_stdout(tmp_path: Path
     assert "guarded-exchange init" in result.stderr
 
 
+@pytest.mark.req("NFR-1")
 @pytest.mark.parametrize("version", [(3, 34, 1), (2, 99, 99)])
 def test_too_old_sqlite_is_refused(version: tuple[int, int, int]) -> None:
     with pytest.raises(StorageNotReady, match=r"3\.35\.0 or newer"):
         check_sqlite_version(version)
 
 
+@pytest.mark.req("NFR-1")
 def test_current_sqlite_is_accepted() -> None:
     check_sqlite_version()
     check_sqlite_version((3, 35, 0))
@@ -294,6 +382,11 @@ def test_current_sqlite_is_accepted() -> None:
         "UPDATE audit_log SET payload = '{}' WHERE seq = 1",
         "DELETE FROM audit_log WHERE seq = 2",
         "DELETE FROM audit_log",
+        # REPLACE deletes the old row without firing DELETE triggers (recursive_triggers off).
+        "INSERT OR REPLACE INTO audit_log (chain_id, seq, ts, event_type, actor, payload) "
+        "VALUES ('system', 1, 0, 'forged', 'attacker', '{}')",
+        "REPLACE INTO audit_log (chain_id, seq, ts, event_type, actor, payload) "
+        "VALUES ('system', 2, 0, 'forged', 'attacker', '{}')",
     ],
 )
 def test_update_or_delete_of_the_journal_is_rejected_by_the_database(tmp_path: Path, statement: str) -> None:

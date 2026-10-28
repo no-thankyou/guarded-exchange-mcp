@@ -7,15 +7,15 @@ from guarded_exchange.domain.audit import AuditRecord, canonical_decimal, canoni
 from guarded_exchange.domain.errors import InvalidParams
 from guarded_exchange.domain.users import Environment, UserStatus, new_user, validate_user_name
 
-pytestmark = pytest.mark.req("FR-36")
 
-
+@pytest.mark.req("FR-36")
 def test_canonical_json_is_sorted_compact_and_utf8() -> None:
     text = canonical_json({"b": 1, "a": {"y": [True, None], "x": "привет"}})
 
     assert text == '{"a":{"x":"привет","y":[true,null]},"b":1}'
 
 
+@pytest.mark.req("FR-36")
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -32,6 +32,7 @@ def test_decimal_is_written_without_exponent_or_trailing_zeros(value: Decimal, e
     assert canonical_json({"v": value}) == f'{{"v":"{expected}"}}'
 
 
+@pytest.mark.req("FR-36")
 def test_datetime_becomes_utc_iso_with_milliseconds() -> None:
     moscow = timezone(timedelta(hours=3))
 
@@ -40,6 +41,7 @@ def test_datetime_becomes_utc_iso_with_milliseconds() -> None:
     assert text == '{"at":"2026-10-27T12:00:00.005Z"}'
 
 
+@pytest.mark.req("FR-36")
 @pytest.mark.parametrize(
     ("payload", "error"),
     [
@@ -57,6 +59,7 @@ def test_values_without_a_single_canonical_text_are_rejected(payload: dict[str, 
         canonical_json(payload)  # type: ignore[arg-type]
 
 
+@pytest.mark.req("FR-37")
 def test_audit_record_payload_is_read_only() -> None:
     record = AuditRecord("system", 1, datetime(2026, 1, 1, tzinfo=UTC), "x", "cli", {"a": 1})
 

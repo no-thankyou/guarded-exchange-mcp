@@ -6,9 +6,11 @@ for another writer) instead of being upgraded on the first write, which in WAL m
 with ``database is locked`` without waiting when another process committed in between.
 """
 
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
@@ -23,10 +25,17 @@ def create_sqlite_async_engine(db_path: Path, *, busy_timeout_ms: int) -> AsyncE
     return engine
 
 
-def create_sqlite_sync_engine(db_path: Path, *, busy_timeout_ms: int) -> Engine:
-    """Sync engine (stdlib ``sqlite3``) for migrations and start-up checks."""
-    engine = create_engine(f"sqlite:///{db_path}")
-    configure_sqlite(engine, busy_timeout_ms=busy_timeout_ms)
+def create_sqlite_sync_engine(db_path: Path, *, busy_timeout_ms: int, read_only: bool = False) -> Engine:
+    """Sync engine (stdlib ``sqlite3``) for migrations and, with ``read_only``, start-up checks.
+
+    Read-only opens the file with ``mode=ro``: the check can neither create nor modify it.
+    """
+    if read_only:
+        uri = f"file:{quote(str(db_path.resolve()))}?mode=ro"
+        engine = create_engine("sqlite://", creator=lambda: sqlite3.connect(uri, uri=True))
+    else:
+        engine = create_engine(f"sqlite:///{db_path}")
+    configure_sqlite(engine, busy_timeout_ms=busy_timeout_ms, read_only=read_only)
     return engine
 
 

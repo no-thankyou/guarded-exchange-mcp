@@ -8,9 +8,8 @@ import pytest
 from guarded_exchange.application.ports import MasterKeyStore
 from guarded_exchange.infrastructure.master_key import FileMasterKeyStore, MasterKeyError
 
-pytestmark = pytest.mark.req("NFR-1")
 
-
+@pytest.mark.req("NFR-1")
 def test_create_writes_32_random_bytes_with_mode_0600_in_a_private_directory(tmp_path: Path) -> None:
     path = tmp_path / "conf" / "master.key"
     store: MasterKeyStore = FileMasterKeyStore(path)
@@ -36,10 +35,11 @@ def test_create_never_overwrites(tmp_path: Path) -> None:
     store.create()
     before = (tmp_path / "master.key").read_bytes()
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(MasterKeyError, match="refusing to overwrite"):
         store.create()
 
     assert (tmp_path / "master.key").read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["master.key"]  # no temp file left
 
 
 def test_create_does_not_follow_a_planted_symlink(tmp_path: Path) -> None:
@@ -47,11 +47,13 @@ def test_create_does_not_follow_a_planted_symlink(tmp_path: Path) -> None:
     link = tmp_path / "master.key"
     link.symlink_to(target)
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(MasterKeyError):
         FileMasterKeyStore(link).create()
     assert not target.exists()
+    assert link.is_symlink()
 
 
+@pytest.mark.req("NFR-1")
 def test_key_readable_by_others_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "master.key"
     FileMasterKeyStore(path).create()
@@ -61,6 +63,7 @@ def test_key_readable_by_others_is_refused(tmp_path: Path) -> None:
         FileMasterKeyStore(path).exists()
 
 
+@pytest.mark.req("NFR-1")
 def test_symlink_key_is_refused(tmp_path: Path) -> None:
     real = tmp_path / "real.key"
     FileMasterKeyStore(real).create()
@@ -71,6 +74,7 @@ def test_symlink_key_is_refused(tmp_path: Path) -> None:
         FileMasterKeyStore(link).exists()
 
 
+@pytest.mark.req("NFR-1")
 @pytest.mark.parametrize("content", [b"", b"not base64 !!!", base64.urlsafe_b64encode(b"short")])
 def test_corrupt_key_is_refused(tmp_path: Path, content: bytes) -> None:
     path = tmp_path / "master.key"
@@ -79,3 +83,26 @@ def test_corrupt_key_is_refused(tmp_path: Path, content: bytes) -> None:
 
     with pytest.raises(MasterKeyError, match="corrupt"):
         FileMasterKeyStore(path).exists()
+
+
+def test_create_leaves_only_the_complete_key_and_no_temp_files(tmp_path: Path) -> None:
+    path = tmp_path / "conf" / "master.key"
+
+    FileMasterKeyStore(path).create()
+
+    assert [p.name for p in path.parent.iterdir()] == ["master.key"]
+    assert path.stat().st_nlink == 1  # the temporary name was removed after link()
+
+
+def test_failed_write_leaves_no_key_and_no_temp_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "master.key"
+
+    def broken_fsync(fd: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "fsync", broken_fsync)
+
+    with pytest.raises(OSError, match="disk full"):
+        FileMasterKeyStore(path).create()
+
+    assert list(tmp_path.iterdir()) == []

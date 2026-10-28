@@ -13,8 +13,6 @@ from guarded_exchange.domain.errors import InvalidParams
 from guarded_exchange.domain.users import Environment, UserStatus
 from tests.fakes import FakeClock, FakeMasterKeyStore, InMemoryDatabase, ReadOnlyViolation, SequentialIds
 
-pytestmark = pytest.mark.req("FR-36", "FR-45", "NFR-1")
-
 
 def _init(
     db: InMemoryDatabase, clock: FakeClock, key: FakeMasterKeyStore, ids: SequentialIds | None = None
@@ -27,6 +25,7 @@ def _init(
     return InitializeInstallation(uow, clock_port, ids_port, key_port)
 
 
+@pytest.mark.req("FR-36", "FR-45")
 async def test_first_init_creates_key_user_and_journal_in_one_write_transaction() -> None:
     db, clock, key = InMemoryDatabase(), FakeClock(), FakeMasterKeyStore()
 
@@ -81,6 +80,7 @@ async def test_existing_key_is_reused_on_first_init() -> None:
     assert db.state.audit[SYSTEM_CHAIN][0].payload["master_key_created"] is False
 
 
+@pytest.mark.req("NFR-1")
 async def test_lost_key_of_an_initialised_installation_is_never_regenerated() -> None:
     db, clock, key = InMemoryDatabase(), FakeClock(), FakeMasterKeyStore()
     await _init(db, clock, key)("local")
@@ -93,6 +93,7 @@ async def test_lost_key_of_an_initialised_installation_is_never_regenerated() ->
     assert len(db.all_audit()) == 2
 
 
+@pytest.mark.req("FR-36")
 async def test_another_local_user_name_on_an_initialised_installation_adds_only_that_user() -> None:
     db, clock, key, ids = InMemoryDatabase(), FakeClock(), FakeMasterKeyStore(), SequentialIds()
     await _init(db, clock, key, ids)("local")
@@ -142,11 +143,13 @@ async def test_local_principal_is_the_configured_user() -> None:
     assert db.transactions[-1] is False  # read unit of work
 
 
+@pytest.mark.req("NFR-1")
 async def test_missing_local_user_fails_closed() -> None:
     with pytest.raises(PrincipalUnavailable, match="guarded-exchange init"):
         await ResolveLocalPrincipal(InMemoryDatabase())("local")
 
 
+@pytest.mark.req("NFR-1")
 async def test_revoked_local_user_fails_closed() -> None:
     db = InMemoryDatabase()
     created = await _init(db, FakeClock(), FakeMasterKeyStore())("local")

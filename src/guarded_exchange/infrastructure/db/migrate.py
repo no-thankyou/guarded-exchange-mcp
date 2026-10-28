@@ -7,7 +7,6 @@ start otherwise (fail closed).
 """
 
 import fcntl
-import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -18,15 +17,14 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, text
+from sqlalchemy.exc import DatabaseError
 
 from guarded_exchange.infrastructure.db.dialect import WRITE_OPTION
+from guarded_exchange.infrastructure.db.triggers import APPEND_ONLY_TRIGGERS, normalize_sql
 from guarded_exchange.infrastructure.db.uow import create_sqlite_sync_engine
 
 MIN_SQLITE_VERSION: Final = (3, 35, 0)  # INSERT/UPDATE ... RETURNING
 SCRIPT_LOCATION: Final = "guarded_exchange.infrastructure.db:migrations"
-
-# Each append-only table needs a trigger per event that unconditionally aborts the statement.
-_APPEND_ONLY: Final = {"audit_log": ("UPDATE", "DELETE")}
 
 
 class StorageNotReady(Exception):
@@ -73,6 +71,7 @@ def upgrade_to_head(db_path: Path, *, busy_timeout_ms: int, revision: str = "hea
     """Create or upgrade the database to ``revision`` (``head`` in production); return it.
 
     Call under ``install_lock``. All migration steps run in one ``BEGIN IMMEDIATE`` transaction.
+    A database at a revision this version does not know (a newer release) is never touched.
     """
     check_sqlite_version()
     db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -80,11 +79,14 @@ def upgrade_to_head(db_path: Path, *, busy_timeout_ms: int, revision: str = "hea
         db_path.touch(mode=0o600)  # SQLite gives -wal/-shm the same mode as the database
     engine = create_sqlite_sync_engine(db_path, busy_timeout_ms=busy_timeout_ms)
     try:
-        with engine.connect() as raw_connection:
+        with _storage_errors(db_path), engine.connect() as raw_connection:
             connection = raw_connection.execution_options(**{WRITE_OPTION: True})
             config = _alembic_config()
             config.attributes["connection"] = connection
             with connection.begin():  # alembic joins this transaction; we commit it
+                before = _current_revision(connection)
+                if before is not None and before not in _known_revisions():
+                    raise StorageNotReady(_unknown_revision_message(before))
                 command.upgrade(config, revision)
                 current = _current_revision(connection)
     finally:
@@ -93,13 +95,16 @@ def upgrade_to_head(db_path: Path, *, busy_timeout_ms: int, revision: str = "hea
 
 
 def check_storage(db_path: Path, *, busy_timeout_ms: int) -> str:
-    """Raise ``StorageNotReady`` unless the database is usable by this version; return the revision."""
+    """Raise ``StorageNotReady`` unless the database is usable by this version; return the revision.
+
+    Opens the file read-only: the check never creates, migrates or otherwise writes to it.
+    """
     check_sqlite_version()
     if not db_path.is_file():
         raise StorageNotReady(f"database not found at {db_path}; run `guarded-exchange init` first")
-    engine = create_sqlite_sync_engine(db_path, busy_timeout_ms=busy_timeout_ms)
+    engine = create_sqlite_sync_engine(db_path, busy_timeout_ms=busy_timeout_ms, read_only=True)
     try:
-        with engine.connect() as connection:
+        with _storage_errors(db_path), engine.connect() as connection:
             revision = _current_revision(connection)
             _check_revision(revision)
             _check_append_only_triggers(connection)
@@ -107,6 +112,19 @@ def check_storage(db_path: Path, *, busy_timeout_ms: int) -> str:
     finally:
         engine.dispose()
     return revision or ""
+
+
+@contextmanager
+def _storage_errors(db_path: Path) -> Iterator[None]:
+    """A corrupt, foreign or unreadable file becomes a clear refusal instead of a traceback."""
+    try:
+        yield
+    except DatabaseError as exc:
+        reason = str(exc.orig) if exc.orig is not None else type(exc).__name__
+        raise StorageNotReady(
+            f"cannot use the database at {db_path}: {reason}. It may be corrupt or not a "
+            "guarded-exchange database; restore it from backup or point GX_DB_PATH elsewhere"
+        ) from exc
 
 
 def _current_revision(connection: Connection) -> str | None:
@@ -121,18 +139,25 @@ def _current_revision(connection: Connection) -> str | None:
     return heads[0] if heads else None
 
 
+def _known_revisions() -> set[str]:
+    return {script.revision for script in ScriptDirectory.from_config(_alembic_config()).walk_revisions()}
+
+
+def _unknown_revision_message(revision: str) -> str:
+    return (
+        f"database schema revision {revision!r} is unknown to this version (expected {head_revision()!r}); "
+        "it was probably created by a newer guarded-exchange - upgrade the server"
+    )
+
+
 def _check_revision(revision: str | None) -> None:
     head = head_revision()
     if revision is None:
         raise StorageNotReady("database schema is not initialised; run `guarded-exchange init`")
     if revision == head:
         return
-    known = {script.revision for script in ScriptDirectory.from_config(_alembic_config()).walk_revisions()}
-    if revision not in known:
-        raise StorageNotReady(
-            f"database schema revision {revision!r} is unknown to this version (expected {head!r}); "
-            "it was probably created by a newer guarded-exchange - upgrade the server"
-        )
+    if revision not in _known_revisions():
+        raise StorageNotReady(_unknown_revision_message(revision))
     raise StorageNotReady(
         f"database schema is at revision {revision!r}, this version needs {head!r}; "
         "run `guarded-exchange init` to migrate"
@@ -140,22 +165,15 @@ def _check_revision(revision: str | None) -> None:
 
 
 def _check_append_only_triggers(connection: Connection) -> None:
-    rows = connection.execute(text("SELECT tbl_name, sql FROM sqlite_master WHERE type = 'trigger'")).all()
-    missing: list[str] = []
-    for table, events in _APPEND_ONLY.items():
-        bodies = [_normalize_sql(sql) for tbl, sql in rows if tbl == table and sql]
-        for event in events:
-            pattern = re.compile(
-                rf"BEFORE {event} ON \"?{table.upper()}\"?( FOR EACH ROW)? BEGIN SELECT RAISE\(ABORT,"
-            )
-            if not any(pattern.search(body) for body in bodies):
-                missing.append(f"{table} BEFORE {event}")
-    if missing:
+    rows = connection.execute(
+        text("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'")
+    ).all()
+    actual = {name: normalize_sql(sql or "") for name, sql in rows}
+    bad = [
+        name for name, expected in APPEND_ONLY_TRIGGERS.items() if actual.get(name) != normalize_sql(expected)
+    ]
+    if bad:
         raise StorageNotReady(
-            "append-only triggers are missing or altered (" + ", ".join(missing) + "); the journal "
-            "is not protected, refusing to start (FR-37). Restore the database from backup."
+            "append-only triggers on audit_log are missing or altered (" + ", ".join(bad) + "); the "
+            "journal is not protected, refusing to start (FR-37). Restore the database from backup."
         )
-
-
-def _normalize_sql(sql: str) -> str:
-    return re.sub(r"\s+", " ", sql.upper()).replace("( ", "(")

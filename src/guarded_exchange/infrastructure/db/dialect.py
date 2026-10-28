@@ -72,8 +72,12 @@ class EpochMillis(TypeDecorator[datetime]):
         return None if value is None else _EPOCH + value * _MS
 
 
-def configure_sqlite(engine: Engine, *, busy_timeout_ms: int) -> None:
-    """Install connection pragmas and explicit BEGIN handling on a (sync or async's sync) engine."""
+def configure_sqlite(engine: Engine, *, busy_timeout_ms: int, read_only: bool = False) -> None:
+    """Install connection pragmas and explicit BEGIN handling on a (sync or async's sync) engine.
+
+    ``read_only`` skips the pragmas that write to the database file (``journal_mode = WAL``),
+    for connections opened with ``mode=ro`` by the start-up check.
+    """
 
     @event.listens_for(engine, "connect")
     def _on_connect(dbapi_connection: Any, _record: Any) -> None:
@@ -82,9 +86,13 @@ def configure_sqlite(engine: Engine, *, busy_timeout_ms: int) -> None:
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")  # first: others may wait
-            cursor.execute("PRAGMA journal_mode = WAL")
-            cursor.execute("PRAGMA synchronous = NORMAL")
+            if not read_only:
+                cursor.execute("PRAGMA journal_mode = WAL")
+                cursor.execute("PRAGMA synchronous = NORMAL")
             cursor.execute("PRAGMA foreign_keys = ON")
+            # INSERT OR REPLACE deletes the conflicting row without firing DELETE triggers
+            # unless recursive triggers are on (the BEFORE INSERT trigger is the other guard).
+            cursor.execute("PRAGMA recursive_triggers = ON")
         finally:
             cursor.close()
 

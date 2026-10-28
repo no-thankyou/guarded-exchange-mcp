@@ -1,7 +1,8 @@
 """Table definitions used by repositories (SQLAlchemy Core, no ORM).
 
 Migrations in ``migrations/versions`` are written by hand and frozen; this module describes the
-current head and must stay in sync with them (``tests/integration/test_storage.py`` compares).
+current head and must stay in sync with them
+(``tests/integration/test_sqlite_storage.py::test_schema_module_matches_the_migrations`` compares).
 """
 
 from sqlalchemy import (

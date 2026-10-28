@@ -75,7 +75,7 @@ class MasterKeyStore(Protocol):
         ...
 
     def create(self) -> None:
-        """Generate and persist a new key. Never overwrites an existing one (raises)."""
+        """Generate and persist a new key atomically. Never overwrites an existing one (raises)."""
         ...
 
 

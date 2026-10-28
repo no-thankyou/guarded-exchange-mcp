@@ -8,12 +8,11 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.req("NFR-2")
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PER_PROCESS = 40
 
 
+@pytest.mark.req("NFR-2")
 def test_two_processes_writing_concurrently_never_hit_database_is_locked(
     db_path: Path, tmp_path: Path
 ) -> None:

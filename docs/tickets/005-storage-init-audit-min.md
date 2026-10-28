@@ -39,6 +39,16 @@
 - **Principal:** `serve` резолвит локального пользователя до старта MCP и пишет `principal_resolved` в лог; в инструменты он пока не передаётся (нет инструментов, которым он нужен; `interface/mcp` не трогали из-за параллельного спайка 002). Передача principal в `UseCases`/контекст — в 006/008.
 - **E2E stdio** теперь сначала делает `run_init` во временном каталоге и проверяет `principal_resolved` в stderr.
 
+Ревью, раунд 1 (CHANGES_REQUESTED, закрыто 2026-10-28):
+- M1. `INSERT OR REPLACE`/`REPLACE INTO` переписывали запись журнала (DELETE-триггер при REPLACE не срабатывает без `recursive_triggers`). Миграция **0003**: `BEFORE INSERT ... WHEN EXISTS(... chain_id, seq) → RAISE`; `PRAGMA recursive_triggers=ON` в `configure_sqlite`; триггер входит в проверку при старте; оба случая — в параметризации FR-37-теста (атакующее соединение — сырой `sqlite3` без pragma).
+- m1. Проверка триггеров — точное сравнение нормализованного (регистр, пробелы) SQL по имени с константами `infrastructure/db/triggers.py`; ловит `WHEN 0`, `WHERE 0` в теле, отсутствие. Отличие от предложения: миграции **не импортируют** константы, а хранят замороженную копию SQL (миграция не должна меняться вместе с кодом приложения); совпадение доказывает интеграционный тест (свежая БД проходит проверку).
+- m2. `DatabaseError` (битый/чужой файл) в `check_storage` и `upgrade_to_head` → `StorageNotReady` с причиной; `upgrade_to_head` до `command.upgrade` отказывает на неизвестной ревизии и файл не трогает. `serve` → exit 2, `init` → exit 1 (как остальные ошибки init); stdout пуст, без трейсбека — тесты.
+- m3. Проверка при старте открывает файл `file:...?mode=ro` (uri) без WAL/synchronous pragma; тесты: 0-байтный файл не меняется и `-wal/-shm` не появляются, инициализированная БД побайтно не меняется.
+- m4. Master key: tmp-файл в том же каталоге (O_EXCL|O_NOFOLLOW, 0600) + fsync → `os.link` → unlink tmp → fsync каталога; `FileExistsError` → `MasterKeyError`; тесты на отсутствие tmp-файлов и на сбой записи.
+- m5. Проверка master key в `serve` перенесена в scope и AC тикета 007.
+- m6, m7. Ссылка в `schema.py` исправлена; module-level `pytestmark` с `req` убраны в тестах тикета, маркеры на конкретных тестах, `docs/traceability.md` пересобран.
+- README: Windows вне scope (flock). В заметки 006/008 — `lock_user` на SQLite no-op.
+
 Предложения (вне scope):
 - Хранить в БД отпечаток master key (например, HMAC от константы подключом) и сверять при старте — поймает подмену/путаницу ключа раньше, чем 007 попытается расшифровать.
 - `doctor` (032) может переиспользовать `check_storage` и проверку прав на файл ключа.

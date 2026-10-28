@@ -26,8 +26,6 @@ from guarded_exchange.infrastructure.db.uow import (
 from tests.fakes import FakeClock
 from tests.integration.conftest import BUSY_TIMEOUT_MS
 
-pytestmark = pytest.mark.req("FR-37", "NFR-2")
-
 AT = datetime(2026, 10, 27, 18, 53, 43, 449000, tzinfo=UTC)
 
 
@@ -62,6 +60,7 @@ async def test_duplicate_user_name_is_rejected_by_the_database(uow: SqlUnitOfWor
             await tx.users.add(new_user("u-2", "local", AT))
 
 
+@pytest.mark.req("FR-36")
 async def test_audit_append_numbers_each_chain_from_one_and_lists_in_order(uow: SqlUnitOfWorkFactory) -> None:
     async with uow(write=True) as tx:
         first = await tx.audit.append(SYSTEM_CHAIN, AuditEvent("a", "cli", {"price": Decimal("0.10")}), AT)
@@ -82,6 +81,7 @@ async def test_audit_append_numbers_each_chain_from_one_and_lists_in_order(uow: 
     assert system[0].ts == AT
 
 
+@pytest.mark.req("FR-36")
 async def test_rolled_back_unit_of_work_leaves_no_trace(uow: SqlUnitOfWorkFactory) -> None:
     async def write_then_fail() -> None:
         async with uow(write=True) as tx:
@@ -153,12 +153,24 @@ def test_connection_pragmas(db_path: Path) -> None:
         with engine.connect() as conn:
             values = {
                 name: conn.exec_driver_sql(f"PRAGMA {name}").scalar()
-                for name in ("journal_mode", "busy_timeout", "foreign_keys", "synchronous")
+                for name in (
+                    "journal_mode",
+                    "busy_timeout",
+                    "foreign_keys",
+                    "synchronous",
+                    "recursive_triggers",
+                )
             }
     finally:
         engine.dispose()
 
-    assert values == {"journal_mode": "wal", "busy_timeout": 1234, "foreign_keys": 1, "synchronous": 1}
+    assert values == {
+        "journal_mode": "wal",
+        "busy_timeout": 1234,
+        "foreign_keys": 1,
+        "synchronous": 1,
+        "recursive_triggers": 1,
+    }
 
 
 async def test_write_unit_of_work_takes_the_write_lock_at_begin(
