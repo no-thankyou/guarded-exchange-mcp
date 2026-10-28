@@ -30,4 +30,5 @@
 - [ ] Unit: `bybit_base_url` вне allowlist или по http без тестового флага → `ConfigError` (exit 2); известные хосты Bybit принимаются; с тестовым флагом loopback-адрес разрешён.
 
 ## Заметки
-—
+- **Открытый вопрос из спайка 004 (2026-10-28), решить до начала:** текущий demo-ключ пользователя имеет права вне allowlist D-24 — `Wallet.AccountTransfer`, `Wallet.SubMemberTransferList` (переводы), `Options.OptionsTrade`, `Derivatives.DerivativesTrade`, `Exchange.ExchangeHistory` (Convert) — и будет отклонён. Семантика и варианты — PLAN «Спайк 004»: (а) основной — пересоздать ключ только с Contract Order/Position + Spot Trade и проверить `uv run python spikes/004/bybit_demo_probe.py --verify-key ~/.config/guarded-exchange/bybit-demo.env`; (б) `admin_attested` для demo — только с правкой FR-49 (тезис «переводы на demo двигают только демо-средства» не проверен). Открыто: нужен ли `DerivativesTrade` для linear на UTA; если да — добавление в allowlist D-24 решает пользователь.
+- Из спайка 004: ответ `query-api` содержит поля `apiKey` и `secret` — не логировать и не хранить; пустая группа прав (`[]`) = нет прав; фикстура `tests/fixtures/bybit/spike004/demo_query_api.json`.

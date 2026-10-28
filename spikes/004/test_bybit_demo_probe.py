@@ -7,6 +7,7 @@ sends, cannot leave the demo/testnet allowlist, and never writes key material. R
 
 import hashlib
 import hmac
+import itertools
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -258,8 +259,16 @@ def test_flush_numbers_runs_and_keeps_history(tmp_path: Path) -> None:
 class FakeDemo:
     """Just enough of Bybit demo for ``verify_key``: query-api, instruments, ticker, create/cancel/read."""
 
-    def __init__(self, permissions: dict[str, list[str]]) -> None:
+    def __init__(
+        self,
+        permissions: dict[str, list[str]],
+        *,
+        create_times_out: bool = False,
+        cancel_fails: bool = False,
+    ) -> None:
         self.permissions = permissions
+        self.create_times_out = create_times_out  # order is placed, then the client sees a timeout
+        self.cancel_fails = cancel_fails
         self.orders: dict[str, dict[str, Any]] = {}
         self.paths: list[str] = []
 
@@ -284,7 +293,11 @@ class FakeDemo:
             result = {"list": [{"bid1Price": "80000", "ask1Price": "80000.1"}]}
         elif path == "/v5/order/create":
             self.orders[body["orderLinkId"]] = {"orderLinkId": body["orderLinkId"], "orderStatus": "New"}
+            if self.create_times_out:
+                raise httpx2.ReadTimeout("simulated", request=request)
         elif path == "/v5/order/cancel":
+            if self.cancel_fails:
+                return httpx2.Response(200, json={"retCode": 10016, "retMsg": "Server error", "result": {}})
             self.orders[body["orderLinkId"]]["orderStatus"] = "Cancelled"
         elif path in {"/v5/order/realtime", "/v5/order/history"}:
             found = self.orders.get(params["orderLinkId"])
@@ -322,3 +335,35 @@ def test_verify_key_rejects_a_key_with_transfer_rights(
     code, verdict = _verify(fake, capsys)
     assert code == 1
     assert verdict["passes_d24"] is False
+
+
+def test_verify_key_cancels_an_order_whose_create_timed_out(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    fake = FakeDemo({"ContractTrade": ["Order", "Position"], "Spot": ["SpotTrade"]}, create_times_out=True)
+    code, verdict = _verify(fake, capsys)
+    assert len(fake.orders) == 2
+    assert all(o["orderStatus"] == "Cancelled" for o in fake.orders.values())
+    assert verdict["orders"]["linear"]["create"] == "unknown (ReadTimeout)"
+    assert verdict["orders"]["linear"]["cancelled"] is True
+    assert verdict["trades"] is False  # an unknown create is not proof that the key trades
+    assert code == 1
+
+
+def test_verify_key_fails_loudly_when_cancel_does_not_happen(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    monkeypatch.setattr("time.monotonic", itertools.count(0, 10).__next__)  # poll gives up fast
+    fake = FakeDemo({"ContractTrade": ["Order", "Position"], "Spot": ["SpotTrade"]}, cancel_fails=True)
+    client = BybitProbeClient(
+        "demo", Credentials(KEY, SECRET), httpx2.Client(transport=httpx2.MockTransport(fake))
+    )
+    code = verify_key(Probe(client, Recorder.quiet((KEY, SECRET))))
+    captured = capsys.readouterr()
+    assert code == 3
+    for link in fake.orders:
+        assert "BTCUSDT/" in captured.err
+        assert link in captured.err
+    assert "cancel it manually" in captured.err

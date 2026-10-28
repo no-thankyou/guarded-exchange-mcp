@@ -850,6 +850,68 @@ def testnet_check(creds: Credentials | None, http: httpx2.Client, rec: Recorder)
         rec.record(name, client, "GET", path, params, reply=client.call("GET", path, params))
 
 
+OPEN_STATUSES = frozenset({"New", "PartiallyFilled", "Untriggered"})
+
+
+def is_open(order: dict[str, Any] | None) -> bool:
+    return order is not None and order.get("orderStatus") in OPEN_STATUSES
+
+
+def place_and_cancel(probe: Probe, category: str) -> tuple[dict[str, Any], str | None]:
+    """One far limit buy, always followed by a confirmed cancel by ``orderLinkId``.
+
+    Returns (outcome, ``"<symbol>/<category>/<orderLinkId>"`` if the order may still be open).
+    A create that raised (timeout = unknown outcome) is looked up before deciding; any doubt about
+    the final state counts as "left open" so the caller fails loudly.
+    """
+    price = probe.far_buy_price(category)
+    link = probe.link("v")
+    outcome: dict[str, Any] = {"create": "not sent"}
+    accepted: bool | None = None  # None = unknown outcome
+    try:
+        created = probe.create(
+            None,
+            category,
+            side="Buy",
+            qty=str(probe.qty(category, price)),
+            price=str(price),
+            timeInForce="GTC",
+            orderLinkId=link,
+        )
+        outcome = {"create": created.code}
+        if created.code == 0:
+            accepted = True
+        else:
+            outcome["retMsg"] = created.body.get("retMsg")
+            accepted = False
+    except Exception as exc:  # unknown outcome: the order may exist
+        outcome = {"create": f"unknown ({type(exc).__name__})"}
+    finally:
+        left_open = not cancel_confirmed(probe, category, link, accepted)
+    outcome["cancelled"] = not left_open
+    return outcome, f"{SYMBOL}/{category}/{link}" if left_open else None
+
+
+def cancel_confirmed(probe: Probe, category: str, link: str, accepted: bool | None) -> bool:
+    """True when the order with ``link`` is known not to be open (cancelled or never created)."""
+    try:
+        if accepted is False:
+            return True
+        if accepted is None:  # look it up first: a timed-out create may still have been placed
+            _, found, _, _ = probe.poll(category, link, lambda o: o is not None, limit_s=3.0)
+            if found is None:
+                return True
+            if not is_open(found):
+                return True
+        cancelled = probe.cancel(category, link)
+        probe.rec.say("verify_key_cancel", category=category, retCode=cancelled.code)
+        _, final, _, ms = probe.poll(category, link, lambda o: not is_open(o), limit_s=3.0)
+        return ms >= 0 and not is_open(final)
+    except Exception as exc:  # cannot prove the order is gone -> report it as left open
+        probe.rec.say("verify_key_cancel_error", category=category, error=type(exc).__name__)
+        return False
+
+
 def verify_key(probe: Probe) -> int:
     """Check a (re)created demo key: D-24 permissions + one far limit order per category, cancelled.
 
@@ -874,6 +936,7 @@ def verify_key(probe: Probe) -> int:
         outside_d24=extra,
     )
     trades: dict[str, Any] = {}
+    left_open: list[str] = []
     for category in ("linear", "spot"):
         instruments = probe.c.call(
             "GET", "/v5/market/instruments-info", {"category": category, "symbol": SYMBOL}
@@ -885,24 +948,14 @@ def verify_key(probe: Probe) -> int:
             Decimal(lot.get("minOrderQty") or lot["basePrecision"]),
             Decimal(lot.get("minOrderAmt") or 0),
         )
-        price = probe.far_buy_price(category)
-        link = probe.link("v")
-        created = probe.create(
-            None,
-            category,
-            side="Buy",
-            qty=str(probe.qty(category, price)),
-            price=str(price),
-            timeInForce="GTC",
-            orderLinkId=link,
-        )
-        if created.code == 0:
-            probe.cancel(category, link)
-            _, final, _, _ = probe.poll(category, link, status_in("Cancelled"))
-            trades[category] = {"create": 0, "cancelled": final is not None}
-        else:
-            trades[category] = {"create": created.code, "retMsg": created.body.get("retMsg")}
-    trades_ok = all(t.get("create") == 0 and t.get("cancelled") for t in trades.values())
+        trades[category], leftover = place_and_cancel(probe, category)
+        if leftover:
+            left_open.append(leftover)
+    for leftover in left_open:
+        message = f"LEFT OPEN: limit order {leftover} is still open, cancel it manually"
+        say("verify_key_left_open_order", message=message)
+        print(message, file=sys.stderr)
+    trades_ok = not left_open and all(t.get("create") == 0 and t.get("cancelled") for t in trades.values())
     say(
         "verify_key_verdict",
         passes_d24=not extra and not read_only,
@@ -910,6 +963,8 @@ def verify_key(probe: Probe) -> int:
         trades=trades_ok,
         orders=trades,
     )
+    if left_open:
+        return 3
     return 0 if not extra and trades_ok else 1
 
 
