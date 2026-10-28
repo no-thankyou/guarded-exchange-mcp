@@ -1,923 +1,931 @@
-[
-    {
-        "fixture": "demo_query_api.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/user/query-api",
-        "request": {},
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168780024"
-        },
-        "elapsed_ms": 256,
-        "recorded_at": "2026-10-28T06:26:20+00:00",
-        "question": "Q1 query-api on demo"
-    },
-    {
-        "fixture": "demo_user_setting_config.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/account/user-setting-config",
-        "request": {},
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "50",
-            "x-bapi-limit-status": "49",
-            "x-bapi-limit-reset-timestamp": "1793168780431"
-        },
-        "elapsed_ms": 226,
-        "recorded_at": "2026-10-28T06:26:20+00:00",
-        "question": "Q6 config"
-    },
-    {
-        "fixture": "demo_instruments_info_linear_btcusdt.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/market/instruments-info",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 226,
-        "recorded_at": "2026-10-28T06:26:20+00:00",
-        "question": "Q2 instruments-info on demo"
-    },
-    {
-        "fixture": "demo_price_limit_linear_btcusdt.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/market/price-limit",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 224,
-        "recorded_at": "2026-10-28T06:26:21+00:00",
-        "question": "Q6 order price limit"
-    },
-    {
-        "fixture": "demo_instruments_info_spot_btcusdt.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/market/instruments-info",
-        "request": {
-            "category": "spot",
-            "symbol": "BTCUSDT"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 232,
-        "recorded_at": "2026-10-28T06:26:21+00:00",
-        "question": "Q2 instruments-info on demo"
-    },
-    {
-        "fixture": "demo_price_limit_spot_btcusdt.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/market/price-limit",
-        "request": {
-            "category": "spot",
-            "symbol": "BTCUSDT"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 227,
-        "recorded_at": "2026-10-28T06:26:22+00:00",
-        "question": "Q6 order price limit"
-    },
-    {
-        "fixture": "demo_instruments_info_linear_page.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/market/instruments-info",
-        "request": {
-            "category": "linear",
-            "limit": "2"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 226,
-        "recorded_at": "2026-10-28T06:26:22+00:00",
-        "question": "Q2 pagination (nextPageCursor)"
-    },
-    {
-        "fixture": "demo_wallet_balance.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/account/wallet-balance",
-        "request": {
-            "accountType": "UNIFIED"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "50",
-            "x-bapi-limit-status": "49",
-            "x-bapi-limit-reset-timestamp": "1793168782699"
-        },
-        "elapsed_ms": 227,
-        "recorded_at": "2026-10-28T06:26:22+00:00"
-    },
-    {
-        "fixture": "demo_position_list_before.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/position/list",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "50",
-            "x-bapi-limit-status": "49",
-            "x-bapi-limit-reset-timestamp": "1793168783077"
-        },
-        "elapsed_ms": 228,
-        "recorded_at": "2026-10-28T06:26:23+00:00"
-    },
-    {
-        "fixture": "linear_create_limit_gtc_ok.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "orderLinkId": "gx-s004-b0b73c-a1",
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "68797.60",
-            "timeInForce": "GTC",
-            "positionIdx": 0
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168784375"
-        },
-        "elapsed_ms": 235,
-        "recorded_at": "2026-10-28T06:26:24+00:00"
-    },
-    {
-        "fixture": "linear_create_duplicate_active.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "orderLinkId": "gx-s004-b0b73c-a1",
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "68797.60",
-            "timeInForce": "GTC",
-            "positionIdx": 0
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168784761"
-        },
-        "elapsed_ms": 235,
-        "recorded_at": "2026-10-28T06:26:24+00:00",
-        "question": "Q3"
-    },
-    {
-        "fixture": "linear_create_reuse_after_cancel.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "orderLinkId": "gx-s004-b0b73c-a1",
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "68797.60",
-            "timeInForce": "GTC",
-            "positionIdx": 0
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168785760"
-        },
-        "elapsed_ms": 236,
-        "recorded_at": "2026-10-28T06:26:25+00:00",
-        "question": "Q3"
-    },
-    {
-        "fixture": "linear_create_limit_ioc_crossing.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "81100.40",
-            "timeInForce": "IOC",
-            "orderLinkId": "gx-s004-b0b73c-b2",
-            "positionIdx": 0
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168786386"
-        },
-        "elapsed_ms": 235,
-        "recorded_at": "2026-10-28T06:26:26+00:00",
-        "question": "Q5"
-    },
-    {
-        "fixture": "linear_order_ioc_first_read.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/order/realtime",
-        "request": {
-            "source": "poll snapshot"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 0,
-        "recorded_at": "2026-10-28T06:26:26+00:00",
-        "attempts": 1,
-        "first_read_source": "/v5/order/realtime"
-    },
-    {
-        "fixture": "linear_order_ioc_final_read.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/order/realtime",
-        "request": {
-            "source": "poll snapshot"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 0,
-        "recorded_at": "2026-10-28T06:26:26+00:00",
-        "attempts": 1,
-        "ms_until_terminal": 228
-    },
-    {
-        "fixture": "linear_create_reuse_after_fill.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "orderLinkId": "gx-s004-b0b73c-b2",
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "68797.60",
-            "timeInForce": "GTC",
-            "positionIdx": 0
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168786853"
-        },
-        "elapsed_ms": 237,
-        "recorded_at": "2026-10-28T06:26:26+00:00",
-        "question": "Q3"
-    },
-    {
-        "fixture": "linear_close_ioc_reduce.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Sell",
-            "qty": "0.001",
-            "price": "80776.50",
-            "timeInForce": "IOC",
-            "reduceOnly": true,
-            "orderLinkId": "gx-s004-b0b73c-c3",
-            "positionIdx": 0
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168787928"
-        },
-        "elapsed_ms": 235,
-        "recorded_at": "2026-10-28T06:26:28+00:00"
-    },
-    {
-        "fixture": "linear_create_limit_ioc_not_crossing.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "76891.40",
-            "timeInForce": "IOC",
-            "orderLinkId": "gx-s004-b0b73c-d4",
-            "positionIdx": 0
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168788769"
-        },
-        "elapsed_ms": 236,
-        "recorded_at": "2026-10-28T06:26:28+00:00"
-    },
-    {
-        "fixture": "linear_order_ioc_not_crossing_final.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/order/realtime",
-        "request": {
-            "source": "poll snapshot"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 0,
-        "recorded_at": "2026-10-28T06:26:29+00:00",
-        "attempts": 1,
-        "ms": 227
-    },
-    {
-        "fixture": "spot_create_limit_gtc_ok.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "spot",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "orderLinkId": "gx-s004-b0b73c-a5",
-            "side": "Buy",
-            "qty": "0.000146",
-            "price": "68829.2",
-            "timeInForce": "GTC"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "20",
-            "x-bapi-limit-status": "19",
-            "x-bapi-limit-reset-timestamp": "1793168789610"
-        },
-        "elapsed_ms": 237,
-        "recorded_at": "2026-10-28T06:26:29+00:00"
-    },
-    {
-        "fixture": "spot_create_duplicate_active.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "spot",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "orderLinkId": "gx-s004-b0b73c-a5",
-            "side": "Buy",
-            "qty": "0.000146",
-            "price": "68829.2",
-            "timeInForce": "GTC"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "20",
-            "x-bapi-limit-status": "19",
-            "x-bapi-limit-reset-timestamp": "1793168789996"
-        },
-        "elapsed_ms": 234,
-        "recorded_at": "2026-10-28T06:26:30+00:00",
-        "question": "Q3"
-    },
-    {
-        "fixture": "spot_create_reuse_after_cancel.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "spot",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "orderLinkId": "gx-s004-b0b73c-a5",
-            "side": "Buy",
-            "qty": "0.000146",
-            "price": "68829.2",
-            "timeInForce": "GTC"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "20",
-            "x-bapi-limit-status": "19",
-            "x-bapi-limit-reset-timestamp": "1793168790991"
-        },
-        "elapsed_ms": 233,
-        "recorded_at": "2026-10-28T06:26:31+00:00",
-        "question": "Q3"
-    },
-    {
-        "fixture": "spot_create_limit_ioc_crossing.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "spot",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Buy",
-            "qty": "0.000124",
-            "price": "81137.7",
-            "timeInForce": "IOC",
-            "orderLinkId": "gx-s004-b0b73c-b6"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "20",
-            "x-bapi-limit-status": "19",
-            "x-bapi-limit-reset-timestamp": "1793168791597"
-        },
-        "elapsed_ms": 229,
-        "recorded_at": "2026-10-28T06:26:31+00:00",
-        "question": "Q5"
-    },
-    {
-        "fixture": "spot_order_ioc_first_read.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/order/realtime",
-        "request": {
-            "source": "poll snapshot"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 0,
-        "recorded_at": "2026-10-28T06:26:31+00:00",
-        "attempts": 1,
-        "first_read_source": "/v5/order/realtime"
-    },
-    {
-        "fixture": "spot_order_ioc_final_read.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/order/realtime",
-        "request": {
-            "source": "poll snapshot"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 0,
-        "recorded_at": "2026-10-28T06:26:31+00:00",
-        "attempts": 1,
-        "ms_until_terminal": 228
-    },
-    {
-        "fixture": "spot_create_reuse_after_fill.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "spot",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "orderLinkId": "gx-s004-b0b73c-b6",
-            "side": "Buy",
-            "qty": "0.000146",
-            "price": "68829.2",
-            "timeInForce": "GTC"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "20",
-            "x-bapi-limit-status": "19",
-            "x-bapi-limit-reset-timestamp": "1793168792057"
-        },
-        "elapsed_ms": 233,
-        "recorded_at": "2026-10-28T06:26:32+00:00",
-        "question": "Q3"
-    },
-    {
-        "fixture": "spot_close_ioc_reduce.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "spot",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Sell",
-            "qty": "0.000123",
-            "price": "80813.6",
-            "timeInForce": "IOC",
-            "orderLinkId": "gx-s004-b0b73c-s7"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "20",
-            "x-bapi-limit-status": "19",
-            "x-bapi-limit-reset-timestamp": "1793168793505"
-        },
-        "elapsed_ms": 279,
-        "recorded_at": "2026-10-28T06:26:33+00:00"
-    },
-    {
-        "fixture": "spot_create_limit_ioc_not_crossing.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "spot",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Buy",
-            "qty": "0.000130",
-            "price": "76926.8",
-            "timeInForce": "IOC",
-            "orderLinkId": "gx-s004-b0b73c-d8"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "20",
-            "x-bapi-limit-status": "19",
-            "x-bapi-limit-reset-timestamp": "1793168794463"
-        },
-        "elapsed_ms": 234,
-        "recorded_at": "2026-10-28T06:26:34+00:00"
-    },
-    {
-        "fixture": "spot_order_ioc_not_crossing_final.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/order/realtime",
-        "request": {
-            "source": "poll snapshot"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 0,
-        "recorded_at": "2026-10-28T06:26:34+00:00",
-        "attempts": 1,
-        "ms": 238
-    },
-    {
-        "fixture": "linear_create_over_buy_limit_default.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "82565.30",
-            "timeInForce": "IOC",
-            "orderLinkId": "gx-s004-b0b73c-p9",
-            "positionIdx": 0
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168795542"
-        },
-        "elapsed_ms": 233,
-        "recorded_at": "2026-10-28T06:26:35+00:00",
-        "buy_limit": "81747.80",
-        "sell_limit": "80129.10",
-        "sent_price": "82565.30"
-    },
-    {
-        "fixture": "linear_create_over_buy_limit_default_order.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/order/realtime",
-        "request": {
-            "source": "poll snapshot"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 0,
-        "recorded_at": "2026-10-28T06:26:36+00:00",
-        "attempts": 1,
-        "ms": 226,
-        "sent_price": "82565.30"
-    },
-    {
-        "fixture": "linear_create_over_buy_limit_default_close.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Sell",
-            "qty": "0.001",
-            "price": "80776.50",
-            "timeInForce": "IOC",
-            "reduceOnly": true,
-            "orderLinkId": "gx-s004-b0b73c-c10",
-            "positionIdx": 0
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168796606"
-        },
-        "elapsed_ms": 234,
-        "recorded_at": "2026-10-28T06:26:36+00:00"
-    },
-    {
-        "fixture": "spot_create_over_buy_limit_default.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "spot",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Buy",
-            "qty": "0.000122",
-            "price": "82192.8",
-            "timeInForce": "IOC",
-            "orderLinkId": "gx-s004-b0b73c-p11"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "20",
-            "x-bapi-limit-status": "19",
-            "x-bapi-limit-reset-timestamp": "1793168797776"
-        },
-        "elapsed_ms": 234,
-        "recorded_at": "2026-10-28T06:26:37+00:00",
-        "buy_limit": "81379",
-        "sell_limit": "80569.4",
-        "sent_price": "82192.8"
-    },
-    {
-        "fixture": "demo_set_limit_px_action_linear_reject.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/account/set-limit-px-action",
-        "request": {
-            "category": "linear",
-            "modifyEnable": false
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168798494"
-        },
-        "elapsed_ms": 567,
-        "recorded_at": "2026-10-28T06:26:38+00:00"
-    },
-    {
-        "fixture": "demo_user_setting_config_after_reject.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/account/user-setting-config",
-        "request": {},
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "50",
-            "x-bapi-limit-status": "49",
-            "x-bapi-limit-reset-timestamp": "1793168798870"
-        },
-        "elapsed_ms": 229,
-        "recorded_at": "2026-10-28T06:26:38+00:00"
-    },
-    {
-        "fixture": "linear_create_over_buy_limit_reject_mode.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "82565.30",
-            "timeInForce": "IOC",
-            "orderLinkId": "gx-s004-b0b73c-p12",
-            "positionIdx": 0
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168799819"
-        },
-        "elapsed_ms": 567,
-        "recorded_at": "2026-10-28T06:26:39+00:00",
-        "buy_limit": "81747.80",
-        "sell_limit": "80129.10",
-        "sent_price": "82565.30"
-    },
-    {
-        "fixture": "demo_set_limit_px_action_linear_restore.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/account/set-limit-px-action",
-        "request": {
-            "category": "linear",
-            "modifyEnable": true
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168800206"
-        },
-        "elapsed_ms": 236,
-        "recorded_at": "2026-10-28T06:26:40+00:00"
-    },
-    {
-        "fixture": "demo_user_setting_config_restored.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/account/user-setting-config",
-        "request": {},
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "50",
-            "x-bapi-limit-status": "49",
-            "x-bapi-limit-reset-timestamp": "1793168800581"
-        },
-        "elapsed_ms": 229,
-        "recorded_at": "2026-10-28T06:26:40+00:00"
-    },
-    {
-        "fixture": "linear_amend_ok.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/amend",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderLinkId": "gx-s004-b0b73c-j13",
-            "price": "68796.60"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168802216"
-        },
-        "elapsed_ms": 233,
-        "recorded_at": "2026-10-28T06:26:42+00:00"
-    },
-    {
-        "fixture": "linear_cancel_all_ok.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/cancel-all",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderFilter": "Order"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168803292"
-        },
-        "elapsed_ms": 231,
-        "recorded_at": "2026-10-28T06:26:43+00:00"
-    },
-    {
-        "fixture": "linear_create_stale_timestamp.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "68792.80",
-            "timeInForce": "GTC",
-            "positionIdx": 0,
-            "orderLinkId": "gx-s004-b0b73c-t15"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 232,
-        "recorded_at": "2026-10-28T06:26:44+00:00"
-    },
-    {
-        "fixture": "linear_order_after_client_timeout.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "GET",
-        "path": "/v5/order/realtime",
-        "request": {
-            "source": "poll snapshot"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {},
-        "elapsed_ms": 0,
-        "recorded_at": "2026-10-28T06:26:48+00:00",
-        "first_read_source": "not found",
-        "client_outcome": "ReadTimeout",
-        "attempts": 5,
-        "ms_until_visible": -1
-    },
-    {
-        "fixture": "linear_create_retry_after_timeout.json",
-        "env": "demo",
-        "host": "api-demo.bybit.com",
-        "method": "POST",
-        "path": "/v5/order/create",
-        "request": {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "orderType": "Limit",
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "68792.80",
-            "timeInForce": "GTC",
-            "positionIdx": 0,
-            "orderLinkId": "gx-s004-b0b73c-m16"
-        },
-        "http_status": 200,
-        "rate_limit_headers": {
-            "x-bapi-limit": "10",
-            "x-bapi-limit-status": "9",
-            "x-bapi-limit-reset-timestamp": "1793168808140"
-        },
-        "elapsed_ms": 246,
-        "recorded_at": "2026-10-28T06:26:48+00:00",
-        "question": "Q4"
-    }
-]
+{
+    "run_number": 2,
+    "history": [
+        "run 1: 2026-10-28T06:24Z, full run; its fixtures were overwritten by run 2 except demo_apply_money.json (top-up happens only when USDT < 1000)",
+        "run 2: 2026-10-28T06:26Z, full run; source of all other fixtures",
+        "review round 1 (2026-10-28, offline, no exchange calls): type-preserving scrub re-applied; demo_query_api.json `ips` was stored as a redacted string, so whether it was empty is unknown — shown as [\"<redacted>\"]; linear_order_after_stale_timestamp.json is not in these artifacts (run 2 printed exists=false), the next full run records it"
+    ],
+    "entries": [
+        {
+            "fixture": "demo_query_api.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/user/query-api",
+            "request": {},
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168780024"
+            },
+            "elapsed_ms": 256,
+            "recorded_at": "2026-10-28T06:26:20+00:00",
+            "question": "Q1 query-api on demo"
+        },
+        {
+            "fixture": "demo_user_setting_config.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/account/user-setting-config",
+            "request": {},
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "50",
+                "x-bapi-limit-status": "49",
+                "x-bapi-limit-reset-timestamp": "1793168780431"
+            },
+            "elapsed_ms": 226,
+            "recorded_at": "2026-10-28T06:26:20+00:00",
+            "question": "Q6 config"
+        },
+        {
+            "fixture": "demo_instruments_info_linear_btcusdt.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/market/instruments-info",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 226,
+            "recorded_at": "2026-10-28T06:26:20+00:00",
+            "question": "Q2 instruments-info on demo"
+        },
+        {
+            "fixture": "demo_price_limit_linear_btcusdt.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/market/price-limit",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 224,
+            "recorded_at": "2026-10-28T06:26:21+00:00",
+            "question": "Q6 order price limit"
+        },
+        {
+            "fixture": "demo_instruments_info_spot_btcusdt.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/market/instruments-info",
+            "request": {
+                "category": "spot",
+                "symbol": "BTCUSDT"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 232,
+            "recorded_at": "2026-10-28T06:26:21+00:00",
+            "question": "Q2 instruments-info on demo"
+        },
+        {
+            "fixture": "demo_price_limit_spot_btcusdt.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/market/price-limit",
+            "request": {
+                "category": "spot",
+                "symbol": "BTCUSDT"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 227,
+            "recorded_at": "2026-10-28T06:26:22+00:00",
+            "question": "Q6 order price limit"
+        },
+        {
+            "fixture": "demo_instruments_info_linear_page.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/market/instruments-info",
+            "request": {
+                "category": "linear",
+                "limit": "2"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 226,
+            "recorded_at": "2026-10-28T06:26:22+00:00",
+            "question": "Q2 pagination (nextPageCursor)"
+        },
+        {
+            "fixture": "demo_wallet_balance.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/account/wallet-balance",
+            "request": {
+                "accountType": "UNIFIED"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "50",
+                "x-bapi-limit-status": "49",
+                "x-bapi-limit-reset-timestamp": "1793168782699"
+            },
+            "elapsed_ms": 227,
+            "recorded_at": "2026-10-28T06:26:22+00:00"
+        },
+        {
+            "fixture": "demo_position_list_before.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/position/list",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "50",
+                "x-bapi-limit-status": "49",
+                "x-bapi-limit-reset-timestamp": "1793168783077"
+            },
+            "elapsed_ms": 228,
+            "recorded_at": "2026-10-28T06:26:23+00:00"
+        },
+        {
+            "fixture": "linear_create_limit_gtc_ok.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "orderLinkId": "gx-s004-b0b73c-a1",
+                "side": "Buy",
+                "qty": "0.001",
+                "price": "68797.60",
+                "timeInForce": "GTC",
+                "positionIdx": 0
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168784375"
+            },
+            "elapsed_ms": 235,
+            "recorded_at": "2026-10-28T06:26:24+00:00"
+        },
+        {
+            "fixture": "linear_create_duplicate_active.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "orderLinkId": "gx-s004-b0b73c-a1",
+                "side": "Buy",
+                "qty": "0.001",
+                "price": "68797.60",
+                "timeInForce": "GTC",
+                "positionIdx": 0
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168784761"
+            },
+            "elapsed_ms": 235,
+            "recorded_at": "2026-10-28T06:26:24+00:00",
+            "question": "Q3"
+        },
+        {
+            "fixture": "linear_create_reuse_after_cancel.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "orderLinkId": "gx-s004-b0b73c-a1",
+                "side": "Buy",
+                "qty": "0.001",
+                "price": "68797.60",
+                "timeInForce": "GTC",
+                "positionIdx": 0
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168785760"
+            },
+            "elapsed_ms": 236,
+            "recorded_at": "2026-10-28T06:26:25+00:00",
+            "question": "Q3"
+        },
+        {
+            "fixture": "linear_create_limit_ioc_crossing.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Buy",
+                "qty": "0.001",
+                "price": "81100.40",
+                "timeInForce": "IOC",
+                "orderLinkId": "gx-s004-b0b73c-b2",
+                "positionIdx": 0
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168786386"
+            },
+            "elapsed_ms": 235,
+            "recorded_at": "2026-10-28T06:26:26+00:00",
+            "question": "Q5"
+        },
+        {
+            "fixture": "linear_order_ioc_first_read.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/order/realtime",
+            "request": {
+                "source": "poll snapshot"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 0,
+            "recorded_at": "2026-10-28T06:26:26+00:00",
+            "attempts": 1,
+            "first_read_source": "/v5/order/realtime"
+        },
+        {
+            "fixture": "linear_order_ioc_final_read.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/order/realtime",
+            "request": {
+                "source": "poll snapshot"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 0,
+            "recorded_at": "2026-10-28T06:26:26+00:00",
+            "attempts": 1,
+            "ms_until_terminal": 228
+        },
+        {
+            "fixture": "linear_create_reuse_after_fill.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "orderLinkId": "gx-s004-b0b73c-b2",
+                "side": "Buy",
+                "qty": "0.001",
+                "price": "68797.60",
+                "timeInForce": "GTC",
+                "positionIdx": 0
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168786853"
+            },
+            "elapsed_ms": 237,
+            "recorded_at": "2026-10-28T06:26:26+00:00",
+            "question": "Q3"
+        },
+        {
+            "fixture": "linear_close_ioc_reduce.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Sell",
+                "qty": "0.001",
+                "price": "80776.50",
+                "timeInForce": "IOC",
+                "reduceOnly": true,
+                "orderLinkId": "gx-s004-b0b73c-c3",
+                "positionIdx": 0
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168787928"
+            },
+            "elapsed_ms": 235,
+            "recorded_at": "2026-10-28T06:26:28+00:00"
+        },
+        {
+            "fixture": "linear_create_limit_ioc_not_crossing.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Buy",
+                "qty": "0.001",
+                "price": "76891.40",
+                "timeInForce": "IOC",
+                "orderLinkId": "gx-s004-b0b73c-d4",
+                "positionIdx": 0
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168788769"
+            },
+            "elapsed_ms": 236,
+            "recorded_at": "2026-10-28T06:26:28+00:00"
+        },
+        {
+            "fixture": "linear_order_ioc_not_crossing_final.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/order/realtime",
+            "request": {
+                "source": "poll snapshot"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 0,
+            "recorded_at": "2026-10-28T06:26:29+00:00",
+            "attempts": 1,
+            "ms": 227
+        },
+        {
+            "fixture": "spot_create_limit_gtc_ok.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "spot",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "orderLinkId": "gx-s004-b0b73c-a5",
+                "side": "Buy",
+                "qty": "0.000146",
+                "price": "68829.2",
+                "timeInForce": "GTC"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "20",
+                "x-bapi-limit-status": "19",
+                "x-bapi-limit-reset-timestamp": "1793168789610"
+            },
+            "elapsed_ms": 237,
+            "recorded_at": "2026-10-28T06:26:29+00:00"
+        },
+        {
+            "fixture": "spot_create_duplicate_active.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "spot",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "orderLinkId": "gx-s004-b0b73c-a5",
+                "side": "Buy",
+                "qty": "0.000146",
+                "price": "68829.2",
+                "timeInForce": "GTC"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "20",
+                "x-bapi-limit-status": "19",
+                "x-bapi-limit-reset-timestamp": "1793168789996"
+            },
+            "elapsed_ms": 234,
+            "recorded_at": "2026-10-28T06:26:30+00:00",
+            "question": "Q3"
+        },
+        {
+            "fixture": "spot_create_reuse_after_cancel.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "spot",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "orderLinkId": "gx-s004-b0b73c-a5",
+                "side": "Buy",
+                "qty": "0.000146",
+                "price": "68829.2",
+                "timeInForce": "GTC"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "20",
+                "x-bapi-limit-status": "19",
+                "x-bapi-limit-reset-timestamp": "1793168790991"
+            },
+            "elapsed_ms": 233,
+            "recorded_at": "2026-10-28T06:26:31+00:00",
+            "question": "Q3"
+        },
+        {
+            "fixture": "spot_create_limit_ioc_crossing.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "spot",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Buy",
+                "qty": "0.000124",
+                "price": "81137.7",
+                "timeInForce": "IOC",
+                "orderLinkId": "gx-s004-b0b73c-b6"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "20",
+                "x-bapi-limit-status": "19",
+                "x-bapi-limit-reset-timestamp": "1793168791597"
+            },
+            "elapsed_ms": 229,
+            "recorded_at": "2026-10-28T06:26:31+00:00",
+            "question": "Q5"
+        },
+        {
+            "fixture": "spot_order_ioc_first_read.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/order/realtime",
+            "request": {
+                "source": "poll snapshot"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 0,
+            "recorded_at": "2026-10-28T06:26:31+00:00",
+            "attempts": 1,
+            "first_read_source": "/v5/order/realtime"
+        },
+        {
+            "fixture": "spot_order_ioc_final_read.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/order/realtime",
+            "request": {
+                "source": "poll snapshot"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 0,
+            "recorded_at": "2026-10-28T06:26:31+00:00",
+            "attempts": 1,
+            "ms_until_terminal": 228
+        },
+        {
+            "fixture": "spot_create_reuse_after_fill.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "spot",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "orderLinkId": "gx-s004-b0b73c-b6",
+                "side": "Buy",
+                "qty": "0.000146",
+                "price": "68829.2",
+                "timeInForce": "GTC"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "20",
+                "x-bapi-limit-status": "19",
+                "x-bapi-limit-reset-timestamp": "1793168792057"
+            },
+            "elapsed_ms": 233,
+            "recorded_at": "2026-10-28T06:26:32+00:00",
+            "question": "Q3"
+        },
+        {
+            "fixture": "spot_close_ioc_reduce.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "spot",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Sell",
+                "qty": "0.000123",
+                "price": "80813.6",
+                "timeInForce": "IOC",
+                "orderLinkId": "gx-s004-b0b73c-s7"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "20",
+                "x-bapi-limit-status": "19",
+                "x-bapi-limit-reset-timestamp": "1793168793505"
+            },
+            "elapsed_ms": 279,
+            "recorded_at": "2026-10-28T06:26:33+00:00"
+        },
+        {
+            "fixture": "spot_create_limit_ioc_not_crossing.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "spot",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Buy",
+                "qty": "0.000130",
+                "price": "76926.8",
+                "timeInForce": "IOC",
+                "orderLinkId": "gx-s004-b0b73c-d8"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "20",
+                "x-bapi-limit-status": "19",
+                "x-bapi-limit-reset-timestamp": "1793168794463"
+            },
+            "elapsed_ms": 234,
+            "recorded_at": "2026-10-28T06:26:34+00:00"
+        },
+        {
+            "fixture": "spot_order_ioc_not_crossing_final.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/order/realtime",
+            "request": {
+                "source": "poll snapshot"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 0,
+            "recorded_at": "2026-10-28T06:26:34+00:00",
+            "attempts": 1,
+            "ms": 238
+        },
+        {
+            "fixture": "linear_create_over_buy_limit_default.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Buy",
+                "qty": "0.001",
+                "price": "82565.30",
+                "timeInForce": "IOC",
+                "orderLinkId": "gx-s004-b0b73c-p9",
+                "positionIdx": 0
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168795542"
+            },
+            "elapsed_ms": 233,
+            "recorded_at": "2026-10-28T06:26:35+00:00",
+            "buy_limit": "81747.80",
+            "sell_limit": "80129.10",
+            "sent_price": "82565.30"
+        },
+        {
+            "fixture": "linear_create_over_buy_limit_default_order.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/order/realtime",
+            "request": {
+                "source": "poll snapshot"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 0,
+            "recorded_at": "2026-10-28T06:26:36+00:00",
+            "attempts": 1,
+            "ms": 226,
+            "sent_price": "82565.30"
+        },
+        {
+            "fixture": "linear_create_over_buy_limit_default_close.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Sell",
+                "qty": "0.001",
+                "price": "80776.50",
+                "timeInForce": "IOC",
+                "reduceOnly": true,
+                "orderLinkId": "gx-s004-b0b73c-c10",
+                "positionIdx": 0
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168796606"
+            },
+            "elapsed_ms": 234,
+            "recorded_at": "2026-10-28T06:26:36+00:00"
+        },
+        {
+            "fixture": "spot_create_over_buy_limit_default.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "spot",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Buy",
+                "qty": "0.000122",
+                "price": "82192.8",
+                "timeInForce": "IOC",
+                "orderLinkId": "gx-s004-b0b73c-p11"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "20",
+                "x-bapi-limit-status": "19",
+                "x-bapi-limit-reset-timestamp": "1793168797776"
+            },
+            "elapsed_ms": 234,
+            "recorded_at": "2026-10-28T06:26:37+00:00",
+            "buy_limit": "81379",
+            "sell_limit": "80569.4",
+            "sent_price": "82192.8"
+        },
+        {
+            "fixture": "demo_set_limit_px_action_linear_reject.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/account/set-limit-px-action",
+            "request": {
+                "category": "linear",
+                "modifyEnable": false
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168798494"
+            },
+            "elapsed_ms": 567,
+            "recorded_at": "2026-10-28T06:26:38+00:00"
+        },
+        {
+            "fixture": "demo_user_setting_config_after_reject.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/account/user-setting-config",
+            "request": {},
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "50",
+                "x-bapi-limit-status": "49",
+                "x-bapi-limit-reset-timestamp": "1793168798870"
+            },
+            "elapsed_ms": 229,
+            "recorded_at": "2026-10-28T06:26:38+00:00"
+        },
+        {
+            "fixture": "linear_create_over_buy_limit_reject_mode.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Buy",
+                "qty": "0.001",
+                "price": "82565.30",
+                "timeInForce": "IOC",
+                "orderLinkId": "gx-s004-b0b73c-p12",
+                "positionIdx": 0
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168799819"
+            },
+            "elapsed_ms": 567,
+            "recorded_at": "2026-10-28T06:26:39+00:00",
+            "buy_limit": "81747.80",
+            "sell_limit": "80129.10",
+            "sent_price": "82565.30"
+        },
+        {
+            "fixture": "demo_set_limit_px_action_linear_restore.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/account/set-limit-px-action",
+            "request": {
+                "category": "linear",
+                "modifyEnable": true
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168800206"
+            },
+            "elapsed_ms": 236,
+            "recorded_at": "2026-10-28T06:26:40+00:00"
+        },
+        {
+            "fixture": "demo_user_setting_config_restored.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/account/user-setting-config",
+            "request": {},
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "50",
+                "x-bapi-limit-status": "49",
+                "x-bapi-limit-reset-timestamp": "1793168800581"
+            },
+            "elapsed_ms": 229,
+            "recorded_at": "2026-10-28T06:26:40+00:00"
+        },
+        {
+            "fixture": "linear_amend_ok.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/amend",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderLinkId": "gx-s004-b0b73c-j13",
+                "price": "68796.60"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168802216"
+            },
+            "elapsed_ms": 233,
+            "recorded_at": "2026-10-28T06:26:42+00:00"
+        },
+        {
+            "fixture": "linear_cancel_all_ok.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/cancel-all",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderFilter": "Order"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168803292"
+            },
+            "elapsed_ms": 231,
+            "recorded_at": "2026-10-28T06:26:43+00:00"
+        },
+        {
+            "fixture": "linear_create_stale_timestamp.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Buy",
+                "qty": "0.001",
+                "price": "68792.80",
+                "timeInForce": "GTC",
+                "positionIdx": 0,
+                "orderLinkId": "gx-s004-b0b73c-t15"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 232,
+            "recorded_at": "2026-10-28T06:26:44+00:00"
+        },
+        {
+            "fixture": "linear_order_after_client_timeout.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "GET",
+            "path": "/v5/order/realtime",
+            "request": {
+                "source": "poll snapshot"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {},
+            "elapsed_ms": 0,
+            "recorded_at": "2026-10-28T06:26:48+00:00",
+            "first_read_source": "not found",
+            "client_outcome": "ReadTimeout",
+            "attempts": 5,
+            "ms_until_visible": -1
+        },
+        {
+            "fixture": "linear_create_retry_after_timeout.json",
+            "env": "demo",
+            "host": "api-demo.bybit.com",
+            "method": "POST",
+            "path": "/v5/order/create",
+            "request": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Buy",
+                "qty": "0.001",
+                "price": "68792.80",
+                "timeInForce": "GTC",
+                "positionIdx": 0,
+                "orderLinkId": "gx-s004-b0b73c-m16"
+            },
+            "http_status": 200,
+            "rate_limit_headers": {
+                "x-bapi-limit": "10",
+                "x-bapi-limit-status": "9",
+                "x-bapi-limit-reset-timestamp": "1793168808140"
+            },
+            "elapsed_ms": 246,
+            "recorded_at": "2026-10-28T06:26:48+00:00",
+            "question": "Q4"
+        }
+    ]
+}

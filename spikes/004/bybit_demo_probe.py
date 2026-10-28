@@ -14,8 +14,10 @@ Safety rules baked in:
   the run refuses to trade if the probe symbols already have open orders or a position, and the
   ``finally`` block cancels everything on the probe symbols and flattens the linear position.
 
-Run: ``uv run python spikes/004/bybit_demo_probe.py [--read-only] ~/.config/guarded-exchange/bybit-demo.env``
-(``--read-only``: preflight reads only, no orders, no settings changes, no demo top-up).
+Run: ``uv run python spikes/004/bybit_demo_probe.py [--read-only | --verify-key] <env-file>``
+(``--read-only``: preflight reads only, no orders, no settings changes, no demo top-up;
+``--verify-key``: D-24 verdict for a key + one far limit order per category, cancelled at once;
+prints permission names only and writes no fixtures). The key file must be ``chmod 600``.
 """
 
 import hashlib
@@ -43,10 +45,13 @@ KEY_VARS: Mapping[str, tuple[str, str]] = {
 }
 RECV_WINDOW = "5000"
 REDACTED = "<redacted>"
-# Fields that identify the key or the account; never written to fixtures or stdout.
-REDACT_KEYS = frozenset(
-    {"apiKey", "id", "note", "ips", "userID", "uid", "parentUid", "affiliateID", "inviterID", "secret"}
-)
+# Fields that identify the key or the account; never written to fixtures or stdout. Placeholders keep
+# the JSON type so fixtures still parse like real responses: strings -> "<redacted>", numeric ids -> 0,
+# ``ips`` -> ``[]`` if it was empty, ``["<redacted>"]`` otherwise.
+REDACT_STRINGS = frozenset({"apiKey", "secret", "id", "note"})
+REDACT_NUMBERS = frozenset({"userID", "inviterID", "affiliateID", "parentUid"})
+REDACT_LISTS = frozenset({"ips"})
+REDACT_KEYS = REDACT_STRINGS | REDACT_NUMBERS | REDACT_LISTS
 LIMIT_HEADERS = ("x-bapi-limit", "x-bapi-limit-status", "x-bapi-limit-reset-timestamp")
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "bybit" / "spike004"
 SYMBOL = "BTCUSDT"
@@ -86,6 +91,36 @@ def credentials_for(env: str, values: Mapping[str, str]) -> Credentials | None:
     return Credentials(key, secret) if key and secret else None
 
 
+def key_file_problem(path: Path) -> str | None:
+    """Refuse key files readable or writable by group/others (``st_mode & 0o077``)."""
+    mode = path.stat().st_mode
+    if mode & 0o077:
+        return f"key file permissions are {oct(mode & 0o777)}; run: chmod 600 {path}"
+    return None
+
+
+# D-24: the only permissions a key may carry (NFR-1 allowlist); empty groups mean "no permission".
+D24_ALLOWED: Mapping[str, frozenset[str]] = {
+    "ContractTrade": frozenset({"Order", "Position"}),
+    "Spot": frozenset({"SpotTrade"}),
+}
+
+
+def permission_names(permissions: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Non-empty permission groups as ``{group: [names]}`` (names only, safe to print)."""
+    return {g: sorted(str(n) for n in names) for g, names in permissions.items() if names}
+
+
+def d24_extra_permissions(permissions: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Permissions outside the D-24 allowlist; empty dict = the key passes D-24."""
+    extra: dict[str, list[str]] = {}
+    for group, names in permission_names(permissions).items():
+        outside = [n for n in names if n not in D24_ALLOWED.get(group, frozenset())]
+        if outside:
+            extra[group] = outside
+    return extra
+
+
 def base_url(env: str) -> str:
     host = ALLOWED_HOSTS.get(env)
     if host is None:
@@ -105,10 +140,22 @@ def sign(secret: str, timestamp: str, key: str, recv_window: str, payload: str) 
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
+def redacted_placeholder(field_name: str, value: Any) -> Any:
+    """Type-preserving placeholder for a key-identifying field (see ``REDACT_*``)."""
+    if field_name in REDACT_NUMBERS:
+        return 0
+    if field_name in REDACT_LISTS:
+        return [REDACTED] if value not in ([], "", None) else []
+    return REDACTED
+
+
 def scrub(value: Any, secrets_: tuple[str, ...]) -> Any:
     """Copy of ``value`` with key-identifying fields and any occurrence of a secret redacted."""
     if isinstance(value, dict):
-        return {k: (REDACTED if k in REDACT_KEYS else scrub(v, secrets_)) for k, v in value.items()}
+        return {
+            k: (redacted_placeholder(k, v) if k in REDACT_KEYS else scrub(v, secrets_))
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [scrub(v, secrets_) for v in value]
     if isinstance(value, str):
@@ -223,11 +270,17 @@ class BybitProbeClient:
 class Recorder:
     """Writes scrubbed response bodies as fixtures and keeps an index with request metadata."""
 
-    def __init__(self, directory: Path, secrets_: tuple[str, ...]) -> None:
+    def __init__(self, directory: Path | None, secrets_: tuple[str, ...]) -> None:
         self.directory = directory
         self.secrets = secrets_
         self.index: list[dict[str, Any]] = []
-        directory.mkdir(parents=True, exist_ok=True)
+        if directory is not None:
+            directory.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def quiet(cls, secrets_: tuple[str, ...]) -> "Recorder":
+        """Prints scrubbed lines, writes nothing (``--verify-key``)."""
+        return cls(None, secrets_)
 
     def record(
         self,
@@ -241,6 +294,9 @@ class Recorder:
         **notes: Any,
     ) -> None:
         body = scrub(reply.body, self.secrets)
+        if self.directory is None:
+            self.say(name, retCode=reply.code, retMsg=reply.body.get("retMsg"))
+            return
         (self.directory / f"{name}.json").write_text(json.dumps(body, indent=4, ensure_ascii=False) + "\n")
         entry = {
             "fixture": f"{name}.json",
@@ -262,9 +318,16 @@ class Recorder:
         print(json.dumps({"step": step, **scrub(fields, self.secrets)}, ensure_ascii=False, default=str))
 
     def flush(self) -> None:
-        (self.directory / "index.json").write_text(
-            json.dumps(self.index, indent=4, ensure_ascii=False) + "\n"
-        )
+        """``index.json``: run number (previous + 1), history note and one entry per fixture."""
+        if self.directory is None:
+            return
+        path = self.directory / "index.json"
+        previous = json.loads(path.read_text()) if path.is_file() else {}
+        run = int(previous.get("run_number", 0)) + 1 if isinstance(previous, dict) else 1
+        history = list(previous.get("history", [])) if isinstance(previous, dict) else []
+        history.append(f"run {run}: {datetime.now(UTC).isoformat(timespec='seconds')}, fixtures overwritten")
+        index = {"run_number": run, "history": history, "entries": self.index}
+        path.write_text(json.dumps(index, indent=4, ensure_ascii=False) + "\n")
 
 
 # --- the probe ----------------------------------------------------------------------------------
@@ -288,6 +351,7 @@ class Probe:
         self.order_sources: dict[str, str] = {}
         self.first_sources: dict[str, str] = {}
         self.traded = False
+        self.restore_linear_modify: bool | None = None
         self.read_only = False
 
     # small wrappers ----------------------------------------------------------------------
@@ -592,6 +656,7 @@ class Probe:
         for category in ("linear", "spot"):
             self._over_limit_buy(category, f"{category}_create_over_buy_limit_default")
         original_linear_modify = not bool(config.get("lpaPerp"))  # docs: lpaPerp=true means reject
+        self.restore_linear_modify = original_linear_modify  # cleanup() restores it if a step fails
         self.post(
             "demo_set_limit_px_action_linear_reject",
             "/v5/account/set-limit-px-action",
@@ -604,6 +669,7 @@ class Probe:
             "/v5/account/set-limit-px-action",
             {"category": "linear", "modifyEnable": original_linear_modify},
         )
+        self.restore_linear_modify = None
         self.get("demo_user_setting_config_restored", "/v5/account/user-setting-config", {})
 
     def _over_limit_buy(self, category: str, name: str) -> None:
@@ -689,8 +755,12 @@ class Probe:
         self.rec.record(
             "linear_create_stale_timestamp", self.c, "POST", "/v5/order/create", stale, reply=reply
         )
-        self.rec.say(
-            "stale_timestamp_order_exists", exists=self.order(category, stale["orderLinkId"]) is not None
+        after_stale = self.order(category, stale["orderLinkId"])
+        self._save_order(
+            "linear_order_after_stale_timestamp",
+            after_stale,
+            source=self.order_sources.get(stale["orderLinkId"]),
+            question="Q4: is an order created after 10002?",
         )
 
         m = dict(body, orderLinkId=self.link("m"))
@@ -727,6 +797,13 @@ class Probe:
 
     def cleanup(self) -> dict[str, Any]:
         """Cancel everything on the probe symbols, flatten the linear position, report what is left."""
+        if self.restore_linear_modify is not None:
+            body = {"category": "linear", "modifyEnable": self.restore_linear_modify}
+            restored = self.c.call("POST", "/v5/account/set-limit-px-action", body)
+            self.rec.say(
+                "cleanup_restore_limit_px_action", retCode=restored.code, modifyEnable=body["modifyEnable"]
+            )
+            self.restore_linear_modify = None
         for category in ("linear", "spot"):
             self.c.call("POST", "/v5/order/cancel-all", {"category": category, "symbol": SYMBOL})
             time.sleep(0.3)
@@ -773,6 +850,69 @@ def testnet_check(creds: Credentials | None, http: httpx2.Client, rec: Recorder)
         rec.record(name, client, "GET", path, params, reply=client.call("GET", path, params))
 
 
+def verify_key(probe: Probe) -> int:
+    """Check a (re)created demo key: D-24 permissions + one far limit order per category, cancelled.
+
+    Prints permission *names* only, writes no fixtures. Exit code 0 = passes D-24 and trades.
+    """
+    say = probe.rec.say
+    probe.c.sync_clock()
+    info = probe.c.call("GET", "/v5/user/query-api")
+    if info.code != 0:
+        say("verify_key", query_api_retCode=info.code, retMsg=info.body.get("retMsg"))
+        return 1
+    result = info.result
+    permissions = result.get("permissions") or {}
+    extra = d24_extra_permissions(permissions)
+    read_only = result.get("readOnly") == 1
+    say(
+        "verify_key_permissions",
+        permissions=permission_names(permissions),
+        readOnly=result.get("readOnly"),
+        ips_bound=bool(result.get("ips")) and result.get("ips") != ["*"],
+        expiredAt=result.get("expiredAt"),
+        outside_d24=extra,
+    )
+    trades: dict[str, Any] = {}
+    for category in ("linear", "spot"):
+        instruments = probe.c.call(
+            "GET", "/v5/market/instruments-info", {"category": category, "symbol": SYMBOL}
+        ).result["list"][0]
+        lot = instruments["lotSizeFilter"]
+        probe.rules[category] = Rules(
+            Decimal(instruments["priceFilter"]["tickSize"]),
+            Decimal(lot.get("qtyStep") or lot["basePrecision"]),
+            Decimal(lot.get("minOrderQty") or lot["basePrecision"]),
+            Decimal(lot.get("minOrderAmt") or 0),
+        )
+        price = probe.far_buy_price(category)
+        link = probe.link("v")
+        created = probe.create(
+            None,
+            category,
+            side="Buy",
+            qty=str(probe.qty(category, price)),
+            price=str(price),
+            timeInForce="GTC",
+            orderLinkId=link,
+        )
+        if created.code == 0:
+            probe.cancel(category, link)
+            _, final, _, _ = probe.poll(category, link, status_in("Cancelled"))
+            trades[category] = {"create": 0, "cancelled": final is not None}
+        else:
+            trades[category] = {"create": created.code, "retMsg": created.body.get("retMsg")}
+    trades_ok = all(t.get("create") == 0 and t.get("cancelled") for t in trades.values())
+    say(
+        "verify_key_verdict",
+        passes_d24=not extra and not read_only,
+        read_only_profile=read_only,
+        trades=trades_ok,
+        orders=trades,
+    )
+    return 0 if not extra and trades_ok else 1
+
+
 def steps(probe: Probe) -> Iterator[tuple[str, Callable[[], None]]]:
     yield "linear_uniqueness", lambda: probe.link_uniqueness("linear")
     yield "spot_uniqueness", lambda: probe.link_uniqueness("spot")
@@ -783,11 +923,16 @@ def steps(probe: Probe) -> Iterator[tuple[str, Callable[[], None]]]:
 
 def main(argv: list[str]) -> int:
     read_only = "--read-only" in argv
+    verify = "--verify-key" in argv
     paths = [a for a in argv[1:] if not a.startswith("--")]
     env_path = Path(paths[0] if paths else os.environ.get(ENV_FILE_VAR, "")).expanduser()
     if not env_path.is_file():
-        usage = f"usage: bybit_demo_probe.py [--read-only] <env-file> (or {ENV_FILE_VAR}=<env-file>)"
-        print(usage, file=sys.stderr)
+        usage = "usage: bybit_demo_probe.py [--read-only | --verify-key] <env-file>"
+        print(f"{usage} (or {ENV_FILE_VAR}=<env-file>)", file=sys.stderr)
+        return 2
+    problem = key_file_problem(env_path)
+    if problem:
+        print(problem, file=sys.stderr)
         return 2
     values = parse_env_file(env_path.read_text())
     demo = credentials_for("demo", values)
@@ -796,6 +941,10 @@ def main(argv: list[str]) -> int:
         print("BYBIT_DEMO_API_KEY / BYBIT_DEMO_API_SECRET missing in the env file", file=sys.stderr)
         return 2
     all_secrets = tuple(s for c in (demo, testnet) if c for s in (c.key, c.secret))
+    if verify:
+        with httpx2.Client(timeout=httpx2.Timeout(10.0)) as http:
+            quiet = Recorder.quiet(all_secrets)
+            return verify_key(Probe(BybitProbeClient("demo", demo, http), quiet))
     rec = Recorder(FIXTURE_DIR, all_secrets)
     rec.say("start", demo_key_present=True, testnet_key_present=testnet is not None)
     with httpx2.Client(timeout=httpx2.Timeout(10.0)) as http:
