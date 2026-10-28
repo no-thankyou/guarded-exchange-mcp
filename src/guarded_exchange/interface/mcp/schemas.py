@@ -135,6 +135,10 @@ class CandlesOut(BaseModel):
         )
 
 
+# Keep in sync with domain.instruments.InstrumentStatus (a unit test checks it).
+InstrumentStatusLiteral = Literal["pre_launch", "pending_open", "trading", "settling", "closed", "unknown"]
+
+
 class InstrumentRulesOut(BaseModel):
     """Exchange rules an order must satisfy (FR-1, FR-10)."""
 
@@ -144,7 +148,9 @@ class InstrumentRulesOut(BaseModel):
     category: Literal["spot", "linear"] = Field(description="spot or linear (USDT perpetual).")
     base_asset: str = Field(description="What is bought or sold, e.g. BTC.")
     quote_asset: str = Field(description="Currency of prices and notional, always USDT.")
-    status: str = Field(description="trading means orders are accepted; anything else means they are not.")
+    status: InstrumentStatusLiteral = Field(
+        description="trading means orders are accepted; anything else (unknown included) means they are not."
+    )
     tick_size: DecimalStr = Field(description="Prices must be a multiple of this, quote currency.")
     qty_step: DecimalStr = Field(
         description="Quantities must be a multiple of this, base asset; orders are rounded down to it."

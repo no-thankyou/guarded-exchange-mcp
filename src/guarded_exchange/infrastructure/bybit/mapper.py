@@ -360,7 +360,9 @@ def _rules(item: InstrumentInfoDTO, *, category: Category) -> InstrumentRules:
         max_leverage = _required_dec(item.leverage_filter.max_leverage)
     else:
         qty_step = _required_dec(lot.base_precision)
-        min_qty = _dec(lot.min_order_qty) or qty_step  # deprecated on spot: one step is the floor
+        # Spot `minOrderQty` is deprecated (docs v5/market/instrument): the real floor is the order
+        # value `minOrderAmt`, quantity only has to be one step.
+        min_qty = qty_step
         min_notional = _dec(lot.min_order_amt)
         max_leverage = None  # v1 spot is cash only
     return InstrumentRules(

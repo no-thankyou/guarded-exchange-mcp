@@ -43,7 +43,7 @@ MAX_ORDERBOOK_DEPTH: Final = 50
 """FR-3: a book deeper than 50 levels per side is noise for a model and costs tokens."""
 
 
-def orderbook_depth(raw: int) -> int:
+def orderbook_depth(raw: object) -> int:
     """Validate the requested number of levels per side (1..``MAX_ORDERBOOK_DEPTH``)."""
     return _bounded(raw, "depth", MAX_ORDERBOOK_DEPTH)
 
@@ -92,7 +92,7 @@ MAX_CANDLES: Final = 200
 """FR-3: about a week of hourly or half a year of daily candles in one compact answer."""
 
 
-def candles_limit(raw: int) -> int:
+def candles_limit(raw: object) -> int:
     """Validate the requested number of candles (1..``MAX_CANDLES``)."""
     return _bounded(raw, "limit", MAX_CANDLES)
 
@@ -171,9 +171,10 @@ class Candles:
         return replace(self, candles=self.candles[-limit:])
 
 
-def _bounded(raw: int, field: str, maximum: int) -> int:
-    # bool is an int in Python; `true` sent for a count is a mistake, not 1.
-    if isinstance(raw, bool) or not 1 <= raw <= maximum:
+def _bounded(raw: object, field: str, maximum: int) -> int:
+    # Only a real int: bool is an int subclass (`true` is a mistake, not 1), and a float or
+    # Decimal such as 2.5 must not be silently truncated or compared as a count.
+    if type(raw) is not int or not 1 <= raw <= maximum:
         raise InvalidParams(
             f"{field} must be an integer from 1 to {maximum}",
             next_step=f"Ask for at most {maximum}.",

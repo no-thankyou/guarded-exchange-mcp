@@ -54,11 +54,17 @@ class InstrumentRulesCache:
     async def get(self, symbol: str, category: Category) -> InstrumentRules:
         key = (symbol, category)
         entry = self._entries.get(key)
-        if entry is not None and self._clock.now() < entry.expires_at:
-            return entry.rules
+        if entry is not None:
+            if self._clock.now() < entry.expires_at:
+                self._entries.move_to_end(key)  # LRU: a hit makes the entry the most recent
+                return entry.rules
+            del self._entries[key]  # expired: drop it now, even if the refresh below fails
         rules = await self._exchange.get_instrument_rules(symbol, category)
         self._entries[key] = _Entry(rules, self._clock.now() + self._ttl)
         self._entries.move_to_end(key)
         while len(self._entries) > self._max_entries:
-            self._entries.popitem(last=False)  # the oldest insertion goes first
+            self._entries.popitem(last=False)  # the least recently used goes first
         return rules
+
+    def __len__(self) -> int:
+        return len(self._entries)

@@ -22,7 +22,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, InputRequiredResult
 from pydantic import ValidationError
 
-from guarded_exchange.interface.mcp.errors import invalid_arguments_result
+from guarded_exchange.interface.mcp.errors import argument_name, invalid_arguments_result
 
 log = structlog.get_logger(__name__)
 
@@ -39,6 +39,6 @@ class GuardedMCPServer(MCPServer[Any]):
             if isinstance(exc, UnexpectedToolError) or not isinstance(exc.__cause__, ValidationError):
                 raise
             error = exc.__cause__
-            fields = sorted({".".join(str(p) for p in e["loc"]) for e in error.errors(include_input=False)})
+            fields = sorted({argument_name(e["loc"]) for e in error.errors(include_input=False)})
             log.info("tool_invalid_arguments", tool=name, fields=fields)  # names only, never values
             return invalid_arguments_result(error)

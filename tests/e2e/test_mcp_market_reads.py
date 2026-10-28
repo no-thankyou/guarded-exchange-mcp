@@ -19,8 +19,10 @@ from mcp.types import CallToolResult, Tool
 
 from guarded_exchange.bootstrap import app_server
 from guarded_exchange.config import Settings
+from guarded_exchange.domain.instruments import InstrumentStatus
 from guarded_exchange.domain.market import CandleInterval
 from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
+from guarded_exchange.interface.mcp.schemas import InstrumentStatusLiteral
 from guarded_exchange.interface.mcp.server import create_server
 from guarded_exchange.interface.mcp.tools.market import IntervalLiteral
 from tests.conftest import load_fixture
@@ -353,3 +355,15 @@ async def test_unknown_tool_keeps_the_sdk_handling(server: MCPServer[Any]) -> No
 
 def test_interval_literal_matches_the_domain_enum() -> None:
     assert list(typing.get_args(IntervalLiteral)) == [i.value for i in CandleInterval]
+
+
+def test_rules_status_literal_matches_the_domain_enum() -> None:
+    assert list(typing.get_args(InstrumentStatusLiteral)) == [s.value for s in InstrumentStatus]
+
+
+async def test_rules_output_schema_lists_every_status(server: MCPServer[Any]) -> None:
+    async with Client(server) as client:
+        tool = next(t for t in (await client.list_tools()).tools if t.name == "get_instrument_rules")
+
+    assert tool.output_schema is not None
+    assert tool.output_schema["properties"]["status"]["enum"] == [s.value for s in InstrumentStatus]

@@ -215,6 +215,36 @@ async def test_cache_size_is_bounded_oldest_entry_goes_first() -> None:
     assert [c[1] for c in exchange.calls] == [*symbols, "AAAUSDT"]
 
 
+async def test_cache_eviction_is_least_recently_used() -> None:
+    symbols = ["AAAUSDT", "BBBUSDT", "CCCUSDT"]
+    exchange = FakeExchange(rules={(s, Category.SPOT): make_rules(s, Category.SPOT) for s in symbols})
+    cache = InstrumentRulesCache(_port(exchange), FakeClock(), max_entries=2)
+
+    await cache.get("AAAUSDT", Category.SPOT)
+    await cache.get("BBBUSDT", Category.SPOT)
+    await cache.get("AAAUSDT", Category.SPOT)  # hit: AAA becomes the most recently used
+    await cache.get("CCCUSDT", Category.SPOT)  # evicts BBB, not AAA
+    await cache.get("AAAUSDT", Category.SPOT)  # still cached
+    await cache.get("BBBUSDT", Category.SPOT)  # evicted, fetched again
+
+    assert [c[1] for c in exchange.calls] == ["AAAUSDT", "BBBUSDT", "CCCUSDT", "BBBUSDT"]
+
+
+async def test_expired_entry_is_dropped_on_read_even_if_the_refresh_fails() -> None:
+    clock = FakeClock()
+    exchange = FakeExchange(rules={BTC: make_rules(*BTC)})
+    cache = InstrumentRulesCache(_port(exchange), clock)
+    await cache.get(*BTC)
+    assert len(cache) == 1
+
+    clock.advance(DEFAULT_RULES_TTL)
+    exchange.fail_with = ExchangeUnavailable("down")
+    with pytest.raises(ExchangeUnavailable):
+        await cache.get(*BTC)
+
+    assert len(cache) == 0  # a stale entry is never served and does not linger
+
+
 @pytest.mark.parametrize(("ttl", "size"), [(timedelta(0), 10), (timedelta(seconds=1), 0)])
 def test_cache_rejects_a_useless_configuration(ttl: timedelta, size: int) -> None:
     with pytest.raises(ValueError, match="ttl"):

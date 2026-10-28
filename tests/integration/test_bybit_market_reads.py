@@ -244,14 +244,22 @@ async def test_spot_rules_use_base_precision_and_min_order_amount() -> None:
     assert rules.max_leverage is None
 
 
-async def test_spot_without_deprecated_min_order_qty_falls_back_to_one_step() -> None:
+@pytest.mark.parametrize("min_order_qty", ["0.01", None], ids=["larger-than-step", "absent"])
+async def test_spot_min_qty_is_one_step_and_deprecated_min_order_qty_is_ignored(
+    min_order_qty: str | None,
+) -> None:
     payload = load_fixture("bybit/instruments_spot_ethusdt.json")
-    del payload["result"]["list"][0]["lotSizeFilter"]["minOrderQty"]
+    lot = payload["result"]["list"][0]["lotSizeFilter"]
+    if min_order_qty is None:
+        del lot["minOrderQty"]
+    else:
+        lot["minOrderQty"] = min_order_qty  # > basePrecision 0.00001: must not become the floor
     client, _ = _client(payload)
 
     rules = await client.get_instrument_rules("ETHUSDT", Category.SPOT)
 
     assert rules.min_qty == rules.qty_step == Decimal("0.00001")
+    assert rules.min_notional == Decimal(5)  # the real spot minimum: minOrderAmt
 
 
 @pytest.mark.parametrize(

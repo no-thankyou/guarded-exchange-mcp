@@ -83,8 +83,8 @@ def invalid_arguments_result(error: ValidationError) -> CallToolResult:
     ``details`` name the first failing argument (``field``) and the pydantic error type
     (``reason``); the message lists every problem. Rejected values are never included.
     """
-    problems = [(_loc(e["loc"]), e["type"], e["msg"]) for e in error.errors(include_input=False)]
-    field, reason, _ = problems[0]
+    errors = error.errors(include_input=False)
+    problems = [(_safe_path(e["loc"]), e["type"], e["msg"]) for e in errors]
     message = "; ".join(
         f"{loc}: {msg}" if kind in _RULE_ONLY_MESSAGES else f"{loc}: {kind}" for loc, kind, msg in problems
     )
@@ -92,13 +92,21 @@ def invalid_arguments_result(error: ValidationError) -> CallToolResult:
         InvalidParams(
             f"invalid arguments: {message}",
             next_step=_ARGUMENTS_NEXT_STEP,
-            details={"field": field, "reason": reason},
+            details={"field": argument_name(errors[0]["loc"]), "reason": errors[0]["type"]},
         )
     )
 
 
-def _loc(loc: tuple[int | str, ...]) -> str:
-    return ".".join(str(part) for part in loc) or "arguments"
+def argument_name(loc: tuple[int | str, ...]) -> str:
+    """The top-level argument of a pydantic error location: a name declared by the tool signature."""
+    return str(loc[0]) if loc else "arguments"
+
+
+def _safe_path(loc: tuple[int | str, ...]) -> str:
+    """``argument_name`` plus list indexes; nested string parts (e.g. keys of a dict the caller
+    sent) are caller data and become ``*``."""
+    rest = [str(part) if isinstance(part, int) else "*" for part in loc[1:]]
+    return ".".join([argument_name(loc), *rest])
 
 
 def internal_error_result(request_id: str) -> CallToolResult:

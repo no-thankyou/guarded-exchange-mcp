@@ -110,8 +110,8 @@ def test_orderbook_rejects_inconsistent_levels(
 
 
 @pytest.mark.req("FR-3", "FR-28")
-@pytest.mark.parametrize("depth", [0, -1, MAX_ORDERBOOK_DEPTH + 1, 1000, True])
-def test_orderbook_depth_is_bounded(depth: int) -> None:
+@pytest.mark.parametrize("depth", [0, -1, MAX_ORDERBOOK_DEPTH + 1, 1000, True, 2.5, 10.0, Decimal(10), "10"])
+def test_orderbook_depth_is_bounded(depth: object) -> None:
     with pytest.raises(InvalidParams) as err:
         orderbook_depth(depth)
 
@@ -166,8 +166,8 @@ def test_candle_rejects_inconsistent_ohlcv(change: dict[str, Any]) -> None:
 
 
 @pytest.mark.req("FR-3", "FR-28")
-@pytest.mark.parametrize("limit", [0, MAX_CANDLES + 1, 1000, False])
-def test_candles_limit_is_bounded(limit: int) -> None:
+@pytest.mark.parametrize("limit", [0, MAX_CANDLES + 1, 1000, False, 3.7, 50.0, Decimal(50), "50"])
+def test_candles_limit_is_bounded(limit: object) -> None:
     with pytest.raises(InvalidParams) as err:
         candles_limit(limit)
 

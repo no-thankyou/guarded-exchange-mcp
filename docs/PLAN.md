@@ -62,7 +62,7 @@ src/guarded_exchange/
   application/
     ports.py            # ExchangeClient, *Repository, UnitOfWork(Factory), MasterKeyStore (005), ConfirmationChannel, CredentialCipher, Clock, IdGenerator, RateLimiter
     read_market.py, read_account.py, read_policy.py, read_audit.py
-    instrument_rules.py # InstrumentRulesCache: правила инструмента с TTL в памяти процесса (009), переиспользует валидация ордеров (011)
+    instrument_rules.py # InstrumentRulesCache: правила инструмента с TTL (LRU) в памяти процесса (009), переиспользует валидация ордеров (011); в application, а не infrastructure: TTL, «ошибки не кэшировать» и проверка USDT после кэша — правила use case на портах ExchangeClient+Clock, одинаковые для любой биржи (NFR-5)
     submit_action.py    # единый путь любого торгового действия: auth → [второй раунд MRTR → resolve, D-1] → повтор/идемпотентность (D-20) → rate limit → rules → policy/limits → confirm? → execute
     resolve_confirmation.py   # человек одобрил/отклонил (только не-MCP каналы)
     execute_confirmed.py      # перепроверка FR-48 + исполнение + разведка исхода FR-27
