@@ -11,6 +11,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, WithJsonSchema
 
 from guarded_exchange.domain.market import Ticker
+from guarded_exchange.domain.policy import EffectivePolicy
 
 
 def _decimal_to_str(value: Decimal) -> str:
@@ -68,6 +69,66 @@ class TickerOut(BaseModel):
             funding_rate_pct=ticker.funding_rate_pct,
             next_funding_at=ticker.next_funding_at,
             observed_at=ticker.observed_at,
+        )
+
+
+class PolicyOut(BaseModel):
+    """The caller's effective policy: the stricter of the admin's ceiling and the user's settings."""
+
+    model_config = ConfigDict(frozen=True)
+
+    profile: Literal["read_only", "trade"] = Field(
+        description="read_only: market and account reads only; trade: trading tools are available too."
+    )
+    environment: Literal["testnet", "mainnet"] = Field(
+        description="testnet = the exchange's test environment without real money; mainnet = real money."
+    )
+    allowed_instruments: list[str] = Field(
+        description="'category:SYMBOL' entries where risk-increasing actions are allowed; empty = none. "
+        "Risk-reducing actions (cancel, close, reduce-only) work on any instrument with a position or order."
+    )
+    max_order_notional_usdt: DecimalStr = Field(
+        description="Largest risk-increasing order: quantity x worst expected price, USDT."
+    )
+    max_leverage: DecimalStr = Field(description="Highest leverage that may be set, x.")
+    slippage_pct: DecimalStr = Field(
+        description="Market orders execute no worse than the best price +/- this percent."
+    )
+    confirm_actions: list[str] = Field(description="Actions that always need the user's confirmation.")
+    confirm_above_notional_usdt: DecimalStr | None = Field(
+        default=None,
+        description="Any order at least this large needs confirmation too, USDT. Absent = no such rule.",
+    )
+    confirmation_ttl_s: int = Field(description="How long a confirmation request stays valid, seconds.")
+    trust_client_ui: bool = Field(
+        description="Whether a confirmation through this AI client's own UI counts (else external channel)."
+    )
+    prefer_external_channel: bool = Field(
+        description="Ask for confirmation in the external channel even when the client UI is trusted."
+    )
+    unconfirmed_max_actions: int = Field(
+        description="Risk-increasing actions allowed without confirmation per window; then they need it."
+    )
+    unconfirmed_window_s: int = Field(description="Sliding window for unconfirmed_max_actions, seconds.")
+    max_pending: int = Field(description="Confirmations that may be waiting at the same time.")
+
+    @classmethod
+    def from_domain(cls, policy: EffectivePolicy) -> "PolicyOut":
+        return cls(
+            profile=policy.profile.value,
+            environment=policy.environment.value,
+            allowed_instruments=[str(item) for item in sorted(policy.allowlist)],
+            max_order_notional_usdt=policy.max_order_notional_usdt,
+            max_leverage=policy.max_leverage,
+            slippage_pct=policy.slippage_pct,
+            confirm_actions=sorted(kind.value for kind in policy.confirm_actions),
+            confirm_above_notional_usdt=policy.confirm_above_notional_usdt,
+            confirmation_ttl_s=policy.confirmation_ttl_s,
+            trust_client_ui=policy.trust_client_ui,
+            prefer_external_channel=policy.prefer_external_channel,
+            unconfirmed_max_actions=policy.unconfirmed_max_actions,
+            unconfirmed_window_s=policy.unconfirmed_window_s,
+            max_pending=policy.max_pending,
         )
 
 

@@ -11,7 +11,8 @@ from guarded_exchange.domain.audit import AuditEvent, AuditRecord, canonical_jso
 from guarded_exchange.domain.errors import NotFound
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.market import Ticker
-from guarded_exchange.domain.users import User
+from guarded_exchange.domain.policy import PolicyRecord
+from guarded_exchange.domain.users import Environment, User, UserStatus
 
 
 def make_ticker(symbol: str = "BTCUSDT", category: Category = Category.LINEAR) -> Ticker:
@@ -102,9 +103,14 @@ class ReadOnlyViolation(RuntimeError):
 class _State:
     users: dict[str, User] = field(default_factory=dict)
     audit: dict[str, list[AuditRecord]] = field(default_factory=dict)
+    policies: dict[str, PolicyRecord] = field(default_factory=dict)
 
     def copy(self) -> "_State":
-        return _State(dict(self.users), {chain: list(records) for chain, records in self.audit.items()})
+        return _State(
+            dict(self.users),
+            {chain: list(records) for chain, records in self.audit.items()},
+            dict(self.policies),
+        )
 
 
 class InMemoryUserRepository:
@@ -150,10 +156,34 @@ class InMemoryAuditLogRepository:
         return [r for r in self._state.audit.get(chain_id, []) if r.seq > after_seq][:limit]
 
 
+class InMemoryPolicyRepository:
+    def __init__(self, state: _State, *, writable: bool) -> None:
+        self._state = state
+        self._writable = writable
+
+    async def get(self, user_id: str) -> PolicyRecord | None:
+        return self._state.policies.get(user_id)
+
+    async def save(self, user_id: str, record: PolicyRecord) -> None:
+        if not self._writable:
+            raise ReadOnlyViolation("policies.save needs a write unit of work")
+        if user_id not in self._state.users:
+            raise ValueError(f"no user {user_id}")  # the SQL table has a foreign key
+        self._state.policies[user_id] = record
+
+
 class InMemoryUnitOfWork:
-    def __init__(self, state: _State, *, write: bool) -> None:
+    def __init__(self, state: _State, *, write: bool, locks: list[str]) -> None:
         self.users = InMemoryUserRepository(state, writable=write)
         self.audit = InMemoryAuditLogRepository(state, writable=write)
+        self.policies = InMemoryPolicyRepository(state, writable=write)
+        self._write = write
+        self._locks = locks
+
+    async def lock_user(self, user_id: str) -> None:
+        if not self._write:
+            raise ReadOnlyViolation(f"lock_user({user_id!r}) needs a write unit of work")
+        self._locks.append(user_id)
 
 
 class InMemoryDatabase:
@@ -162,14 +192,33 @@ class InMemoryDatabase:
     def __init__(self) -> None:
         self.state = _State()
         self.transactions: list[bool] = []  # write flag of every unit of work opened
+        self.locked_users: list[str] = []  # every lock_user call, in order
 
     @asynccontextmanager
     async def __call__(self, *, write: bool) -> AsyncIterator[InMemoryUnitOfWork]:
         self.transactions.append(write)
         working = self.state.copy()
-        yield InMemoryUnitOfWork(working, write=write)
+        yield InMemoryUnitOfWork(working, write=write, locks=self.locked_users)
         if write:
             self.state = working
 
     def all_audit(self) -> list[AuditRecord]:
         return [r for chain in self.state.audit.values() for r in chain]
+
+    def add_user(
+        self,
+        name: str = "local",
+        *,
+        environment: Environment = Environment.TESTNET,
+        status: UserStatus = UserStatus.ACTIVE,
+    ) -> User:
+        """Seed a user directly (as ``init`` would), without journal records."""
+        user = User(
+            id=f"user-{name}",
+            name=name,
+            status=status,
+            environment=environment,
+            created_at=datetime(2026, 10, 27, 12, 0, tzinfo=UTC),
+        )
+        self.state.users[user.id] = user
+        return user

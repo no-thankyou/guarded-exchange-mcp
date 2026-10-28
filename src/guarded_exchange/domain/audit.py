@@ -23,6 +23,8 @@ type JsonValue = str | int | bool | Decimal | datetime | Sequence[JsonValue] | M
 class AuditEventType(StrEnum):
     INSTALLATION_INITIALIZED = "installation_initialized"
     USER_CREATED = "user_created"
+    POLICY_CEILING_SET = "policy_ceiling_set"
+    POLICY_TIGHTENED = "policy_tightened"
 
 
 @dataclass(frozen=True, slots=True)

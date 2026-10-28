@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents guarded access to a crypto exchange (Bybit V5): least-privilege permissions, risk limits, human confirmation of risky actions in a channel the model does not control, tenant isolation and a tamper-evident audit log.
 
-> Status: early skeleton. Only the read-only `get_ticker` tool works end to end; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
+> Status: early skeleton. Read-only tools `get_ticker` and `get_my_policy` work end to end; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`; the policy (admin ceiling, user tightening) is managed from the CLI. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
 
 ## How to run the skeleton
 
@@ -40,6 +40,21 @@ Example call: `get_ticker {"symbol": "BTCUSDT", "category": "linear"}` returns a
 ```
 
 Errors are tool results with `isError: true` and a stable shape `{code, message, next_step, retry_after_s?, details?, untrusted_text?}`; unexpected server failures return `code: "internal_error"` with a `request_id` and no internals; text that comes from the exchange is returned only in `untrusted_text`.
+
+### Policy
+
+Every user has an effective policy = the stricter, field by field, of the admin's **ceiling** and the user's own settings: permission profile (`read_only` or `trade`), allowed instruments, max order size and leverage, slippage, which actions need confirmation, confirmation lifetime, trust in the AI client's confirmation UI, limits on unconfirmed and pending actions. A new user is `read_only` with an empty allowlist on the test environment; the default limits are 1000 USDT per order and x10 leverage on testnet, 50 USDT and x3 on mainnet.
+
+The agent can only **read** its policy (`get_my_policy`); there is no MCP tool that changes it. Changes go through the CLI:
+
+```bash
+uv run guarded-exchange policy show                                   # ceiling, your settings, effective
+uv run guarded-exchange admin policy set-ceiling --profile trade --allow linear:BTCUSDT --allow spot:ETHUSDT
+uv run guarded-exchange policy tighten --max-leverage 3 --confirm-above-notional-usdt 100
+uv run guarded-exchange policy tighten --max-leverage 20              # refused: would weaken max_leverage
+```
+
+`admin policy set-ceiling` (optionally `--user NAME`) may raise or lower the ceiling within hard bounds (slippage <= 3%, confirmation lifetime <= 600 s); `policy tighten` refuses any value looser than the current effective one and names the fields. If the admin lowers the ceiling below a user's setting, the ceiling applies. Both write to the user's journal. `tools/list` shows a user only the tools their profile allows (the result is `cacheScope: private`), and every `tools/call` is checked again, so a hidden tool called directly gets `permission_denied`.
 
 ### Configuration
 
@@ -81,10 +96,12 @@ uv run pytest --collect-only -q --traceability=docs/traceability.md
 src/guarded_exchange/
   domain/          pure Python: value objects (Decimal money), rules, domain exceptions with error codes
   application/     use cases + ports (typing.Protocol), e.g. GetTicker -> ExchangeClient,
-                   InitializeInstallation -> UnitOfWorkFactory, Clock, IdGenerator, MasterKeyStore
+                   InitializeInstallation -> UnitOfWorkFactory, Clock, IdGenerator, MasterKeyStore,
+                   ReadPolicy / SetCeiling / TightenPolicy / AuthorizeAccess (who may call what)
   infrastructure/  adapters: bybit/ (httpx2 client, DTO mapper, retCode mapping), db/ (SQLAlchemy Core
                    repositories, unit of work, Alembic migrations), master key file, clock, logging
-  interface/       entrypoints: mcp/ (MCPServer, thin tools, error mapping), cli/ (typer)
+  interface/       entrypoints: mcp/ (MCPServer, thin tools, error mapping, per-principal tool filter),
+                   cli/ (typer)
   config.py        pydantic-settings
   bootstrap.py     composition root: the only place that reads config and wires adapters
 ```

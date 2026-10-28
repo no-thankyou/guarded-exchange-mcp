@@ -11,13 +11,13 @@ from mcp import Client
 from mcp.server import MCPServer
 from mcp.types import Tool
 
-from guarded_exchange.application.read_market import GetTicker
 from guarded_exchange.bootstrap import app_server
 from guarded_exchange.config import Settings
 from guarded_exchange.domain.errors import ExchangeUnavailable
-from guarded_exchange.interface.mcp.server import UseCases, create_server
+from guarded_exchange.interface.mcp.access import fixed_principal
 from tests.conftest import load_fixture
-from tests.fakes import FakeExchange
+from tests.e2e.support import server_for
+from tests.fakes import FakeExchange, InMemoryDatabase
 
 pytestmark = pytest.mark.req("FR-1", "FR-3")
 
@@ -39,7 +39,11 @@ def _bybit_stub(request: httpx2.Request) -> httpx2.Response:
 @pytest.fixture
 async def server() -> AsyncIterator[MCPServer[Any]]:
     settings = Settings(_env_file=None, bybit_get_max_attempts=1)
-    async with app_server(settings, transport=httpx2.MockTransport(_bybit_stub)) as mcp:
+    db = InMemoryDatabase()
+    user = db.add_user()
+    async with app_server(
+        settings, uow=db, principal=fixed_principal(user.id), transport=httpx2.MockTransport(_bybit_stub)
+    ) as mcp:
         yield mcp
 
 
@@ -118,7 +122,8 @@ async def test_exchange_text_is_returned_only_as_untrusted_text(server: MCPServe
 @pytest.mark.req("NFR-5")
 async def test_server_works_on_fake_exchange_without_any_bybit_code() -> None:
     exchange = FakeExchange(fail_with=ExchangeUnavailable("the exchange is unavailable: maintenance"))
-    mcp = create_server(UseCases(get_ticker=GetTicker(exchange)))
+    db = InMemoryDatabase()
+    mcp = server_for(db, db.add_user().id, exchange=exchange)
 
     async with Client(mcp) as client:
         result = await client.call_tool("get_ticker", {"symbol": "BTCUSDT", "category": "linear"})
@@ -131,7 +136,8 @@ async def test_server_works_on_fake_exchange_without_any_bybit_code() -> None:
 @pytest.mark.req("FR-28")
 async def test_unexpected_exception_becomes_internal_error_without_leaking_details() -> None:
     exchange = FakeExchange(fail_with=RuntimeError("db password=hunter2 at /srv/secret.py:42"))
-    mcp = create_server(UseCases(get_ticker=GetTicker(exchange)))
+    db = InMemoryDatabase()
+    mcp = server_for(db, db.add_user().id, exchange=exchange)
 
     async with Client(mcp) as client:
         result = await client.call_tool("get_ticker", {"symbol": "BTCUSDT", "category": "linear"})

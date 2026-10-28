@@ -13,6 +13,7 @@ from typing import Protocol
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.market import Ticker
+from guarded_exchange.domain.policy import PolicyRecord
 from guarded_exchange.domain.users import User
 
 
@@ -67,6 +68,16 @@ class AuditLogRepository(Protocol):
         ...
 
 
+class PolicyRepository(Protocol):
+    """One policy record per user (FR-12). No record = default ceiling, no overrides."""
+
+    async def get(self, user_id: str) -> PolicyRecord | None: ...
+
+    async def save(self, user_id: str, record: PolicyRecord) -> None:
+        """Insert or replace the user's record. Needs a write unit of work."""
+        ...
+
+
 class MasterKeyStore(Protocol):
     """Where the local master key lives (PLAN ADR-009). Never exposes the key to use cases."""
 
@@ -87,6 +98,16 @@ class UnitOfWork(Protocol):
 
     @property
     def audit(self) -> AuditLogRepository: ...
+
+    @property
+    def policies(self) -> PolicyRepository: ...
+
+    async def lock_user(self, user_id: str) -> None:
+        """Serialise read-modify-write of one user's state until the transaction ends (PLAN D-8).
+
+        Only valid in a write unit of work (raises otherwise).
+        """
+        ...
 
 
 class UnitOfWorkFactory(Protocol):

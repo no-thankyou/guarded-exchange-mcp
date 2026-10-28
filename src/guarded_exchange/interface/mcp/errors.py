@@ -16,6 +16,8 @@ from guarded_exchange.interface.mcp.schemas import ToolErrorOut
 DEFAULT_NEXT_STEP: Final[dict[str, str]] = {
     "invalid_params": "Fix the arguments according to the tool's input schema and call again.",
     "not_found": "Check the identifiers; list the available objects first if unsure.",
+    "permission_denied": "Do not retry or work around it. Tell the user; only they or the admin can "
+    "change permissions, outside the chat.",
     "exchange_unavailable": "Retry in a few seconds; if it keeps failing, tell the user.",
     "exchange_rejected": "Do not retry unchanged; report the exchange reason to the user.",
 }

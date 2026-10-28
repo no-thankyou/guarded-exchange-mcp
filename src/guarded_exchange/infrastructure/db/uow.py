@@ -15,8 +15,12 @@ from urllib.parse import quote
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
-from guarded_exchange.infrastructure.db.dialect import WRITE_OPTION, configure_sqlite
-from guarded_exchange.infrastructure.db.repositories import SqlAuditLogRepository, SqlUserRepository
+from guarded_exchange.infrastructure.db.dialect import WRITE_OPTION, configure_sqlite, lock_user
+from guarded_exchange.infrastructure.db.repositories import (
+    SqlAuditLogRepository,
+    SqlPolicyRepository,
+    SqlUserRepository,
+)
 
 
 def create_sqlite_async_engine(db_path: Path, *, busy_timeout_ms: int) -> AsyncEngine:
@@ -41,8 +45,10 @@ def create_sqlite_sync_engine(db_path: Path, *, busy_timeout_ms: int, read_only:
 
 class SqlUnitOfWork:
     def __init__(self, connection: AsyncConnection, *, write: bool) -> None:
+        self._connection = connection
         self._users = SqlUserRepository(connection, writable=write)
         self._audit = SqlAuditLogRepository(connection, writable=write)
+        self._policies = SqlPolicyRepository(connection, writable=write)
 
     @property
     def users(self) -> SqlUserRepository:
@@ -51,6 +57,13 @@ class SqlUnitOfWork:
     @property
     def audit(self) -> SqlAuditLogRepository:
         return self._audit
+
+    @property
+    def policies(self) -> SqlPolicyRepository:
+        return self._policies
+
+    async def lock_user(self, user_id: str) -> None:
+        await lock_user(self._connection, user_id)
 
 
 class SqlUnitOfWorkFactory:

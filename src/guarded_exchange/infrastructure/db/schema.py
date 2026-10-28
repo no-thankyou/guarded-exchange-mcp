@@ -8,6 +8,7 @@ current head and must stay in sync with them
 from sqlalchemy import (
     CheckConstraint,
     Column,
+    ForeignKey,
     Integer,
     MetaData,
     PrimaryKeyConstraint,
@@ -60,4 +61,15 @@ audit_heads = Table(
     metadata,
     Column("chain_id", String(64), primary_key=True),
     Column("last_seq", Integer, nullable=False),
+)
+
+# One row per configured user (FR-12). No row = default ceiling for the user's environment and no
+# overrides; ``ceiling`` NULL = the admin never set one. Both JSON columns hold canonical JSON.
+policies = Table(
+    "policies",
+    metadata,
+    Column("user_id", String(64), ForeignKey("users.id"), primary_key=True),
+    Column("ceiling", Text, nullable=True),
+    Column("overrides", Text, nullable=False),
+    Column("updated_at", EpochMillis(), nullable=False),
 )

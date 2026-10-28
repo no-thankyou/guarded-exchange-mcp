@@ -43,6 +43,12 @@ class NotFound(DomainError):
     code: ClassVar[str] = "not_found"
 
 
+class PermissionDenied(DomainError):
+    """The caller's profile or policy does not allow this (FR-11, FR-12, FR-44)."""
+
+    code: ClassVar[str] = "permission_denied"
+
+
 class ExchangeUnavailable(DomainError):
     """The exchange could not be reached or answered with a transient failure."""
 

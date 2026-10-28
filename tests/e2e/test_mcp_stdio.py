@@ -101,14 +101,18 @@ async def test_stdio_server_answers_and_keeps_stdout_protocol_only(
         tools = await client.list_tools()
         ok = await client.call_tool("get_ticker", {"symbol": "BTCUSDT", "category": "linear"})
         err = await client.call_tool("get_ticker", {"symbol": "NOPEUSDT", "category": "spot"})
+        policy = await client.call_tool("get_my_policy", {})
 
-    assert [t.name for t in tools.tools] == ["get_ticker"]
+    assert sorted(t.name for t in tools.tools) == ["get_my_policy", "get_ticker"]
     assert ok.is_error is False
     assert ok.structured_content is not None
     assert ok.structured_content["last_price"] == "80571.1"
     assert err.is_error is True
     assert err.structured_content is not None
     assert err.structured_content["code"] == "invalid_params"
+    # the policy comes from the real database of the resolved local user (FR-44, FR-45)
+    assert policy.structured_content is not None
+    assert policy.structured_content["profile"] == "read_only"
 
     # stdout: every line is a JSON-RPC message, nothing else
     stdout_lines = [line for line in stdout_log.read_text().splitlines() if line.strip()]
@@ -124,5 +128,5 @@ async def test_stdio_server_answers_and_keeps_stdout_protocol_only(
     assert principal["user_id"] == local_user
     assert principal["user"] == "local"
     tool_events = [e for e in events if e["event"] in {"tool_ok", "tool_error"}]
-    assert len(tool_events) == 2
-    assert all(e["request_id"] and e["tool"] == "get_ticker" for e in tool_events)
+    assert [e["tool"] for e in tool_events] == ["get_ticker", "get_ticker", "get_my_policy"]
+    assert all(e["request_id"] for e in tool_events)

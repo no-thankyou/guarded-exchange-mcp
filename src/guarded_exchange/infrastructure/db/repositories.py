@@ -8,9 +8,16 @@ from sqlalchemy import Row, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord, canonical_json
+from guarded_exchange.domain.policy import (
+    PolicyRecord,
+    ceiling_from_payload,
+    patch_from_payload,
+    patch_to_payload,
+    settings_to_payload,
+)
 from guarded_exchange.domain.users import Environment, User, UserStatus
 from guarded_exchange.infrastructure.db.dialect import insert_for
-from guarded_exchange.infrastructure.db.schema import audit_heads, audit_log, users
+from guarded_exchange.infrastructure.db.schema import audit_heads, audit_log, policies, users
 
 
 class ReadOnlyUnitOfWorkError(RuntimeError):
@@ -98,6 +105,34 @@ class SqlAuditLogRepository(_Repository):
             )
             for row in await self._conn.execute(query)
         ]
+
+
+class SqlPolicyRepository(_Repository):
+    """Policies as canonical JSON (decimals as strings, no floats); one upserted row per user."""
+
+    async def get(self, user_id: str) -> PolicyRecord | None:
+        row = (await self._conn.execute(select(policies).where(policies.c.user_id == user_id))).one_or_none()
+        if row is None:
+            return None
+        return PolicyRecord(
+            ceiling=None if row.ceiling is None else ceiling_from_payload(json.loads(row.ceiling)),
+            overrides=patch_from_payload(json.loads(row.overrides)),
+            updated_at=row.updated_at,
+        )
+
+    async def save(self, user_id: str, record: PolicyRecord) -> None:
+        self._require_writable("policies.save")
+        values = {
+            "ceiling": None
+            if record.ceiling is None
+            else canonical_json(settings_to_payload(record.ceiling)),
+            "overrides": canonical_json(patch_to_payload(record.overrides)),
+            "updated_at": record.updated_at,
+        }
+        upsert = insert_for(self._conn, policies).values(user_id=user_id, **values)
+        await self._conn.execute(
+            upsert.on_conflict_do_update(index_elements=[policies.c.user_id], set_=values)
+        )
 
 
 def _user_from_row(row: Row[tuple[object, ...]]) -> User:
