@@ -2,6 +2,8 @@
 per-principal tool visibility with the check on every call (FR-11, ADR-012)."""
 
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Any
 
@@ -16,7 +18,7 @@ from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.policy import InstrumentRef, Permission, PolicyPatch, Profile
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS
 from tests.e2e.support import server_for
-from tests.fakes import FakeClock, InMemoryDatabase
+from tests.fakes import FakeClock, InMemoryDatabase, InMemoryUnitOfWork
 
 BTC = InstrumentRef(Category.LINEAR, "BTCUSDT")
 GRANT_TRADING = PolicyPatch(profile=Profile.TRADE, allowlist=frozenset({BTC}))
@@ -136,7 +138,7 @@ async def test_read_only_user_does_not_see_trading_tools_and_cannot_call_them() 
         result = await client.call_tool("place_order", {"symbol": "BTCUSDT"})
         bad_args = await client.call_tool("place_order", {})
 
-    assert {tool.name for tool in listed.tools} == {"get_ticker", "get_my_policy"}
+    assert {tool.name for tool in listed.tools} == set(TOOL_PERMISSIONS)  # every read tool, no trading
     assert (listed.ttl_ms, listed.cache_scope) == (0, "private")  # per-user list, never shared
     assert error_code(result) == "permission_denied"
     assert result.structured_content is not None
@@ -144,6 +146,43 @@ async def test_read_only_user_does_not_see_trading_tools_and_cannot_call_them() 
     assert result.structured_content["next_step"]
     assert error_code(bad_args) == "permission_denied"  # refused before argument validation
     assert calls == []  # the tool body never ran
+
+
+@pytest.mark.req("FR-11", "FR-28")
+async def test_permitted_user_with_bad_arguments_gets_invalid_params() -> None:
+    db, calls = InMemoryDatabase(), list[str]()
+    user = db.add_user("alice")
+    await SetCeiling(db, FakeClock())("alice", GRANT_TRADING)
+    mcp = with_stub_trading_tool(server_for(db, user.id, tool_permissions=WITH_TRADING_TOOL), calls)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("place_order", {})
+
+    assert error_code(result) == "invalid_params"  # past the permission check, then argument validation
+    assert result.structured_content is not None
+    assert result.structured_content["details"]["field"] == "symbol"
+    assert calls == []
+
+
+class BrokenDatabase(InMemoryDatabase):
+    """Every transaction fails, as a locked or corrupt database would."""
+
+    @asynccontextmanager
+    async def __call__(self, *, write: bool) -> AsyncIterator[InMemoryUnitOfWork]:
+        raise RuntimeError("db password=hunter2 at /srv/secret.py:42")
+        yield  # pragma: no cover
+
+
+@pytest.mark.req("FR-11", "FR-28", "NFR-1")
+async def test_a_failing_access_check_refuses_with_internal_error_and_no_details() -> None:
+    async with Client(server_for(BrokenDatabase(), "user-local")) as client:
+        result = await client.call_tool("get_ticker", {"symbol": "BTCUSDT", "category": "linear"})
+
+    assert error_code(result) == "internal_error"  # fail closed: the tool did not run
+    assert result.structured_content is not None
+    assert result.structured_content["details"]["request_id"]
+    assert "hunter2" not in result.model_dump_json()
+    assert "RuntimeError" not in result.model_dump_json()
 
 
 @pytest.mark.req("FR-11", "FR-12")

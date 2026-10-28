@@ -241,3 +241,23 @@ def test_cli_refuses_an_uninitialised_database(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "guarded-exchange init" in result.stderr
     assert not settings.db_path.exists()
+
+
+def test_cli_turns_an_unexpected_failure_into_one_line_and_exit_1(env_file: Path, tmp_path: Path) -> None:
+    db_path = make_settings(tmp_path).db_path
+    conn = sqlite3.connect(db_path)
+    try:  # a policy row written around the application, with a field this version does not know
+        conn.execute(
+            "INSERT INTO policies (user_id, ceiling, overrides, updated_at) VALUES (?, NULL, ?, 0)",
+            (_local_user_id(tmp_path), '{"surprise":1}'),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = _cli().invoke(_app(), ["policy", "show", "--env-file", str(env_file)])
+
+    assert result.exit_code == 1
+    assert "guarded-exchange: unexpected error: ValueError: unknown policy fields" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""

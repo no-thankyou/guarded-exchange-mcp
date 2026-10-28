@@ -3,6 +3,7 @@
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, NoReturn
@@ -14,6 +15,7 @@ from mcp.server import MCPServer
 
 from guarded_exchange.application.admin import InitializeInstallation, InitResult, MasterKeyMissing
 from guarded_exchange.application.auth import PrincipalUnavailable, ResolveLocalPrincipal
+from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.policy import (
     AuthorizeAccess,
     PolicyView,
@@ -22,7 +24,7 @@ from guarded_exchange.application.policy import (
     TightenPolicy,
 )
 from guarded_exchange.application.ports import UnitOfWorkFactory
-from guarded_exchange.application.read_market import GetTicker
+from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.config import ConfigError, Settings, load_settings
 from guarded_exchange.domain.errors import DomainError
 from guarded_exchange.domain.policy import PolicyPatch
@@ -58,8 +60,16 @@ def build_use_cases(settings: Settings, http: httpx2.AsyncClient, uow: UnitOfWor
             base_delay_s=settings.bybit_get_backoff_base_s,
         ),
     )
+    rules = InstrumentRulesCache(
+        exchange, SystemClock(), ttl=timedelta(seconds=settings.instrument_rules_ttl_s)
+    )
     return UseCases(
-        get_ticker=GetTicker(exchange), read_policy=ReadPolicy(uow), authorize=AuthorizeAccess(uow)
+        get_ticker=GetTicker(exchange),
+        get_orderbook=GetOrderbook(exchange),
+        get_candles=GetCandles(exchange),
+        get_instrument_rules=GetInstrumentRules(rules),
+        read_policy=ReadPolicy(uow),
+        authorize=AuthorizeAccess(uow),
     )
 
 
@@ -200,6 +210,9 @@ def _with_storage[T](
         _fail("refused", RuntimeError(f"{exc.message}{hint}"), 1)
     except StorageNotReady as exc:
         _fail("cannot open storage", exc, 1)
+    except Exception as exc:  # anything else (e.g. a corrupt policy row): one clear line, no traceback
+        structlog.get_logger(__name__).error("cli_command_failed", error_type=type(exc).__name__)
+        _fail("unexpected error", RuntimeError(f"{type(exc).__name__}: {exc}"), 1)
 
 
 def show_policy(env_file: Path | None, user: str | None) -> PolicyView:

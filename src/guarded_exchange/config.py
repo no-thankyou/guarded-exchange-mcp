@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     bybit_read_timeout_s: float = Field(default=5.0, gt=0, le=60)
     bybit_get_max_attempts: int = Field(default=3, ge=1, le=5)
     bybit_get_backoff_base_s: float = Field(default=0.2, ge=0, le=5)
+    # Instrument rules (tick size, qty step, minimums) are cached in memory for this long.
+    instrument_rules_ttl_s: int = Field(default=600, ge=1, le=86_400)
 
     # Local storage (PLAN ADR-007): SQLite file, master key file outside its directory.
     db_path: Path = Field(default_factory=default_db_path)

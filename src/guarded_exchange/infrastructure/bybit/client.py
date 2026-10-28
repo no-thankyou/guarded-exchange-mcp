@@ -18,15 +18,23 @@ import httpx2
 import structlog
 
 from guarded_exchange.domain.errors import DomainError
-from guarded_exchange.domain.instruments import Category
-from guarded_exchange.domain.market import Ticker
+from guarded_exchange.domain.instruments import Category, InstrumentRules
+from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
 from guarded_exchange.infrastructure.bybit.errors import (
     RET_OK,
     RETRYABLE_RET_CODES,
     error_for_ret_code,
     unavailable,
 )
-from guarded_exchange.infrastructure.bybit.mapper import Envelope, parse_envelope, ticker_from_result
+from guarded_exchange.infrastructure.bybit.mapper import (
+    KLINE_INTERVALS,
+    Envelope,
+    candles_from_result,
+    orderbook_from_result,
+    parse_envelope,
+    rules_from_result,
+    ticker_from_result,
+)
 
 DEMO_BASE_URL: Final = "https://api-demo.bybit.com"
 
@@ -76,6 +84,30 @@ class BybitClient:
     async def get_ticker(self, symbol: str, category: Category) -> Ticker:
         envelope = await self._get("/v5/market/tickers", {"category": category.value, "symbol": symbol})
         return ticker_from_result(envelope.result, symbol=symbol, category=category, time_ms=envelope.time_ms)
+
+    async def get_orderbook(self, symbol: str, category: Category, depth: int) -> Orderbook:
+        envelope = await self._get(
+            "/v5/market/orderbook", {"category": category.value, "symbol": symbol, "limit": str(depth)}
+        )
+        return orderbook_from_result(envelope.result, symbol=symbol, category=category)
+
+    async def get_candles(
+        self, symbol: str, category: Category, interval: CandleInterval, limit: int
+    ) -> Candles:
+        params = {
+            "category": category.value,
+            "symbol": symbol,
+            "interval": KLINE_INTERVALS[interval],
+            "limit": str(limit),
+        }
+        envelope = await self._get("/v5/market/kline", params)
+        return candles_from_result(envelope.result, symbol=symbol, category=category, interval=interval)
+
+    async def get_instrument_rules(self, symbol: str, category: Category) -> InstrumentRules:
+        envelope = await self._get(
+            "/v5/market/instruments-info", {"category": category.value, "symbol": symbol}
+        )
+        return rules_from_result(envelope.result, symbol=symbol, category=category)
 
     async def _get(self, path: str, params: Mapping[str, str]) -> Envelope:
         attempts = max(1, self._retry.max_attempts)

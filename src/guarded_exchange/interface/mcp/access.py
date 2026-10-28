@@ -15,7 +15,7 @@ from mcp.types import CallToolResult, Tool
 from guarded_exchange.application.policy import AuthorizeAccess
 from guarded_exchange.domain.errors import DomainError, PermissionDenied
 from guarded_exchange.domain.policy import Permission
-from guarded_exchange.interface.mcp.errors import error_result
+from guarded_exchange.interface.mcp.errors import error_result, internal_error_result
 
 log = structlog.get_logger(__name__)
 
@@ -25,6 +25,9 @@ the subject of the verified bearer token from ``get_access_token()``; never clie
 
 TOOL_PERMISSIONS: Final[Mapping[str, Permission]] = {
     "get_ticker": Permission.READ,
+    "get_orderbook": Permission.READ,
+    "get_candles": Permission.READ,
+    "get_instrument_rules": Permission.READ,
     "get_my_policy": Permission.READ,
 }
 """What every registered tool needs. A tool missing here is hidden and refused (fail closed)."""
@@ -52,20 +55,29 @@ class ToolGate:
         allowed = await self._access.visible(self._principal(), self._permissions)
         return [tool for tool in tools if tool.name in allowed]
 
-    async def refusal(self, name: str) -> CallToolResult | None:
-        """``None`` if the call may proceed, else the ``permission_denied`` tool result to return.
+    async def refusal(self, name: str, mcp_request_id: str | None = None) -> CallToolResult | None:
+        """``None`` if the call may proceed, else the tool result to return instead.
 
         Runs before argument validation, so a refused call learns nothing about the tool's schema.
+        A failure of the check itself (e.g. the database) refuses too: fail closed, and the model
+        gets ``internal_error`` with a ``request_id`` only, never the exception text.
         """
-        try:
-            permission = self._permissions.get(name)
-            if permission is None:
-                raise PermissionDenied(
-                    f"tool {name!r} is not available",
-                    next_step="Call only tools listed by tools/list.",
-                )
-            await self._access.require(self._principal(), permission)
-        except DomainError as exc:
-            log.info("tool_denied", tool=name, code=exc.code, request_id=uuid.uuid4().hex)
-            return error_result(exc)
+        request_id = uuid.uuid4().hex
+        with structlog.contextvars.bound_contextvars(
+            request_id=request_id, tool=name, mcp_request_id=mcp_request_id
+        ):
+            try:
+                permission = self._permissions.get(name)
+                if permission is None:
+                    raise PermissionDenied(
+                        f"tool {name!r} is not available",
+                        next_step="Call only tools listed by tools/list.",
+                    )
+                await self._access.require(self._principal(), permission)
+            except DomainError as exc:
+                log.info("tool_denied", code=exc.code)
+                return error_result(exc)
+            except Exception:
+                log.exception("tool_access_check_failed")
+                return internal_error_result(request_id)
         return None

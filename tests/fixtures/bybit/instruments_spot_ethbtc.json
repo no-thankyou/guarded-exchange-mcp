@@ -1,0 +1,41 @@
+{
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "category": "spot",
+        "list": [
+            {
+                "symbolId": 13,
+                "symbol": "ETHBTC",
+                "baseCoin": "ETH",
+                "quoteCoin": "BTC",
+                "innovation": "0",
+                "status": "Trading",
+                "marginTrading": "utaOnly",
+                "stTag": "0",
+                "lotSizeFilter": {
+                    "basePrecision": "0.00001",
+                    "quotePrecision": "0.00000000001",
+                    "minOrderQty": "0.00001",
+                    "maxOrderQty": "771",
+                    "minOrderAmt": "0.000065",
+                    "maxOrderAmt": "10",
+                    "maxLimitOrderQty": "771",
+                    "maxMarketOrderQty": "257",
+                    "postOnlyMaxLimitOrderSize": "3855"
+                },
+                "priceFilter": {
+                    "tickSize": "0.000001"
+                },
+                "riskParameters": {
+                    "priceLimitRatioX": "0.005",
+                    "priceLimitRatioY": "0.01"
+                },
+                "symbolType": "",
+                "xstockMultiplier": "1"
+            }
+        ]
+    },
+    "retExtInfo": {},
+    "time": 1793167146934
+}

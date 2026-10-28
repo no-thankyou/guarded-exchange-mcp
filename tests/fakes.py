@@ -9,8 +9,8 @@ from decimal import Decimal
 
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord, canonical_json
 from guarded_exchange.domain.errors import NotFound
-from guarded_exchange.domain.instruments import Category
-from guarded_exchange.domain.market import Ticker
+from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
+from guarded_exchange.domain.market import Candle, CandleInterval, Candles, Orderbook, OrderbookLevel, Ticker
 from guarded_exchange.domain.policy import PolicyRecord
 from guarded_exchange.domain.users import Environment, User, UserStatus
 
@@ -36,20 +36,109 @@ def make_ticker(symbol: str = "BTCUSDT", category: Category = Category.LINEAR) -
     )
 
 
+def make_rules(
+    symbol: str = "BTCUSDT",
+    category: Category = Category.LINEAR,
+    *,
+    base: str = "BTC",
+    quote: str = "USDT",
+    status: InstrumentStatus = InstrumentStatus.TRADING,
+) -> InstrumentRules:
+    linear = category is Category.LINEAR
+    return InstrumentRules(
+        instrument=Instrument(symbol=symbol, category=category, base=base, quote=quote),
+        status=status,
+        tick_size=Decimal("0.10") if linear else Decimal("0.01"),
+        qty_step=Decimal("0.001") if linear else Decimal("0.00001"),
+        min_qty=Decimal("0.001") if linear else Decimal("0.00001"),
+        min_notional=Decimal(5),
+        max_leverage=Decimal("100.00") if linear else None,
+    )
+
+
+_BOOK_AT = datetime(2026, 10, 28, 8, 59, 5, 159000, tzinfo=UTC)
+
+
+def make_orderbook(
+    symbol: str = "BTCUSDT", category: Category = Category.LINEAR, *, levels: int = 5
+) -> Orderbook:
+    """``levels`` per side around 80000, one tick (0.1) apart."""
+    tick = Decimal("0.1")
+    return Orderbook(
+        symbol=symbol,
+        category=category,
+        bids=tuple(OrderbookLevel(Decimal("80000.0") - i * tick, Decimal("0.5")) for i in range(levels)),
+        asks=tuple(OrderbookLevel(Decimal("80000.1") + i * tick, Decimal("0.25")) for i in range(levels)),
+        observed_at=_BOOK_AT,
+    )
+
+
+def make_candles(
+    symbol: str = "BTCUSDT",
+    category: Category = Category.LINEAR,
+    interval: CandleInterval = CandleInterval.H1,
+    *,
+    count: int = 3,
+) -> Candles:
+    """``count`` hourly candles ending at 2026-10-28 08:00 UTC, oldest first."""
+    first = datetime(2026, 10, 28, 8, 0, tzinfo=UTC) - timedelta(hours=count - 1)
+    return Candles(
+        symbol=symbol,
+        category=category,
+        interval=interval,
+        candles=tuple(
+            Candle(
+                start_at=first + timedelta(hours=i),
+                open=Decimal(80000 + i),
+                high=Decimal(80010 + i),
+                low=Decimal(79990 + i),
+                close=Decimal(80001 + i),
+                volume_base=Decimal("12.5"),
+                turnover_quote=Decimal("1000000.5"),
+            )
+            for i in range(count)
+        ),
+    )
+
+
 @dataclass
 class FakeExchange:
-    """``ExchangeClient`` with a configurable set of tickers and an optional forced failure."""
+    """``ExchangeClient`` with configurable market data and an optional forced failure.
+
+    ``calls`` records ``(method, symbol, category, *args)`` of every call; ``get_ticker`` calls are
+    recorded as ``(symbol, category)`` for the tests written before the other methods existed.
+    """
 
     tickers: dict[tuple[str, Category], Ticker] = field(default_factory=dict)
+    orderbooks: dict[tuple[str, Category], Orderbook] = field(default_factory=dict)
+    candles: dict[tuple[str, Category], Candles] = field(default_factory=dict)
+    rules: dict[tuple[str, Category], InstrumentRules] = field(default_factory=dict)
     fail_with: Exception | None = None
-    calls: list[tuple[str, Category]] = field(default_factory=list)
+    calls: list[tuple[object, ...]] = field(default_factory=list)
 
     async def get_ticker(self, symbol: str, category: Category) -> Ticker:
         self.calls.append((symbol, category))
+        return self._lookup(self.tickers, symbol, category)
+
+    async def get_orderbook(self, symbol: str, category: Category, depth: int) -> Orderbook:
+        self.calls.append(("get_orderbook", symbol, category, depth))
+        return self._lookup(self.orderbooks, symbol, category)
+
+    async def get_candles(
+        self, symbol: str, category: Category, interval: CandleInterval, limit: int
+    ) -> Candles:
+        self.calls.append(("get_candles", symbol, category, interval, limit))
+        return self._lookup(self.candles, symbol, category)
+
+    async def get_instrument_rules(self, symbol: str, category: Category) -> InstrumentRules:
+        self.calls.append(("get_instrument_rules", symbol, category))
+        return self._lookup(self.rules, symbol, category)
+
+    def _lookup[T](self, table: dict[tuple[str, Category], T], symbol: str, category: Category) -> T:
         if self.fail_with is not None:
             raise self.fail_with
         try:
-            return self.tickers[(symbol, category)]
+            return table[(symbol, category)]
         except KeyError:
             raise NotFound(f"no {category.value} instrument {symbol}") from None
 
