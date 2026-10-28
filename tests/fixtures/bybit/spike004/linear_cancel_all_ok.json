@@ -1,0 +1,19 @@
+{
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "list": [
+            {
+                "orderId": "e582f82c-5a7b-42e4-a7fc-ec0c40d7791e",
+                "orderLinkId": "gx-s004-b0b73c-k14"
+            },
+            {
+                "orderId": "3c2d0aac-d095-46e7-8bb4-b599dd055245",
+                "orderLinkId": "gx-s004-b0b73c-j13"
+            }
+        ],
+        "success": "1"
+    },
+    "retExtInfo": {},
+    "time": 1793168803293
+}

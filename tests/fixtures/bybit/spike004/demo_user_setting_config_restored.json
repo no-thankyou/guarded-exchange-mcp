@@ -1,0 +1,14 @@
+{
+    "retCode": 0,
+    "retMsg": "Success",
+    "result": {
+        "lpaSpot": false,
+        "deltaEnable": false,
+        "lpaPerp": false,
+        "smsef": false,
+        "fmsef": false,
+        "smpType": 0
+    },
+    "retExtInfo": {},
+    "time": 1793168800584
+}

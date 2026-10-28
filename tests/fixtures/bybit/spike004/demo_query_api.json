@@ -1,0 +1,58 @@
+{
+    "retCode": 0,
+    "retMsg": "",
+    "result": {
+        "id": "<redacted>",
+        "note": "<redacted>",
+        "apiKey": "<redacted>",
+        "readOnly": 0,
+        "secret": "<redacted>",
+        "permissions": {
+            "ContractTrade": [
+                "Order",
+                "Position"
+            ],
+            "Spot": [
+                "SpotTrade"
+            ],
+            "Wallet": [
+                "AccountTransfer",
+                "SubMemberTransferList"
+            ],
+            "Options": [
+                "OptionsTrade"
+            ],
+            "Derivatives": [
+                "DerivativesTrade"
+            ],
+            "CopyTrading": [],
+            "BlockTrade": [],
+            "Exchange": [
+                "ExchangeHistory"
+            ],
+            "NFT": [],
+            "Affiliate": []
+        },
+        "ips": [
+            "<redacted>"
+        ],
+        "type": 1,
+        "deadlineDay": 92,
+        "expiredAt": "2027-01-29T06:13:06Z",
+        "createdAt": "2026-10-28T06:13:06Z",
+        "unified": 0,
+        "uta": 1,
+        "userID": 0,
+        "inviterID": 0,
+        "vipLevel": "No VIP",
+        "mktMakerLevel": "0",
+        "affiliateID": 0,
+        "rsaPublicKey": "",
+        "isMaster": false,
+        "parentUid": 0,
+        "kycLevel": "LEVEL_DEFAULT",
+        "kycRegion": ""
+    },
+    "retExtInfo": {},
+    "time": 1793168780056
+}
