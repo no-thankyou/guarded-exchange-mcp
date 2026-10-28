@@ -12,6 +12,7 @@
 - `submit_action.py` — единый путь: auth → rules → policy/limits → confirm-заглушка → execute; D-10 (без I/O в транзакции); `action_id` → `client_order_id = gx-…` (D-19).
 - Журнал: отказ лимита (FR-17), attempt до отправки, outcome после; самоописание клиента по итогам 002 (FR-36).
 - Торговые инструменты доступны только на testnet до M6/027; ошибки ADR-013 для торговли.
+- Денежные аргументы (`qty`, `price`, …) публикуются строкой с pattern по образцу `DecimalStr` (а не дефолтным `anyOf: [number, string]` для `Decimal`), чтобы модель не слала float (D-4, спайк 002). Самоописание клиента для FR-36 — `ctx.session.client_params.client_info` (может быть `None`).
 
 ## Non-scope
 - Идемпотентность и неизвестный исход (012), другие действия (013, 014), kill switch (015).
@@ -24,6 +25,7 @@
 - [ ] Unit: политика требует подтверждения → `confirmation_channel_unavailable`, на биржу ничего не ушло.
 - [ ] Integration: отправляется `Limit IOC` с ценой границы и `orderLinkId=gx-…`; `filled: unknown`, если исполнение ещё не видно.
 - [ ] Integration: отказ и попытка/исход в журнале в правильных транзакциях.
+- [ ] E2E: `inputSchema` `place_order` описывает `qty`/`price` как строки с pattern; JSON-число вместо строки → `invalid_params`.
 
 ## Заметки
 —
