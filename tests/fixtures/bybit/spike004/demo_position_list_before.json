@@ -1,0 +1,52 @@
+{
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "nextPageCursor": "BTCUSDT%2C1793168714587%2C0",
+        "category": "linear",
+        "list": [
+            {
+                "symbol": "BTCUSDT",
+                "leverage": "10",
+                "breakEvenPrice": "",
+                "autoAddMargin": 0,
+                "avgPrice": "0",
+                "liqPrice": "",
+                "riskLimitValue": "300000",
+                "takeProfit": "",
+                "positionValue": "",
+                "isReduceOnly": false,
+                "positionIMByMp": "",
+                "tpslMode": "Full",
+                "riskId": 1,
+                "trailingStop": "0",
+                "unrealisedPnl": "",
+                "markPrice": "80938.4",
+                "adlRankIndicator": 0,
+                "cumRealisedPnl": "-0.1780372",
+                "positionMM": "",
+                "createdTime": "1793168702159",
+                "positionIdx": 0,
+                "openTime": 0,
+                "positionIM": "",
+                "positionMMByMp": "",
+                "seq": 140718350659091,
+                "updatedTime": "1793168714587",
+                "side": "",
+                "bustPrice": "",
+                "positionBalance": "0",
+                "leverageSysUpdatedTime": "",
+                "curRealisedPnl": "0",
+                "size": "0",
+                "positionStatus": "Normal",
+                "mmrSysUpdatedTime": "",
+                "stopLoss": "",
+                "tradeMode": 0,
+                "sessionAvgPrice": "",
+                "netDeltaRatio": ""
+            }
+        ]
+    },
+    "retExtInfo": {},
+    "time": 1793168783081
+}

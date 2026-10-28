@@ -1,0 +1,12 @@
+{
+    "retCode": 0,
+    "retMsg": "",
+    "result": {
+        "symbol": "BTCUSDT",
+        "buyLmt": "81377.3",
+        "sellLmt": "80567.7",
+        "ts": "1793168777950"
+    },
+    "retExtInfo": {},
+    "time": 1793168781946
+}
