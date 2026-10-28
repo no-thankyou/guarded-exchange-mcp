@@ -11,8 +11,8 @@ from datetime import datetime
 from typing import Protocol
 
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord
-from guarded_exchange.domain.instruments import Category
-from guarded_exchange.domain.market import Ticker
+from guarded_exchange.domain.instruments import Category, InstrumentRules
+from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
 from guarded_exchange.domain.users import User
 
 
@@ -27,6 +27,30 @@ class ExchangeClient(Protocol):
             InvalidParams: the exchange rejected the parameters.
             ExchangeUnavailable: the exchange could not be reached or failed transiently.
             ExchangeRejected: any other refusal by the exchange.
+        """
+        ...
+
+    async def get_orderbook(self, symbol: str, category: Category, depth: int) -> Orderbook:
+        """Return at least the best ``depth`` levels per side (callers cut to exactly ``depth``).
+
+        Raises the same exceptions as ``get_ticker``.
+        """
+        ...
+
+    async def get_candles(
+        self, symbol: str, category: Category, interval: CandleInterval, limit: int
+    ) -> Candles:
+        """Return up to ``limit`` most recent candles, oldest first. No trades yet -> empty series.
+
+        Raises the same exceptions as ``get_ticker``.
+        """
+        ...
+
+    async def get_instrument_rules(self, symbol: str, category: Category) -> InstrumentRules:
+        """Return the trading rules of one instrument, whatever its quote currency.
+
+        Raises the same exceptions as ``get_ticker``; an instrument the adapter cannot
+        represent in the domain (e.g. a dated future in ``linear``) raises ``InvalidParams``.
         """
         ...
 

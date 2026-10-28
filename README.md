@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents guarded access to a crypto exchange (Bybit V5): least-privilege permissions, risk limits, human confirmation of risky actions in a channel the model does not control, tenant isolation and a tamper-evident audit log.
 
-> Status: early skeleton. Only the read-only `get_ticker` tool works end to end; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
+> Status: early skeleton. Only the read-only market data tools work end to end (`get_ticker`, `get_orderbook`, `get_candles`, `get_instrument_rules`); local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
 
 ## How to run the skeleton
 
@@ -18,7 +18,7 @@ uv run guarded-exchange serve          # MCP over stdio; JSON logs go to stderr
 
 `serve` never migrates (several MCP clients may start server processes at once) and opens the database read-only for its checks. On start it checks SQLite >= 3.35, that the schema revision is exactly the one this version expects, that the append-only triggers on `audit_log` (no UPDATE, no DELETE, no INSERT OR REPLACE over an existing record) are present and exactly as shipped and that the local user exists and is active; otherwise it exits with code 2 and a reason on stderr, e.g. ``guarded-exchange: cannot start: database not found at ...; run `guarded-exchange init` first``.
 
-The server talks to Bybit **Demo Trading** public market data (`https://api-demo.bybit.com`); no API keys are needed for `get_ticker`.
+The server talks to Bybit **Demo Trading** public market data (`https://api-demo.bybit.com`); no API keys are needed for the market data tools.
 
 Connect it to Claude Code:
 
@@ -39,7 +39,16 @@ Example call: `get_ticker {"symbol": "BTCUSDT", "category": "linear"}` returns a
  "change_24h_pct": "0.7311", "mark_price": "80610.84", "funding_rate_pct": "0.01", "observed_at": "2026-10-27T18:57:44.688Z", "...": "..."}
 ```
 
-Errors are tool results with `isError: true` and a stable shape `{code, message, next_step, retry_after_s?, details?, untrusted_text?}`; unexpected server failures return `code: "internal_error"` with a `request_id` and no internals; text that comes from the exchange is returned only in `untrusted_text`.
+Market data tools (all read-only, public data, `symbol` like `BTCUSDT`, `category` is `spot` or `linear`):
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `get_ticker` | `symbol`, `category` | last price, best bid/ask, 24h summary; mark price and funding for linear |
+| `get_orderbook` | `symbol`, `category`, `depth` 1-50 (default 10) | best bids and asks as `[price, qty]` pairs |
+| `get_candles` | `symbol`, `category`, `interval` (`1m`...`12h`, `1d`, `1w`, `1mo`), `limit` 1-200 (default 50) | OHLCV rows `[start_at, open, high, low, close, volume_base]`, oldest first |
+| `get_instrument_rules` | `symbol`, `category` | tick size, qty step, min qty, min order value, max leverage (linear), status; USDT-quoted instruments only; cached in memory for `GX_INSTRUMENT_RULES_TTL_S` |
+
+Errors are tool results with `isError: true` and a stable shape `{code, message, next_step, retry_after_s?, details?, untrusted_text?}`; unexpected server failures return `code: "internal_error"` with a `request_id` and no internals; text that comes from the exchange is returned only in `untrusted_text`. Arguments that do not match a tool's input schema (missing, wrong type, value outside the enum or range) return `code: "invalid_params"` with `details: {field, reason}`; the rejected values are never echoed back.
 
 ### Configuration
 
@@ -52,6 +61,7 @@ Environment variables with the `GX_` prefix. A dotenv file is read only when giv
 | `GX_BYBIT_CONNECT_TIMEOUT_S` / `GX_BYBIT_READ_TIMEOUT_S` | `3` / `5` | HTTP timeouts, seconds |
 | `GX_BYBIT_GET_MAX_ATTEMPTS` | `3` | attempts for read (GET) requests; writes are never retried automatically |
 | `GX_BYBIT_GET_BACKOFF_BASE_S` | `0.2` | exponential backoff base, seconds |
+| `GX_INSTRUMENT_RULES_TTL_S` | `600` | how long instrument rules are cached in memory, seconds (1-86400) |
 | `GX_DB_PATH` | `$XDG_DATA_HOME/guarded-exchange/guarded-exchange.db` (`~/.local/share/...`) | SQLite database file; absolute path |
 | `GX_MASTER_KEY_FILE` | `$XDG_CONFIG_HOME/guarded-exchange/master.key` (`~/.config/...`) | master key file; absolute, must be outside the database directory |
 | `GX_LOCAL_USER` | `local` | name of the local-mode user (the only principal in local mode) |
@@ -80,11 +90,11 @@ uv run pytest --collect-only -q --traceability=docs/traceability.md
 ```
 src/guarded_exchange/
   domain/          pure Python: value objects (Decimal money), rules, domain exceptions with error codes
-  application/     use cases + ports (typing.Protocol), e.g. GetTicker -> ExchangeClient,
+  application/     use cases + ports (typing.Protocol), e.g. GetTicker -> ExchangeClient, InstrumentRulesCache,
                    InitializeInstallation -> UnitOfWorkFactory, Clock, IdGenerator, MasterKeyStore
   infrastructure/  adapters: bybit/ (httpx2 client, DTO mapper, retCode mapping), db/ (SQLAlchemy Core
                    repositories, unit of work, Alembic migrations), master key file, clock, logging
-  interface/       entrypoints: mcp/ (MCPServer, thin tools, error mapping), cli/ (typer)
+  interface/       entrypoints: mcp/ (GuardedMCPServer, thin tools, error mapping), cli/ (typer)
   config.py        pydantic-settings
   bootstrap.py     composition root: the only place that reads config and wires adapters
 ```

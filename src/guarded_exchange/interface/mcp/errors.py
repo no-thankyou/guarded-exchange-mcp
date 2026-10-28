@@ -9,8 +9,9 @@ for protocol problems the client, not the model, must handle.
 from typing import Final
 
 from mcp.types import CallToolResult, TextContent
+from pydantic import ValidationError
 
-from guarded_exchange.domain.errors import DomainError
+from guarded_exchange.domain.errors import DomainError, InvalidParams
 from guarded_exchange.interface.mcp.schemas import ToolErrorOut
 
 DEFAULT_NEXT_STEP: Final[dict[str, str]] = {
@@ -40,6 +41,64 @@ def error_result(exc: DomainError) -> CallToolResult:
         structured_content=payload.model_dump(mode="json", exclude_none=True),
         is_error=True,
     )
+
+
+_ARGUMENTS_NEXT_STEP: Final = (
+    "Fix the named arguments according to the tool's input schema (required fields, types, allowed "
+    "values) and call again."
+)
+
+# pydantic error types whose built-in message describes the rule, never the rejected value
+# ("Field required", "Input should be 'spot' or 'linear'", "String should match pattern ...").
+# Any other type - notably `value_error`/`assertion_error` from a custom validator, whose text
+# may quote the input - is reported by location and type only (fail closed against echoing a
+# value, e.g. a pasted secret, back into the model context and logs).
+_RULE_ONLY_MESSAGES: Final = frozenset(
+    {
+        "missing",
+        "literal_error",
+        "enum",
+        "string_type",
+        "string_pattern_mismatch",
+        "string_too_short",
+        "string_too_long",
+        "int_type",
+        "int_parsing",
+        "int_from_float",
+        "bool_type",
+        "bool_parsing",
+        "decimal_type",
+        "decimal_parsing",
+        "greater_than",
+        "greater_than_equal",
+        "less_than",
+        "less_than_equal",
+    }
+)
+
+
+def invalid_arguments_result(error: ValidationError) -> CallToolResult:
+    """Arguments rejected by the tool's input schema -> ``invalid_params`` (ADR-013, spike 002).
+
+    ``details`` name the first failing argument (``field``) and the pydantic error type
+    (``reason``); the message lists every problem. Rejected values are never included.
+    """
+    problems = [(_loc(e["loc"]), e["type"], e["msg"]) for e in error.errors(include_input=False)]
+    field, reason, _ = problems[0]
+    message = "; ".join(
+        f"{loc}: {msg}" if kind in _RULE_ONLY_MESSAGES else f"{loc}: {kind}" for loc, kind, msg in problems
+    )
+    return error_result(
+        InvalidParams(
+            f"invalid arguments: {message}",
+            next_step=_ARGUMENTS_NEXT_STEP,
+            details={"field": field, "reason": reason},
+        )
+    )
+
+
+def _loc(loc: tuple[int | str, ...]) -> str:
+    return ".".join(str(part) for part in loc) or "arguments"
 
 
 def internal_error_result(request_id: str) -> CallToolResult:

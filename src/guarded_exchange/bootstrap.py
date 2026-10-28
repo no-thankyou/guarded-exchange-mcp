@@ -3,6 +3,7 @@
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, NoReturn
@@ -14,7 +15,8 @@ from mcp.server import MCPServer
 
 from guarded_exchange.application.admin import InitializeInstallation, InitResult, MasterKeyMissing
 from guarded_exchange.application.auth import PrincipalUnavailable, ResolveLocalPrincipal
-from guarded_exchange.application.read_market import GetTicker
+from guarded_exchange.application.instrument_rules import InstrumentRulesCache
+from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.config import ConfigError, Settings, load_settings
 from guarded_exchange.domain.errors import DomainError
 from guarded_exchange.infrastructure.bybit.client import BybitClient, RetryPolicy
@@ -48,7 +50,15 @@ def build_use_cases(settings: Settings, http: httpx2.AsyncClient) -> UseCases:
             base_delay_s=settings.bybit_get_backoff_base_s,
         ),
     )
-    return UseCases(get_ticker=GetTicker(exchange))
+    rules = InstrumentRulesCache(
+        exchange, SystemClock(), ttl=timedelta(seconds=settings.instrument_rules_ttl_s)
+    )
+    return UseCases(
+        get_ticker=GetTicker(exchange),
+        get_orderbook=GetOrderbook(exchange),
+        get_candles=GetCandles(exchange),
+        get_instrument_rules=GetInstrumentRules(rules),
+    )
 
 
 @asynccontextmanager

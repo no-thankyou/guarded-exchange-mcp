@@ -102,7 +102,12 @@ async def test_stdio_server_answers_and_keeps_stdout_protocol_only(
         ok = await client.call_tool("get_ticker", {"symbol": "BTCUSDT", "category": "linear"})
         err = await client.call_tool("get_ticker", {"symbol": "NOPEUSDT", "category": "spot"})
 
-    assert [t.name for t in tools.tools] == ["get_ticker"]
+    assert [t.name for t in tools.tools] == [
+        "get_ticker",
+        "get_orderbook",
+        "get_candles",
+        "get_instrument_rules",
+    ]
     assert ok.is_error is False
     assert ok.structured_content is not None
     assert ok.structured_content["last_price"] == "80571.1"

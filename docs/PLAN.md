@@ -50,7 +50,7 @@ src/guarded_exchange/
   domain/
     money.py            # Decimal-типы: Price, Qty, Notional, Percent; округление к шагу
     instruments.py      # Instrument, InstrumentRules (tick, qty step, min qty/notional, max leverage), validate (FR-10)
-    market.py           # рыночные value objects: Ticker (тикет 001), позже Orderbook, Candle
+    market.py           # рыночные value objects: Ticker (001), Orderbook, Candles, CandleInterval, лимиты объёма ответа FR-3 (009)
     actions.py          # TradingAction (PlaceOrder, AmendOrder, CancelOrder, CancelAll, SetTradingStop, ClosePosition, SetLeverage)
     risk.py             # classify(action, position) -> RiskDirection; reduce-only clamp (FR-43)
     policy.py           # AdminCeiling, UserOverrides, EffectivePolicy = strictest(...) (FR-12, FR-18, FR-42, FR-45)
@@ -62,6 +62,7 @@ src/guarded_exchange/
   application/
     ports.py            # ExchangeClient, *Repository, UnitOfWork(Factory), MasterKeyStore (005), ConfirmationChannel, CredentialCipher, Clock, IdGenerator, RateLimiter
     read_market.py, read_account.py, read_policy.py, read_audit.py
+    instrument_rules.py # InstrumentRulesCache: правила инструмента с TTL в памяти процесса (009), переиспользует валидация ордеров (011)
     submit_action.py    # единый путь любого торгового действия: auth → [второй раунд MRTR → resolve, D-1] → повтор/идемпотентность (D-20) → rate limit → rules → policy/limits → confirm? → execute
     resolve_confirmation.py   # человек одобрил/отклонил (только не-MCP каналы)
     execute_confirmed.py      # перепроверка FR-48 + исполнение + разведка исхода FR-27
@@ -79,7 +80,7 @@ src/guarded_exchange/
     ratelimit.py        # token buckets in-memory
     clock.py            # SystemClock (мс), UuidGenerator
   interface/
-    mcp/                # server.py (MCPServer, транспорт), tools/*.py (тонкие), schemas.py (pydantic I/O), errors.py (единый маппинг)
+    mcp/                # server.py (реестр, транспорт), guarded_server.py (GuardedMCPServer: override call_tool/list_tools, тикеты 009/006), tools/*.py (тонкие), schemas.py (pydantic I/O), errors.py (единый маппинг)
     cli/                # admin и user команды (typer)
   executor.py           # ConfirmedActionExecutor (фоновая задача)
   config.py             # pydantic-settings
@@ -184,7 +185,7 @@ tests/ unit/ integration/ e2e/ testnet/ (маркер, вне CI)
 
 ### ADR-012. Видимость инструментов: граница — проверка в `tools/call`; фильтрованный `tools/list` через override `MCPServer.list_tools()` (спайк 002)
 - **Контекст:** FR-11, FR-44; в `MCPServer` нет документированного хука per-user `tools/list`, middleware SDK помечен provisional.
-- **Решение:** права проверяются в use case на каждом вызове — это и есть граница безопасности. Сверху — фильтрованный `tools/list` по профилю. **Спайк 002:** `interface/mcp/server.py` объявляет подкласс `GuardedMCPServer(MCPServer)` и переопределяет публичный `async list_tools()`: SDK вызывает его из `_handle_list_tools` без контекста, поэтому principal берётся из contextvar — `get_access_token()` на HTTP (работает внутри `list_tools`, проверено на Streamable HTTP + `TokenVerifier`), локальный пользователь из конфига на stdio. Профиль пользователя читает use case (application), interface только отфильтровывает имена. Результат по умолчанию уже `ttlMs=0, cacheScope="private"` (дефолт `CacheableResult` в `mcp_types`), явный `cache_hints` не нужен. Скрытый инструмент по-прежнему вызывается напрямую через `tools/call` — отказ `permission_denied` даёт use case (тест AC-2/FR-11 обязан это покрыть).
+- **Решение:** права проверяются в use case на каждом вызове — это и есть граница безопасности. Сверху — фильтрованный `tools/list` по профилю. **Спайк 002:** `interface/mcp/guarded_server.py` (тикет 009) объявляет подкласс `GuardedMCPServer(MCPServer)` и переопределяет публичный `async list_tools()`: SDK вызывает его из `_handle_list_tools` без контекста, поэтому principal берётся из contextvar — `get_access_token()` на HTTP (работает внутри `list_tools`, проверено на Streamable HTTP + `TokenVerifier`), локальный пользователь из конфига на stdio. Профиль пользователя читает use case (application), interface только отфильтровывает имена. Результат по умолчанию уже `ttlMs=0, cacheScope="private"` (дефолт `CacheableResult` в `mcp_types`), явный `cache_hints` не нужен. Скрытый инструмент по-прежнему вызывается напрямую через `tools/call` — отказ `permission_denied` даёт use case (тест AC-2/FR-11 обязан это покрыть).
 - **Альтернативы:** весь сервер на low-level `Server` (больше ручного кода схем); provisional middleware (работает — спайк фильтрует dict-результат `tools/list`, — но SDK прямо обещает менять сигнатуру в 2.x minor); замена обработчика через приватный `_lowlevel_server.add_request_handler`; `Extension` не может перехватить `tools/list` (`MethodBinding` запрещает spec-методы).
 - **Последствия:** evals измеряют, мешают ли видимые, но запрещённые инструменты (кейсы read-only профиля). Override опирается на публичный метод, но на неявный контракт «`_handle_list_tools` вызывает `self.list_tools()`» — при обновлении `mcp` его ловит e2e-тест фильтрации (версия закреплена `==`). Смена профиля без переподключения клиента видна на следующем `tools/list` (`ttlMs=0`); `notifications/tools/list_changed` — только подписчикам `subscriptions/listen`.
 
@@ -214,7 +215,7 @@ tests/ unit/ integration/ e2e/ testnet/ (маркер, вне CI)
 - **Последствия:** evals запускаются вручную/по метке (требуют ключи и сеть), CI гоняет только unit-тесты раннера на записанных ответах.
 
 ### Спайк 002 (2026-10-27): возможности MCP Python SDK `mcp` 2.3.0
-Проверено на закреплённой `mcp==2.3.0` / `mcp_types==2.3.0` (PyPI 2026-10-02), протокол 2026-07-28 (и legacy 2025-11-25 для сравнения), по исходникам установленного пакета и https://py.sdk.modelcontextprotocol.io/handlers/multi-round-trip/ (2026-10-27). Эксперименты — `spikes/002/` (запуск: `uv run pytest spikes/002 -v`, всё in-process под тем же сетевым guard, что `tests/`; HTTP — через `httpx2.ASGITransport`). Вывод: архитектура interface/mcp не меняется (high-level `MCPServer`, low-level `Server` не нужен); в `interface/mcp/server.py` появляется подкласс `GuardedMCPServer` с двумя override публичных методов.
+Проверено на закреплённой `mcp==2.3.0` / `mcp_types==2.3.0` (PyPI 2026-10-02), протокол 2026-07-28 (и legacy 2025-11-25 для сравнения), по исходникам установленного пакета и https://py.sdk.modelcontextprotocol.io/handlers/multi-round-trip/ (2026-10-27). Эксперименты — `spikes/002/` (запуск: `uv run pytest spikes/002 -v`, всё in-process под тем же сетевым guard, что `tests/`; HTTP — через `httpx2.ASGITransport`). Вывод: архитектура interface/mcp не меняется (high-level `MCPServer`, low-level `Server` не нужен); в `interface/mcp/guarded_server.py` появляется подкласс `GuardedMCPServer` с двумя override публичных методов (`call_tool` — тикет 009, `list_tools` — тикет 006).
 
 | Вопрос | Ответ | Как / где |
 |---|---|---|
@@ -266,7 +267,7 @@ async def place_order(..., ctx: Context) -> Annotated[CallToolResult, OrderOut] 
 ## 5. Модели данных
 
 ### 5.1 Домен (dataclasses, frozen)
-- `Instrument(symbol, category: spot|linear, base, quote="USDT")`, `InstrumentRules(tick_size, qty_step, min_qty, min_notional, max_leverage)`.
+- `Instrument(symbol, category: spot|linear, base, quote)` (не-USDT отклоняет `require_supported_quote`, FR-4), `InstrumentRules(instrument, status, tick_size, qty_step, min_qty, min_notional?, max_leverage?)` (тикет 009; `max_leverage` — только linear, `status` — `InstrumentStatus`, торгуется только `trading`).
 - `TradingAction` — union: `PlaceOrder(instrument, side, qty, order_type: market|limit, price?, reduce_only)`, `AmendOrder(order_ref, qty?, price?)`, `CancelOrder(order_ref)`, `CancelAll(instrument)`, `SetTradingStop(instrument, stop_loss?, take_profit?)`, `ClosePosition(instrument, qty?)`, `SetLeverage(instrument, leverage)`.
 - `RiskDirection = INCREASES | REDUCES` (FR-43), `classify(action, position, current_order?)`.
 - `EffectivePolicy(profile: read_only|trade, environment, allowlist, max_order_notional, max_leverage, slippage_pct, confirm_rule, confirmation_ttl, trust_client_ui, prefer_external_channel, unconfirmed_actions_window, max_pending, kill_switch: none|user|admin)`; `strictest(ceiling, overrides)` по полям (D-23): профиль — min (read_only < trade); allowlist — пересечение; `trust_client_ui` — AND; `prefer_external_channel` — OR; TTL, slippage, лимиты, окна, `max_pending` — min; правила подтверждения — объединение множеств подтверждаемых типов действий и min порога X. `validate_override` отклоняет ослабление (FR-12).

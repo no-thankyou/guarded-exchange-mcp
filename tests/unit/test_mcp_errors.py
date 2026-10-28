@@ -1,6 +1,8 @@
 import json
+from typing import Annotated
 
 import pytest
+from pydantic import AfterValidator, BaseModel, Field, ValidationError
 
 from guarded_exchange.domain.errors import (
     DomainError,
@@ -9,7 +11,7 @@ from guarded_exchange.domain.errors import (
     InvalidParams,
     NotFound,
 )
-from guarded_exchange.interface.mcp.errors import DEFAULT_NEXT_STEP, error_result
+from guarded_exchange.interface.mcp.errors import DEFAULT_NEXT_STEP, error_result, invalid_arguments_result
 
 pytestmark = pytest.mark.req("FR-28")
 
@@ -74,3 +76,45 @@ def test_unknown_domain_error_gets_generic_code_and_fallback_next_step() -> None
     assert result.structured_content is not None
     assert result.structured_content["code"] == "internal_error"
     assert result.structured_content["next_step"] == "Report this error to the user."
+
+
+# --- SDK argument validation -> invalid_params (GuardedMCPServer) ----------------------------
+
+
+def _no_secret(value: str) -> str:
+    if "sk-" in value:
+        raise ValueError(f"looks like an API key: {value}")  # a careless validator echoing its input
+    return value
+
+
+class _Args(BaseModel):
+    note: Annotated[str, AfterValidator(_no_secret)]
+    depth: Annotated[int, Field(ge=1, le=50)] = 10
+
+
+def _validation_error(data: dict[str, object]) -> ValidationError:
+    with pytest.raises(ValidationError) as err:
+        _Args.model_validate(data)
+    return err.value
+
+
+def test_custom_validator_message_is_replaced_by_its_type() -> None:
+    result = invalid_arguments_result(_validation_error({"note": "my key sk-SECRET"}))
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "invalid_params"
+    assert result.structured_content["details"] == {"field": "note", "reason": "value_error"}
+    assert result.structured_content["message"] == "invalid arguments: note: value_error"
+    assert "SECRET" not in result.model_dump_json()
+
+
+def test_built_in_rule_messages_are_kept_and_the_first_field_is_in_details() -> None:
+    result = invalid_arguments_result(_validation_error({"depth": 99}))
+
+    assert result.structured_content is not None
+    assert result.structured_content["details"] == {"field": "note", "reason": "missing"}
+    assert result.structured_content["message"] == (
+        "invalid arguments: note: Field required; depth: Input should be less than or equal to 50"
+    )
+    assert "99" not in result.structured_content["message"]

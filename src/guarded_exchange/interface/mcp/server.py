@@ -9,7 +9,8 @@ from typing import Any
 
 from mcp.server import MCPServer
 
-from guarded_exchange.application.read_market import GetTicker
+from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
+from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
 from guarded_exchange.interface.mcp.tools import market
 
 SERVER_NAME = "guarded-exchange"
@@ -25,11 +26,20 @@ class UseCases:
     """Everything the MCP tools may call. Grows with each vertical slice."""
 
     get_ticker: GetTicker
+    get_orderbook: GetOrderbook
+    get_candles: GetCandles
+    get_instrument_rules: GetInstrumentRules
 
 
-def create_server(use_cases: UseCases, *, version: str = "") -> MCPServer[Any]:
-    mcp: MCPServer[Any] = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS, version=version)
-    market.register(mcp, use_cases.get_ticker)
+def create_server(use_cases: UseCases, *, version: str = "") -> GuardedMCPServer:
+    mcp = GuardedMCPServer(SERVER_NAME, instructions=INSTRUCTIONS, version=version)
+    market.register(
+        mcp,
+        get_ticker=use_cases.get_ticker,
+        get_orderbook=use_cases.get_orderbook,
+        get_candles=use_cases.get_candles,
+        get_instrument_rules=use_cases.get_instrument_rules,
+    )
     return mcp
 
 
