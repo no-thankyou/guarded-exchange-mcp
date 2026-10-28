@@ -45,7 +45,7 @@ MAX_ORDERBOOK_DEPTH: Final = 50
 
 def orderbook_depth(raw: object) -> int:
     """Validate the requested number of levels per side (1..``MAX_ORDERBOOK_DEPTH``)."""
-    return _bounded(raw, "depth", MAX_ORDERBOOK_DEPTH)
+    return bounded_count(raw, "depth", MAX_ORDERBOOK_DEPTH)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +94,7 @@ MAX_CANDLES: Final = 200
 
 def candles_limit(raw: object) -> int:
     """Validate the requested number of candles (1..``MAX_CANDLES``)."""
-    return _bounded(raw, "limit", MAX_CANDLES)
+    return bounded_count(raw, "limit", MAX_CANDLES)
 
 
 class CandleInterval(StrEnum):
@@ -171,7 +171,7 @@ class Candles:
         return replace(self, candles=self.candles[-limit:])
 
 
-def _bounded(raw: object, field: str, maximum: int) -> int:
+def bounded_count(raw: object, field: str, maximum: int) -> int:
     # Only a real int: bool is an int subclass (`true` is a mistake, not 1), and a float or
     # Decimal such as 2.5 must not be silently truncated or compared as a count.
     if type(raw) is not int or not 1 <= raw <= maximum:

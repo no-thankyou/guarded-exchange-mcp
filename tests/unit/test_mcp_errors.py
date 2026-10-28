@@ -6,10 +6,13 @@ from pydantic import AfterValidator, BaseModel, Field, ValidationError
 
 from guarded_exchange.domain.errors import (
     DomainError,
+    ExchangeCredentialsInvalid,
     ExchangeRejected,
     ExchangeUnavailable,
     InvalidParams,
     NotFound,
+    RateLimited,
+    UnsupportedPositionMode,
 )
 from guarded_exchange.interface.mcp.errors import DEFAULT_NEXT_STEP, error_result, invalid_arguments_result
 
@@ -23,6 +26,8 @@ pytestmark = pytest.mark.req("FR-28")
         (NotFound("missing"), "not_found"),
         (ExchangeUnavailable("down"), "exchange_unavailable"),
         (ExchangeRejected("no"), "exchange_rejected"),
+        (ExchangeCredentialsInvalid("no key"), "exchange_credentials_invalid"),
+        (RateLimited("slow down"), "rate_limited"),
     ],
 )
 def test_every_domain_error_maps_to_is_error_with_code_and_next_step(exc: DomainError, code: str) -> None:
@@ -36,8 +41,36 @@ def test_every_domain_error_maps_to_is_error_with_code_and_next_step(exc: Domain
 
 
 def test_every_code_has_a_default_next_step() -> None:
-    codes = {cls.code for cls in (InvalidParams, NotFound, ExchangeUnavailable, ExchangeRejected)}
+    codes = {
+        cls.code
+        for cls in (
+            InvalidParams,
+            NotFound,
+            ExchangeUnavailable,
+            ExchangeRejected,
+            ExchangeCredentialsInvalid,
+            RateLimited,
+        )
+    }
     assert codes <= DEFAULT_NEXT_STEP.keys()
+
+
+@pytest.mark.req("FR-35")
+def test_rate_limited_carries_retry_after_seconds() -> None:
+    result = error_result(RateLimited("the exchange rate limit was hit", retry_after_s=2.5))
+
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "rate_limited"
+    assert result.structured_content["retry_after_s"] == 2.5
+
+
+def test_unsupported_position_mode_has_its_own_code_and_tells_what_to_do() -> None:
+    result = error_result(UnsupportedPositionMode())
+
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "unsupported_position_mode"
+    assert "one-way" in result.structured_content["next_step"]
+    assert result.structured_content["details"] == {"reason": "hedge_mode"}
 
 
 def test_specific_next_step_details_and_untrusted_text_are_passed_through() -> None:

@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents guarded access to a crypto exchange (Bybit V5): least-privilege permissions, risk limits, human confirmation of risky actions in a channel the model does not control, tenant isolation and a tamper-evident audit log.
 
-> Status: early skeleton. Read-only tools work end to end: market data (`get_ticker`, `get_orderbook`, `get_candles`, `get_instrument_rules`) and `get_my_policy`; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`; the policy (admin ceiling, user tightening) and exchange API keys (encrypted, permission-checked) are managed from the CLI; a remote multi-user mode serves the same tools over Streamable HTTP with per-user bearer tokens. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
+> Status: early skeleton. Read-only tools work end to end: market data (`get_ticker`, `get_orderbook`, `get_candles`, `get_instrument_rules`), the user's account (`get_balances`, `get_positions`, `get_open_orders`) and `get_my_policy`; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`; the policy (admin ceiling, user tightening) and exchange API keys (encrypted, permission-checked) are managed from the CLI; a remote multi-user mode serves the same tools over Streamable HTTP with per-user bearer tokens. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
 
 ## How to run the skeleton
 
@@ -47,6 +47,16 @@ Market data tools (all read-only, public data, `symbol` like `BTCUSDT`, `categor
 | `get_orderbook` | `symbol`, `category`, `depth` 1-50 (default 10) | best bids and asks as `[price, qty]` pairs |
 | `get_candles` | `symbol`, `category`, `interval` (`1m`...`12h`, `1d`, `1w`, `1mo`), `limit` 1-200 (default 50) | OHLCV rows `[start_at, open, high, low, close, volume_base]`, oldest first |
 | `get_instrument_rules` | `symbol`, `category` | tick size, qty step, min qty, min order value, max leverage (linear), status; USDT-quoted instruments only; cached in memory for `GX_INSTRUMENT_RULES_TTL_S` |
+
+Account tools (read-only; signed with the calling user's own exchange key, which never leaves the server):
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `get_balances` | - | totals in USD (equity, wallet balance, available for new orders) and each asset held, largest USD value first (at most 50, the rest counted in `omitted_coins`) |
+| `get_positions` | `symbol` (optional), `limit` 1-50 (default 20) | open USDT perpetual positions: side, size, entry/mark/liquidation price, unrealised PnL, leverage, TP/SL; `has_more` |
+| `get_open_orders` | `category`, `symbol` (optional), `limit` 1-50 (default 20) | open orders (plain and conditional), newest first, each with `origin`: `system` (client order id with our `gx-` prefix) or `external` (placed manually or by another bot); `has_more` |
+
+An order's client order id is free text whoever placed the order chose, so it is returned only in the order's `untrusted_text` (FR-41); every other string in these answers is a number, a UTC time, one of our enum values or an identifier checked against a strict pattern. The `gx-` prefix is a fast filter, not a proof: anyone with access to the account can use it; checking against the journal of orders this server sent comes with trading. Without a stored key the tools answer `exchange_credentials_invalid` with `next_step` "add a key with `guarded-exchange keys add`, outside the chat"; an account in hedge mode gets `unsupported_position_mode` (v1 is one-way only); an exchange rate limit (`10006`) gets `rate_limited` with `retry_after_s` from `X-Bapi-Limit-Reset-Timestamp`. A read-only key is enough for all three tools.
 
 Errors are tool results with `isError: true` and a stable shape `{code, message, next_step, retry_after_s?, details?, untrusted_text?}`; unexpected server failures return `code: "internal_error"` with a `request_id` and no internals; text that comes from the exchange is returned only in `untrusted_text`. Arguments that do not match a tool's input schema (missing, wrong type, value outside the enum or range) return `code: "invalid_params"` with `details: {field, reason}`; the rejected values are never echoed back.
 
@@ -146,7 +156,8 @@ src/guarded_exchange/
                    ReadPolicy / SetCeiling / TightenPolicy / AuthorizeAccess (who may call what),
                    CreateUser / IssueAccessToken / RevokeAccessToken, AuthenticateBearerToken -> Authenticator,
                    Add/Replace/DeleteCredential, RecheckCredential, RequireTradingCredential
-                   -> KeyPermissionsReader, CredentialCipher, CredentialRepository
+                   -> KeyPermissionsReader, CredentialCipher, CredentialRepository,
+                   GetBalances / GetPositions / GetOpenOrders -> ReadCredential, AccountReader
   infrastructure/  adapters: bybit/ (httpx2 client, request signing, known hosts, DTO mapper, retCode
                    mapping), db/ (SQLAlchemy Core repositories, unit of work, Alembic migrations),
                    crypto (HKDF keyring, AES-256-GCM), master key file, clock, logging

@@ -8,7 +8,13 @@ from typing import Any
 import httpx2
 import pytest
 
-from guarded_exchange.domain.errors import ExchangeRejected, ExchangeUnavailable, InvalidParams, NotFound
+from guarded_exchange.domain.errors import (
+    ExchangeRejected,
+    ExchangeUnavailable,
+    InvalidParams,
+    NotFound,
+    RateLimited,
+)
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.infrastructure.bybit.client import BybitClient, RetryPolicy
 from guarded_exchange.infrastructure.bybit.http import make_http_client
@@ -173,15 +179,43 @@ async def test_unknown_ret_code_is_exchange_rejected() -> None:
     assert err.value.details == {"exchange_code": "170213"}
 
 
-@pytest.mark.req("FR-28")
-async def test_rate_limit_ret_code_is_not_retried() -> None:
+@pytest.mark.req("FR-28", "FR-35")
+async def test_rate_limit_ret_code_is_rate_limited_with_default_retry_after_and_not_retried() -> None:
     recorder = Recorder(_json({"retCode": 10006, "retMsg": "Too many visits!", "result": {}, "time": 1}))
     client, _ = _client(recorder)
 
-    with pytest.raises(ExchangeUnavailable):
+    with pytest.raises(RateLimited) as err:
         await client.get_ticker("BTCUSDT", Category.LINEAR)
 
     assert len(recorder.requests) == 1
+    assert err.value.code == "rate_limited"
+    assert err.value.retry_after_s == 1.0  # no reset header: a conservative default
+    assert err.value.untrusted_text == "Too many visits!"
+
+
+@pytest.mark.req("FR-28", "FR-35")
+@pytest.mark.parametrize(
+    ("reset_header", "expected"),
+    [("1793168782702", 2.5), ("1793168779000", 0.0), ("1793169999999", 600.0), ("soon", 1.0)],
+    ids=["future", "past", "far-future-capped", "garbage"],
+)
+async def test_rate_limit_retry_after_comes_from_the_reset_header(reset_header: str, expected: float) -> None:
+    body = {"retCode": 10006, "retMsg": "Too many visits!", "result": {}, "time": 1}
+    recorder = Recorder(
+        httpx2.Response(200, json=body, headers={"X-Bapi-Limit-Reset-Timestamp": reset_header})
+    )
+    http = make_http_client(
+        "https://api-demo.bybit.com",
+        connect_timeout_s=1,
+        read_timeout_s=1,
+        transport=httpx2.MockTransport(recorder),
+    )
+    client = BybitClient(http, retry=RetryPolicy(max_attempts=3), now_ms=lambda: 1793168780202)
+
+    with pytest.raises(RateLimited) as err:
+        await client.get_ticker("BTCUSDT", Category.LINEAR)
+
+    assert err.value.retry_after_s == expected
 
 
 @pytest.mark.req("FR-28")

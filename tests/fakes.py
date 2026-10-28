@@ -7,9 +7,25 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from guarded_exchange.application.ports import CredentialCipher
 from guarded_exchange.domain.access_tokens import TOKEN_PREFIX, AccessToken
+from guarded_exchange.domain.account import (
+    AccountBalances,
+    CoinBalance,
+    Order,
+    OrderOrigin,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Page,
+    Position,
+    PositionSide,
+    TimeInForce,
+    UntrustedText,
+)
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord, canonical_json
 from guarded_exchange.domain.credentials import (
+    EXCHANGE_BYBIT,
     ApiKeyPair,
     Credential,
     CredentialBinding,
@@ -151,6 +167,120 @@ class FakeExchange:
             return table[(symbol, category)]
         except KeyError:
             raise NotFound(f"no {category.value} instrument {symbol}") from None
+
+
+# --- account ---------------------------------------------------------------------------------
+
+_ACCOUNT_AT = datetime(2026, 10, 28, 6, 26, 22, 702000, tzinfo=UTC)
+
+
+def make_balances() -> AccountBalances:
+    return AccountBalances(
+        total_equity_usd=Decimal("4992.27725481"),
+        total_wallet_balance_usd=Decimal("4992.20644097"),
+        total_available_usd=Decimal("4992.20644097"),
+        coins=(
+            CoinBalance(
+                coin="BTC",
+                wallet_balance=Decimal("0.00000087"),
+                equity=Decimal("0.00000087"),
+                locked=Decimal(0),
+                unrealised_pnl=Decimal(0),
+                usd_value=Decimal("0.07081384"),
+            ),
+            CoinBalance(
+                coin="USDT",
+                wallet_balance=Decimal("4999.73103618"),
+                equity=Decimal("4999.73103618"),
+                locked=Decimal(0),
+                unrealised_pnl=Decimal(0),
+                usd_value=Decimal("4992.20644097"),
+            ),
+        ),
+        observed_at=_ACCOUNT_AT,
+    )
+
+
+def make_position(symbol: str = "BTCUSDT", side: PositionSide = PositionSide.LONG) -> Position:
+    return Position(
+        symbol=symbol,
+        side=side,
+        size=Decimal("0.010"),
+        entry_price=Decimal("80938.4"),
+        mark_price=Decimal("81020.1"),
+        liquidation_price=Decimal("73101.2"),
+        unrealised_pnl=Decimal("0.817"),
+        position_value=Decimal("809.384"),
+        leverage=Decimal(10),
+        take_profit=None,
+        stop_loss=Decimal("78510.0"),
+        updated_at=_ACCOUNT_AT,
+    )
+
+
+def make_order(
+    order_id: str = "fa7b555a-dad9-444c-8f67-e4fc7572ac65",
+    *,
+    category: Category = Category.LINEAR,
+    client_order_id: str | None = "gx-0123456789abcdef0123456789abcdef",
+    origin: OrderOrigin = OrderOrigin.SYSTEM,
+) -> Order:
+    return Order(
+        order_id=order_id,
+        symbol="BTCUSDT",
+        category=category,
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        status=OrderStatus.NEW,
+        qty=Decimal("0.001"),
+        filled_qty=Decimal(0),
+        price=Decimal("68797.6"),
+        avg_fill_price=None,
+        time_in_force=TimeInForce.GTC,
+        reduce_only=False,
+        conditional=None,
+        trigger_price=None,
+        take_profit=None,
+        stop_loss=None,
+        created_at=_ACCOUNT_AT,
+        updated_at=_ACCOUNT_AT,
+        origin=origin,
+        client_order_id=None if client_order_id is None else UntrustedText(client_order_id),
+    )
+
+
+@dataclass
+class FakeAccount:
+    """``AccountReader`` returning configured pages; ``calls`` records ``(method, keys, *args)``."""
+
+    balances: AccountBalances = field(default_factory=make_balances)
+    positions: tuple[Position, ...] = ()
+    orders: dict[Category, tuple[Order, ...]] = field(default_factory=dict)
+    fail_with: Exception | None = None
+    calls: list[tuple[object, ...]] = field(default_factory=list)
+
+    async def get_balances(self, keys: ApiKeyPair) -> AccountBalances:
+        self.calls.append(("get_balances", keys))
+        self._maybe_fail()
+        return self.balances
+
+    async def get_positions(self, keys: ApiKeyPair, *, symbol: str | None, limit: int) -> Page[Position]:
+        self.calls.append(("get_positions", keys, symbol, limit))
+        self._maybe_fail()
+        found = tuple(p for p in self.positions if symbol is None or p.symbol == symbol)
+        return Page(items=found, has_more=False)  # deliberately not cut: the use case must cut
+
+    async def get_open_orders(
+        self, keys: ApiKeyPair, category: Category, *, symbol: str | None, limit: int
+    ) -> Page[Order]:
+        self.calls.append(("get_open_orders", keys, category, symbol, limit))
+        self._maybe_fail()
+        found = tuple(o for o in self.orders.get(category, ()) if symbol is None or o.symbol == symbol)
+        return Page(items=found, has_more=False)
+
+    def _maybe_fail(self) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
 
 
 # --- storage, clock, ids ---------------------------------------------------------------------
@@ -481,3 +611,30 @@ class InMemoryDatabase:
         )
         self.state.users[user.id] = user
         return user
+
+    def add_credential(
+        self,
+        user: User,
+        cipher: CredentialCipher,
+        keys: ApiKeyPair,
+        *,
+        permissions: KeyPermissions | None,
+        status: CredentialStatus = CredentialStatus.ACTIVE,
+        credential_id: str | None = None,
+    ) -> Credential:
+        """Seed a stored key directly (as ``keys add`` would), sealed with ``cipher``."""
+        at = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
+        credential = Credential(
+            id=credential_id or f"cred-{user.name}-{len(self.state.credentials) + 1}",
+            user_id=user.id,
+            exchange=EXCHANGE_BYBIT,
+            environment=user.environment,
+            status=status,
+            permissions=permissions,
+            permissions_checked_at=None if permissions is None else at,
+            admin_attested=permissions is None,
+            created_at=at,
+            deleted_at=at if status is CredentialStatus.DELETED else None,
+        )
+        self.state.credentials[credential.id] = (credential, cipher.seal(keys, credential.binding))
+        return credential

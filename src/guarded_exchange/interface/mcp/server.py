@@ -13,11 +13,12 @@ from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy
+from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.domain.policy import Permission
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, PrincipalProvider, ToolGate
 from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
-from guarded_exchange.interface.mcp.tools import market, policy
+from guarded_exchange.interface.mcp.tools import account, market, policy
 
 SERVER_NAME = "guarded-exchange"
 INSTRUCTIONS = (
@@ -35,6 +36,9 @@ class UseCases:
     get_orderbook: GetOrderbook
     get_candles: GetCandles
     get_instrument_rules: GetInstrumentRules
+    get_balances: GetBalances
+    get_positions: GetPositions
+    get_open_orders: GetOpenOrders
     read_policy: ReadPolicy
     authorize: AuthorizeAccess
 
@@ -64,6 +68,13 @@ def create_server(
         get_orderbook=use_cases.get_orderbook,
         get_candles=use_cases.get_candles,
         get_instrument_rules=use_cases.get_instrument_rules,
+    )
+    account.register(
+        mcp,
+        get_balances=use_cases.get_balances,
+        get_positions=use_cases.get_positions,
+        get_open_orders=use_cases.get_open_orders,
+        principal=principal,
     )
     policy.register(mcp, use_cases.read_policy, principal)
     return mcp

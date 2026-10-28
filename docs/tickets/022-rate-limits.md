@@ -20,4 +20,4 @@
 - [ ] Integration: заголовки биржи обновляют остаток; 10006 открывает breaker до reset timestamp.
 
 ## Заметки
-—
+- Из 008: доменная `RateLimited` (`rate_limited`) уже есть; `retCode 10006` маппится в неё с `retry_after_s` из `X-Bapi-Limit-Reset-Timestamp` (`BybitClient._retry_after`, 0…600 с, без заголовка — 1 с). HTTP 403 пока `exchange_unavailable`; breaker и свои бакеты — здесь.

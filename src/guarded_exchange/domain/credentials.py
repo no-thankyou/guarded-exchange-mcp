@@ -279,6 +279,34 @@ def require_trading_allowed(credential: Credential, now: datetime) -> None:
         )
 
 
+def require_reading_allowed(credential: Credential, now: datetime) -> None:
+    """Raise unless the key may be used to read the account right now (FR-2).
+
+    Deleted or replaced, or expired -> ``ExchangeCredentialsInvalid``. Unlike trading, a read does
+    not depend on the allowlist or a fresh permission check (D-24 re-checks before state-changing
+    actions only): reading cannot move money, and a key with grown permissions is still the user's.
+    """
+    if not credential.is_active:
+        raise key_replaced_or_deleted()
+    permissions = credential.permissions
+    if permissions is not None and permissions.expires_at is not None and permissions.expires_at <= now:
+        raise ExchangeCredentialsInvalid(
+            "the exchange key has expired",
+            next_step="Tell the user to create a new key and run `guarded-exchange keys replace`, outside "
+            "the chat.",
+            details={"reason": "expired"},
+        )
+
+
+def no_key() -> ExchangeCredentialsInvalid:
+    return ExchangeCredentialsInvalid(
+        "no exchange key is configured for this user",
+        next_step="Tell the user to add a key with `guarded-exchange keys add`, outside the chat; never ask "
+        "for the key in the chat.",
+        details={"reason": "no_key"},
+    )
+
+
 def key_replaced_or_deleted() -> ExchangeCredentialsInvalid:
     return ExchangeCredentialsInvalid(
         "the exchange key was replaced or deleted",

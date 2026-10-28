@@ -17,7 +17,7 @@ from guarded_exchange.domain.errors import ExchangeUnavailable
 from guarded_exchange.interface.mcp.access import fixed_principal
 from tests.conftest import load_fixture
 from tests.e2e.support import server_for
-from tests.fakes import FakeExchange, InMemoryDatabase
+from tests.fakes import FakeCipher, FakeExchange, InMemoryDatabase
 
 pytestmark = pytest.mark.req("FR-1", "FR-3")
 
@@ -42,7 +42,11 @@ async def server() -> AsyncIterator[MCPServer[Any]]:
     db = InMemoryDatabase()
     user = db.add_user()
     async with app_server(
-        settings, uow=db, principal=fixed_principal(user.id), transport=httpx2.MockTransport(_bybit_stub)
+        settings,
+        uow=db,
+        cipher=FakeCipher(),
+        principal=fixed_principal(user.id),
+        transport=httpx2.MockTransport(_bybit_stub),
     ) as mcp:
         yield mcp
 

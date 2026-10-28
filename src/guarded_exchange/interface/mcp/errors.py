@@ -21,6 +21,9 @@ DEFAULT_NEXT_STEP: Final[dict[str, str]] = {
     "change permissions, outside the chat.",
     "exchange_unavailable": "Retry in a few seconds; if it keeps failing, tell the user.",
     "exchange_rejected": "Do not retry unchanged; report the exchange reason to the user.",
+    "exchange_credentials_invalid": "Do not retry. Tell the user to check or replace the exchange key "
+    "outside the chat; never ask for keys in the chat.",
+    "rate_limited": "Wait retry_after_s seconds before calling again.",
 }
 _FALLBACK_NEXT_STEP: Final = "Report this error to the user."
 

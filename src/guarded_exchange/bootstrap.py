@@ -33,6 +33,7 @@ from guarded_exchange.application.credentials import (
     AddCredential,
     DeleteCredential,
     ListCredentials,
+    ReadCredential,
     RecheckActiveCredentials,
     RecheckCredential,
     ReplaceCredential,
@@ -46,7 +47,8 @@ from guarded_exchange.application.policy import (
     SetCeiling,
     TightenPolicy,
 )
-from guarded_exchange.application.ports import Authenticator, UnitOfWorkFactory
+from guarded_exchange.application.ports import Authenticator, CredentialCipher, UnitOfWorkFactory
+from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.config import ConfigError, Settings, load_settings
 from guarded_exchange.domain.credentials import EXCHANGE_BYBIT, ApiKeyPair, Credential
@@ -107,16 +109,22 @@ def _exchange_http(settings: Settings, transport: httpx2.AsyncBaseTransport | No
     )
 
 
-def build_use_cases(settings: Settings, http: httpx2.AsyncClient, uow: UnitOfWorkFactory) -> UseCases:
-    exchange = _bybit_client(settings, http)
-    rules = InstrumentRulesCache(
-        exchange, SystemClock(), ttl=timedelta(seconds=settings.instrument_rules_ttl_s)
+def build_use_cases(
+    settings: Settings, http: httpx2.AsyncClient, uow: UnitOfWorkFactory, cipher: CredentialCipher
+) -> UseCases:
+    exchange, clock = _bybit_client(settings, http), SystemClock()
+    rules = InstrumentRulesCache(exchange, clock, ttl=timedelta(seconds=settings.instrument_rules_ttl_s))
+    read_key = ReadCredential(
+        uow, cipher, clock, exchange=EXCHANGE_BYBIT, environment=settings.bybit_environment
     )
     return UseCases(
         get_ticker=GetTicker(exchange),
         get_orderbook=GetOrderbook(exchange),
         get_candles=GetCandles(exchange),
         get_instrument_rules=GetInstrumentRules(rules),
+        get_balances=GetBalances(read_key, exchange),
+        get_positions=GetPositions(read_key, exchange),
+        get_open_orders=GetOpenOrders(read_key, exchange),
         read_policy=ReadPolicy(uow),
         authorize=AuthorizeAccess(uow),
     )
@@ -132,6 +140,7 @@ async def app_server(
     settings: Settings,
     *,
     uow: UnitOfWorkFactory,
+    cipher: CredentialCipher,
     principal: PrincipalProvider | None = None,
     authenticator: Authenticator | None = None,
     transport: httpx2.AsyncBaseTransport | None = None,
@@ -140,12 +149,13 @@ async def app_server(
 
     Exactly one source of the principal: ``principal`` (local mode: the configured user) or
     ``authenticator`` (remote mode: the bearer token of each HTTP request, ADR-004).
+    ``cipher`` opens the users' exchange keys for account reads.
     ``transport`` is a test seam (``httpx2.MockTransport``); production passes ``None``.
     """
     if (principal is None) == (authenticator is None):
         raise ValueError("pass exactly one of principal (stdio) or authenticator (http)")
     async with _exchange_http(settings, transport) as http:
-        use_cases = build_use_cases(settings, http, uow)
+        use_cases = build_use_cases(settings, http, uow, cipher)
         if authenticator is not None:
             yield create_http_server(
                 use_cases, authenticator, public_url=public_url(settings), version=_version()
@@ -320,14 +330,21 @@ async def _serve_stdio(settings: Settings, keyring: Keyring) -> None:
     async with open_storage(settings) as uow:
         principal = await ResolveLocalPrincipal(uow)(settings.local_user)
         structlog.get_logger(__name__).info("principal_resolved", user_id=principal.id, user=principal.name)
-        async with app_server(settings, uow=uow, principal=fixed_principal(principal.id)) as mcp:
+        async with app_server(
+            settings, uow=uow, cipher=AesGcmCredentialCipher(keyring), principal=fixed_principal(principal.id)
+        ) as mcp:
             await _serve_with_recheck(lambda: serve_stdio(mcp), settings, uow, keyring)
 
 
 async def _serve_http(settings: Settings, keyring: Keyring) -> None:
     async with (
         open_storage(settings) as uow,
-        app_server(settings, uow=uow, authenticator=AuthenticateBearerToken(uow)) as mcp,
+        app_server(
+            settings,
+            uow=uow,
+            cipher=AesGcmCredentialCipher(keyring),
+            authenticator=AuthenticateBearerToken(uow),
+        ) as mcp,
     ):
         app = http_app(
             mcp, allowed_hosts=settings.http_allowed_hosts, allowed_origins=settings.http_allowed_origins

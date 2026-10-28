@@ -71,3 +71,26 @@ class CredentialsPermissionsChanged(DomainError):
     """A re-check found the key's permissions outside the allowlist: trading is blocked (FR-49, D-18)."""
 
     code: ClassVar[str] = "credentials_permissions_changed"
+
+
+class RateLimited(DomainError):
+    """A rate limit refused the request (the exchange's now; this server's own in ticket 022).
+
+    ``retry_after_s`` says when trying again makes sense.
+    """
+
+    code: ClassVar[str] = "rate_limited"
+
+
+class UnsupportedPositionMode(DomainError):
+    """The account (or a symbol) is in hedge mode; v1 supports one-way mode only (PLAN D-26)."""
+
+    code: ClassVar[str] = "unsupported_position_mode"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "the account uses hedge mode (separate long and short positions); only one-way mode is supported",
+            next_step="Do not retry. Tell the user to switch USDT perpetuals to one-way mode on the "
+            "exchange; until then perpetual positions and orders cannot be read or managed here.",
+            details={"reason": "hedge_mode"},
+        )

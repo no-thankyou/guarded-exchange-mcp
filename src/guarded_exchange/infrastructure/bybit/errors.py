@@ -13,6 +13,7 @@ from guarded_exchange.domain.errors import (
     ExchangeRejected,
     ExchangeUnavailable,
     InvalidParams,
+    RateLimited,
 )
 
 RET_OK: Final = 0
@@ -27,8 +28,15 @@ CREDENTIAL_RET_CODES: Final = frozenset({10003, 10004, 10005, 10007, 10010, 3300
 _RETRY_LATER = "Retry in a few seconds; if it keeps failing, tell the user the exchange is unavailable."
 
 
-def error_for_ret_code(ret_code: int, ret_msg: str) -> DomainError:
-    """Translate a non-zero ``retCode`` into the domain exception the agent will see."""
+DEFAULT_RETRY_AFTER_S: Final = 1.0
+"""When a rate-limited answer carries no usable ``X-Bapi-Limit-Reset-Timestamp``."""
+
+
+def error_for_ret_code(ret_code: int, ret_msg: str, *, retry_after_s: float | None = None) -> DomainError:
+    """Translate a non-zero ``retCode`` into the domain exception the agent will see.
+
+    ``retry_after_s`` (from the rate-limit reset header) is used for ``10006`` only.
+    """
     details = {"exchange_code": str(ret_code)}
     if ret_code == _PARAM_ERROR:
         return InvalidParams(
@@ -47,10 +55,11 @@ def error_for_ret_code(ret_code: int, ret_msg: str) -> DomainError:
             details=details,
         )
     if ret_code == _RATE_LIMITED:
-        # Full rate-limit handling (retry_after from X-Bapi-Limit-Reset-Timestamp) is ticket 022.
-        return ExchangeUnavailable(
+        # Our own buckets and the circuit breaker in front of the exchange are ticket 022.
+        return RateLimited(
             "the exchange rate limit was hit",
-            next_step=_RETRY_LATER,
+            next_step="Wait retry_after_s seconds before calling again; do not retry in a tight loop.",
+            retry_after_s=DEFAULT_RETRY_AFTER_S if retry_after_s is None else retry_after_s,
             details=details,
             untrusted_text=ret_msg,
         )

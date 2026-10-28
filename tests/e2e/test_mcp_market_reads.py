@@ -27,7 +27,7 @@ from guarded_exchange.interface.mcp.schemas import InstrumentStatusLiteral
 from guarded_exchange.interface.mcp.tools.market import IntervalLiteral
 from tests.conftest import load_fixture
 from tests.e2e.support import server_for
-from tests.fakes import InMemoryDatabase
+from tests.fakes import FakeCipher, InMemoryDatabase
 
 pytestmark = pytest.mark.req("FR-1", "FR-3")
 
@@ -65,7 +65,9 @@ async def server(stub: BybitStub) -> AsyncIterator[MCPServer[Any]]:
     settings = Settings(_env_file=None, bybit_get_max_attempts=1)
     db = InMemoryDatabase()
     principal = fixed_principal(db.add_user().id)
-    async with app_server(settings, uow=db, principal=principal, transport=httpx2.MockTransport(stub)) as mcp:
+    async with app_server(
+        settings, uow=db, cipher=FakeCipher(), principal=principal, transport=httpx2.MockTransport(stub)
+    ) as mcp:
         yield mcp
 
 

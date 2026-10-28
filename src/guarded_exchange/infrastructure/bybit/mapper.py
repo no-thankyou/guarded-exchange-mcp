@@ -11,8 +11,28 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from guarded_exchange.domain.account import (
+    AccountBalances,
+    CoinBalance,
+    ConditionalKind,
+    Order,
+    OrderOrigin,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Page,
+    Position,
+    PositionSide,
+    TimeInForce,
+    UntrustedText,
+)
 from guarded_exchange.domain.credentials import KeyPermissions
-from guarded_exchange.domain.errors import ExchangeUnavailable, InvalidParams, NotFound
+from guarded_exchange.domain.errors import (
+    ExchangeUnavailable,
+    InvalidParams,
+    NotFound,
+    UnsupportedPositionMode,
+)
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
 from guarded_exchange.domain.market import (
     Candle,
@@ -460,3 +480,290 @@ def _iso_time(raw: str) -> datetime | None:
         return datetime.fromisoformat(raw)
     except ValueError:
         return None
+
+
+# --- account: wallet balance, positions, open orders (private, signed) -----------------------
+
+UNIFIED_ACCOUNT: Final = "UNIFIED"
+USDT_SETTLE: Final = "USDT"
+CLIENT_ORDER_ID_PREFIX: Final = "gx-"
+"""Prefix of every ``orderLinkId`` this system sends (D-26: the format belongs to the adapter).
+
+A fast filter only: anyone with the account can choose the same prefix. Confirmation against our
+own records of sent orders arrives with trading (tickets 011/012)."""
+
+_MAX_CLIENT_ORDER_ID: Final = 64
+_ORDER_ID_RE: Final = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+_SYMBOL_RE: Final = re.compile(r"^[A-Z0-9]{2,30}$")
+_ONE_WAY: Final = 0
+
+
+class _CoinDTO(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    coin: str
+    wallet_balance: str = Field(alias="walletBalance")
+    equity: str = ""
+    locked: str = ""
+    unrealised_pnl: str = Field(default="", alias="unrealisedPnl")
+    usd_value: str = Field(default="", alias="usdValue")
+
+
+class _WalletDTO(BaseModel):
+    """One account of ``GET /v5/account/wallet-balance``; totals are in USD."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    account_type: str = Field(alias="accountType")
+    total_equity: str = Field(default="", alias="totalEquity")
+    total_wallet_balance: str = Field(default="", alias="totalWalletBalance")
+    total_available_balance: str = Field(default="", alias="totalAvailableBalance")
+    coins: list[_CoinDTO] = Field(default_factory=list, alias="coin")
+
+
+class _WalletResultDTO(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    accounts: list[_WalletDTO] = Field(alias="list")
+
+
+def balances_from_result(result: dict[str, Any], *, time_ms: int | None) -> AccountBalances:
+    """https://bybit-exchange.github.io/docs/v5/account/wallet-balance (checked 2026-10-28).
+
+    Per-coin ``availableToWithdraw``/``free``/``availableToBorrow`` are deprecated for unified
+    accounts and not read; what can still be used for new margin is the account-level
+    ``totalAvailableBalance`` (USD).
+    """
+    parsed = _validated(_WalletResultDTO, result)
+    if parsed is None:
+        raise unavailable("unexpected wallet-balance format")
+    account = next((a for a in parsed.accounts if a.account_type == UNIFIED_ACCOUNT), None)
+    if account is None:
+        raise unavailable("wallet-balance without a unified account")
+    observed_at = _ts(time_ms)
+    if observed_at is None:
+        raise unavailable("wallet-balance without a server timestamp")
+    if not all(_COIN_RE.fullmatch(c.coin) for c in account.coins):
+        raise unavailable("unexpected coin code in wallet-balance")  # coin codes are shown as plain text
+    try:
+        return AccountBalances(
+            total_equity_usd=_dec(account.total_equity),
+            total_wallet_balance_usd=_dec(account.total_wallet_balance),
+            total_available_usd=_dec(account.total_available_balance),
+            coins=tuple(
+                CoinBalance(
+                    coin=c.coin,
+                    wallet_balance=_required_dec(c.wallet_balance),
+                    equity=_dec(c.equity),
+                    locked=_dec(c.locked),
+                    unrealised_pnl=_dec(c.unrealised_pnl),
+                    usd_value=_dec(c.usd_value),
+                )
+                for c in account.coins
+            ),
+            observed_at=observed_at,
+        )
+    except (InvalidOperation, ValueError) as exc:
+        raise unavailable("unparsable number in wallet-balance") from exc
+
+
+class _PositionDTO(BaseModel):
+    """One item of ``GET /v5/position/list`` (linear). ``side`` ``""`` and ``size`` 0: no position."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str
+    position_idx: int = Field(alias="positionIdx")
+    side: str
+    size: str
+    avg_price: str = Field(default="", alias="avgPrice")
+    mark_price: str = Field(default="", alias="markPrice")
+    liq_price: str = Field(default="", alias="liqPrice")
+    unrealised_pnl: str = Field(default="", alias="unrealisedPnl")
+    position_value: str = Field(default="", alias="positionValue")
+    leverage: str = ""
+    take_profit: str = Field(default="", alias="takeProfit")
+    stop_loss: str = Field(default="", alias="stopLoss")
+    updated_time: str = Field(default="", alias="updatedTime")
+
+
+class _PositionsResultDTO(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[_PositionDTO] = Field(alias="list")
+
+
+_POSITION_SIDES: Final = {"Buy": PositionSide.LONG, "Sell": PositionSide.SHORT}
+
+
+def positions_from_result(result: dict[str, Any], *, symbol: str | None, limit: int) -> Page[Position]:
+    """Open positions of a ``limit + 1`` request: the extra row only tells whether there are more.
+
+    https://bybit-exchange.github.io/docs/v5/position (checked 2026-10-28). A position in hedge
+    mode (``positionIdx`` 1 or 2) refuses the whole read (D-26): showing half of a hedged book
+    as one-way positions would mislead.
+    """
+    parsed = _validated(_PositionsResultDTO, result)
+    if parsed is None:
+        raise unavailable("unexpected position/list format")
+    if any(p.position_idx != _ONE_WAY for p in parsed.items):
+        raise UnsupportedPositionMode()
+    if any(not _SYMBOL_RE.fullmatch(p.symbol) or (symbol and p.symbol != symbol) for p in parsed.items):
+        raise unavailable("unexpected symbol in position/list")
+    try:
+        positions = tuple(_position(p) for p in parsed.items if p.side and _required_dec(p.size) != 0)
+    except (InvalidOperation, ValueError) as exc:
+        raise unavailable("inconsistent position/list") from exc
+    return Page(items=positions[:limit], has_more=len(parsed.items) > limit)
+
+
+def _position(item: _PositionDTO) -> Position:
+    side = _POSITION_SIDES.get(item.side)
+    if side is None:
+        raise ValueError("unknown position side")
+    return Position(
+        symbol=item.symbol,
+        side=side,
+        size=_required_dec(item.size),
+        entry_price=_required_dec(item.avg_price),
+        mark_price=_dec(item.mark_price),
+        liquidation_price=_positive_or_none(item.liq_price),
+        unrealised_pnl=_dec(item.unrealised_pnl),
+        position_value=_dec(item.position_value),
+        leverage=_positive_or_none(item.leverage),
+        take_profit=_positive_or_none(item.take_profit),
+        stop_loss=_positive_or_none(item.stop_loss),
+        updated_at=_ts(_int(item.updated_time)),
+    )
+
+
+def _positive_or_none(raw: str) -> Decimal | None:
+    """Prices Bybit reports as ``""`` or ``"0"`` when not set (TP/SL, trigger, market order price)."""
+    value = _dec(raw)
+    return value if value is not None and value > 0 else None
+
+
+class _OrderDTO(BaseModel):
+    """One item of ``GET /v5/order/realtime``; spot lacks some linear-only fields."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    order_id: str = Field(alias="orderId")
+    order_link_id: str = Field(default="", alias="orderLinkId")
+    symbol: str
+    side: str
+    order_type: str = Field(alias="orderType")
+    order_status: str = Field(alias="orderStatus")
+    qty: str
+    cum_exec_qty: str = Field(default="", alias="cumExecQty")
+    price: str = ""
+    avg_price: str = Field(default="", alias="avgPrice")
+    time_in_force: str = Field(default="", alias="timeInForce")
+    reduce_only: bool = Field(default=False, alias="reduceOnly")
+    stop_order_type: str = Field(default="", alias="stopOrderType")
+    trigger_price: str = Field(default="", alias="triggerPrice")
+    take_profit: str = Field(default="", alias="takeProfit")
+    stop_loss: str = Field(default="", alias="stopLoss")
+    position_idx: int = Field(default=_ONE_WAY, alias="positionIdx")
+    created_time: str = Field(alias="createdTime")
+    updated_time: str = Field(default="", alias="updatedTime")
+
+
+class _OrdersResultDTO(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[_OrderDTO] = Field(alias="list")
+    next_page_cursor: str = Field(default="", alias="nextPageCursor")
+
+
+OPEN_ORDERS_PAGE_MAX: Final = 50
+"""Bybit's maximum ``limit`` for ``order/realtime``."""
+
+_ORDER_SIDES: Final = {"Buy": OrderSide.BUY, "Sell": OrderSide.SELL}
+_ORDER_TYPES: Final = {"Limit": OrderType.LIMIT, "Market": OrderType.MARKET}
+_ORDER_STATUSES: Final = {
+    "New": OrderStatus.NEW,
+    "PartiallyFilled": OrderStatus.PARTIALLY_FILLED,
+    "Untriggered": OrderStatus.UNTRIGGERED,
+}
+_TIME_IN_FORCE: Final = {
+    "GTC": TimeInForce.GTC,
+    "IOC": TimeInForce.IOC,
+    "FOK": TimeInForce.FOK,
+    "PostOnly": TimeInForce.POST_ONLY,
+}
+_CONDITIONAL: Final = {
+    "TakeProfit": ConditionalKind.TAKE_PROFIT,
+    "PartialTakeProfit": ConditionalKind.TAKE_PROFIT,
+    "StopLoss": ConditionalKind.STOP_LOSS,
+    "PartialStopLoss": ConditionalKind.STOP_LOSS,
+    "TrailingStop": ConditionalKind.TRAILING_STOP,
+    "Stop": ConditionalKind.STOP,
+}
+_NOT_CONDITIONAL: Final = frozenset({"", "UNKNOWN"})
+
+
+def open_orders_from_result(
+    result: dict[str, Any], *, category: Category, symbol: str | None, limit: int
+) -> Page[Order]:
+    """Orders of a ``min(limit + 1, 50)`` request, newest first (the exchange's order).
+
+    https://bybit-exchange.github.io/docs/v5/order/open-order (checked 2026-10-28). Enum values this
+    version does not know become ``unknown``/``other`` instead of passing exchange text through.
+    """
+    parsed = _validated(_OrdersResultDTO, result)
+    if parsed is None:
+        raise unavailable("unexpected order/realtime format")
+    if category is Category.LINEAR and any(o.position_idx != _ONE_WAY for o in parsed.items):
+        raise UnsupportedPositionMode()
+    for item in parsed.items:
+        if not (_SYMBOL_RE.fullmatch(item.symbol) and _ORDER_ID_RE.fullmatch(item.order_id)):
+            raise unavailable("unexpected symbol or order id in order/realtime")
+        if symbol and item.symbol != symbol:
+            raise unavailable("order/realtime returned another symbol")
+    try:
+        orders = tuple(_order(o, category) for o in parsed.items)
+    except (InvalidOperation, ValueError) as exc:
+        raise unavailable("inconsistent order/realtime") from exc
+    # A request at the exchange's maximum has no spare row: a full page with a cursor may continue.
+    full_last_page = limit >= OPEN_ORDERS_PAGE_MAX and len(orders) >= limit and bool(parsed.next_page_cursor)
+    return Page(items=orders[:limit], has_more=len(orders) > limit or full_last_page)
+
+
+def _order(item: _OrderDTO, category: Category) -> Order:
+    side = _ORDER_SIDES.get(item.side)
+    created_at = _ts(_int(item.created_time))
+    if side is None or created_at is None:
+        raise ValueError("order without a known side or creation time")
+    stop_type = item.stop_order_type.strip()
+    link_id = item.order_link_id.strip()
+    conditional = (
+        None if stop_type in _NOT_CONDITIONAL else _CONDITIONAL.get(stop_type, ConditionalKind.OTHER)
+    )
+    return Order(
+        order_id=item.order_id,
+        symbol=item.symbol,
+        category=category,
+        side=side,
+        order_type=_ORDER_TYPES.get(item.order_type, OrderType.UNKNOWN),
+        status=_ORDER_STATUSES.get(item.order_status, OrderStatus.UNKNOWN),
+        qty=_required_dec(item.qty),
+        filled_qty=_dec(item.cum_exec_qty) or Decimal(0),
+        price=_positive_or_none(item.price),
+        avg_fill_price=_positive_or_none(item.avg_price),
+        time_in_force=_TIME_IN_FORCE.get(item.time_in_force, TimeInForce.UNKNOWN),
+        reduce_only=item.reduce_only,
+        conditional=conditional,
+        trigger_price=_positive_or_none(item.trigger_price),
+        take_profit=_positive_or_none(item.take_profit),
+        stop_loss=_positive_or_none(item.stop_loss),
+        created_at=created_at,
+        updated_at=_ts(_int(item.updated_time)),
+        origin=order_origin(link_id),
+        client_order_id=UntrustedText(link_id[:_MAX_CLIENT_ORDER_ID]) if link_id else None,
+    )
+
+
+def order_origin(order_link_id: str) -> OrderOrigin:
+    """``system`` for an ``orderLinkId`` in this system's format, else ``external`` (FR-2)."""
+    return OrderOrigin.SYSTEM if order_link_id.startswith(CLIENT_ORDER_ID_PREFIX) else OrderOrigin.EXTERNAL

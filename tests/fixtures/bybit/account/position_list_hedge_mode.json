@@ -1,0 +1,47 @@
+{
+    "_source": "Built offline 2026-10-28 (ticket 008) from https://bybit-exchange.github.io/docs/v5/position: in hedge (both-side) mode a symbol has two rows, positionIdx 1 (buy side) and 2 (sell side). Not recorded.",
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "nextPageCursor": "",
+        "category": "linear",
+        "list": [
+            {
+                "symbol": "BTCUSDT",
+                "leverage": "10",
+                "avgPrice": "80938.4",
+                "liqPrice": "73101.2",
+                "takeProfit": "",
+                "positionValue": "809.384",
+                "unrealisedPnl": "0.817",
+                "markPrice": "81020.1",
+                "positionIdx": 1,
+                "updatedTime": "1793169000555",
+                "side": "Buy",
+                "size": "0.010",
+                "positionStatus": "Normal",
+                "stopLoss": "",
+                "tradeMode": 0
+            },
+            {
+                "symbol": "BTCUSDT",
+                "leverage": "10",
+                "avgPrice": "0",
+                "liqPrice": "",
+                "takeProfit": "",
+                "positionValue": "",
+                "unrealisedPnl": "",
+                "markPrice": "81020.1",
+                "positionIdx": 2,
+                "updatedTime": "1793169000555",
+                "side": "",
+                "size": "0",
+                "positionStatus": "Normal",
+                "stopLoss": "",
+                "tradeMode": 0
+            }
+        ]
+    },
+    "retExtInfo": {},
+    "time": 1793169002000
+}

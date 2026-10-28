@@ -103,14 +103,23 @@ async def test_stdio_server_answers_and_keeps_stdout_protocol_only(
         ok = await client.call_tool("get_ticker", {"symbol": "BTCUSDT", "category": "linear"})
         err = await client.call_tool("get_ticker", {"symbol": "NOPEUSDT", "category": "spot"})
         policy = await client.call_tool("get_my_policy", {})
+        no_key = await client.call_tool("get_balances", {})
 
     assert [t.name for t in tools.tools] == [
         "get_ticker",
         "get_orderbook",
         "get_candles",
         "get_instrument_rules",
+        "get_balances",
+        "get_positions",
+        "get_open_orders",
         "get_my_policy",
     ]
+    # FR-2/FR-28: the local user has no exchange key yet -> a clear refusal, nothing sent to the exchange
+    assert no_key.is_error is True
+    assert no_key.structured_content is not None
+    assert no_key.structured_content["code"] == "exchange_credentials_invalid"
+    assert "keys add" in no_key.structured_content["next_step"]
     assert ok.is_error is False
     assert ok.structured_content is not None
     assert ok.structured_content["last_price"] == "80571.1"
@@ -135,5 +144,5 @@ async def test_stdio_server_answers_and_keeps_stdout_protocol_only(
     assert principal["user_id"] == local_user
     assert principal["user"] == "local"
     tool_events = [e for e in events if e["event"] in {"tool_ok", "tool_error"}]
-    assert [e["tool"] for e in tool_events] == ["get_ticker", "get_ticker", "get_my_policy"]
+    assert [e["tool"] for e in tool_events] == ["get_ticker", "get_ticker", "get_my_policy", "get_balances"]
     assert all(e["request_id"] for e in tool_events)
