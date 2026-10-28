@@ -11,6 +11,9 @@ dependencies = [
     "pydantic-settings>=2.16.1,<3",
     "structlog>=26.1.0",
     "typer>=0.27.3",
+    "sqlalchemy[aiosqlite,asyncio]>=2.1.6,<2.2",
+    "alembic>=1.20.1",
+    "aiosqlite>=0.22.1",
 ]
 
 [project.scripts]
@@ -110,10 +113,13 @@ forbidden_modules = ["guarded_exchange.config"]
 name = "Domain is pure Python"
 type = "forbidden"
 source_modules = ["guarded_exchange.domain"]
-forbidden_modules = ["mcp", "mcp_types", "httpx2", "pydantic", "pydantic_settings", "structlog", "typer"]
+forbidden_modules = [
+    "mcp", "mcp_types", "httpx2", "pydantic", "pydantic_settings", "structlog", "typer",
+    "sqlalchemy", "alembic", "aiosqlite",
+]
 
 [[tool.importlinter.contracts]]
-name = "Application knows no transport, SDK or HTTP"
+name = "Application knows no transport, SDK, HTTP or SQL"
 type = "forbidden"
 source_modules = ["guarded_exchange.application"]
-forbidden_modules = ["mcp", "mcp_types", "httpx2", "pydantic_settings", "typer"]
+forbidden_modules = ["mcp", "mcp_types", "httpx2", "pydantic_settings", "typer", "sqlalchemy", "alembic", "aiosqlite"]
