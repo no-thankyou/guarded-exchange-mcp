@@ -73,3 +73,16 @@ policies = Table(
     Column("overrides", Text, nullable=False),
     Column("updated_at", EpochMillis(), nullable=False),
 )
+
+# Bearer tokens of the remote mode (ADR-004): only the SHA-256 hex of the secret, never the secret.
+# Revocation sets ``revoked_at``; rows are kept for the journal's ``token_id`` references.
+access_tokens = Table(
+    "access_tokens",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("user_id", String(64), ForeignKey("users.id"), nullable=False),
+    Column("token_hash", String(64), nullable=False, unique=True),
+    Column("created_at", EpochMillis(), nullable=False),
+    Column("revoked_at", EpochMillis(), nullable=True),
+    CheckConstraint("length(token_hash) = 64", name="token_hash_sha256"),
+)

@@ -1,6 +1,6 @@
 """Command-line entrypoint. Commands receive their behaviour from the composition root."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 
 import typer
 
+from guarded_exchange.application.admin import IssuedToken, RevokedToken
 from guarded_exchange.application.policy import PolicyView
 from guarded_exchange.domain.actions import ALL_ACTION_KINDS
 from guarded_exchange.domain.audit import canonical_decimal
@@ -24,8 +25,10 @@ from guarded_exchange.domain.policy import (
     patch_to_payload,
     settings_to_payload,
 )
+from guarded_exchange.domain.users import User
 
-Transport = Literal["stdio"]
+Transport = Literal["stdio", "http"]
+TRANSPORTS: tuple[Transport, ...] = ("stdio", "http")
 Serve = Callable[[Transport, Path | None], None]
 
 
@@ -54,6 +57,16 @@ class PolicyCommands:
     set_ceiling: Callable[[Path | None, str | None, PolicyPatch], PolicyView]
 
 
+@dataclass(frozen=True, slots=True)
+class AdminCommands:
+    """User and access-token behaviour from the composition root (remote mode, ADR-004)."""
+
+    create_user: Callable[[Path | None, str], User]
+    list_users: Callable[[Path | None], Sequence[User]]
+    issue_token: Callable[[Path | None, str], IssuedToken]
+    revoke_token: Callable[[Path | None, str], RevokedToken]
+
+
 _ENV_FILE_HELP = "dotenv file with GX_* settings (else $GX_ENV_FILE; no implicit ./.env)."
 EnvFileOpt = Annotated[Path | None, typer.Option(help=_ENV_FILE_HELP, dir_okay=False)]
 UserOpt = Annotated[str | None, typer.Option(help="User name (default: the local user).")]
@@ -69,6 +82,41 @@ def render_init_report(report: InitReport) -> str:
             f"local user: {report.user_name} [{report.user_id}] ({user_state})",
         ]
     )
+
+
+def _user_line(user: User) -> str:
+    return f"{user.name} [{user.id}] ({user.status.value}, {user.environment.value})"
+
+
+def render_users(users: Sequence[User]) -> str:
+    if not users:
+        return "no users"
+    rows = [("name", "id", "status", "environment")]
+    rows += [(u.name, u.id, u.status.value, u.environment.value) for u in users]
+    widths = [max(len(row[i]) for row in rows) for i in range(3)]
+    return "\n".join(
+        "  ".join(cell.ljust(width) for cell, width in zip(row[:3], widths, strict=True)) + "  " + row[3]
+        for row in rows
+    )
+
+
+def render_issued_token(issued: IssuedToken) -> str:
+    return "\n".join(
+        [
+            f"user:     {_user_line(issued.user)}",
+            f"token id: {issued.token_id}",
+            f"token:    {issued.secret}",
+            "",
+            "Shown once: only its SHA-256 hash is stored, it cannot be displayed again.",
+            "The client sends it as the header 'Authorization: Bearer <token>'.",
+            f"Revoke it with: guarded-exchange admin token revoke {issued.token_id}",
+        ]
+    )
+
+
+def render_revoked_token(revoked: RevokedToken) -> str:
+    state = "was already revoked" if revoked.already_revoked else "revoked"
+    return f"token {revoked.token.id} (user id {revoked.token.user_id}) {state}"
 
 
 # --- policy rendering and parsing ---------------------------------------------------------
@@ -214,7 +262,7 @@ PendingOpt = Annotated[int | None, typer.Option(help="Confirmations waiting at t
 # --- commands -----------------------------------------------------------------------------
 
 
-def build_cli(serve: Serve, init: Init, policy: PolicyCommands) -> typer.Typer:
+def build_cli(serve: Serve, init: Init, policy: PolicyCommands, admin_commands: AdminCommands) -> typer.Typer:
     app = typer.Typer(name="guarded-exchange", no_args_is_help=True, add_completion=False)
 
     @app.callback()
@@ -224,14 +272,18 @@ def build_cli(serve: Serve, init: Init, policy: PolicyCommands) -> typer.Typer:
     @app.command("serve")
     def serve_command(
         transport: Annotated[
-            str, typer.Option(help="MCP transport. Only stdio is available in this version.")
+            str,
+            typer.Option(
+                help="stdio (local mode, the local user) or http (remote mode: Streamable HTTP at "
+                "GX_HTTP_HOST:GX_HTTP_PORT/mcp, bearer tokens from `admin token issue`)."
+            ),
         ] = "stdio",
         env_file: EnvFileOpt = None,
     ) -> None:
-        """Run the MCP server (stdout = protocol, stderr = JSON logs)."""
-        if transport != "stdio":
-            raise typer.BadParameter("only 'stdio' is supported yet", param_hint="--transport")
-        serve("stdio", env_file)
+        """Run the MCP server (JSON logs on stderr; on stdio, stdout = protocol)."""
+        if transport not in TRANSPORTS:
+            raise typer.BadParameter("must be 'stdio' or 'http'", param_hint="--transport")
+        serve("http" if transport == "http" else "stdio", env_file)
 
     @app.command("init")
     def init_command(env_file: EnvFileOpt = None) -> None:
@@ -241,7 +293,48 @@ def build_cli(serve: Serve, init: Init, policy: PolicyCommands) -> typer.Typer:
     app.add_typer(_policy_cli(policy), name="policy")
     admin = typer.Typer(no_args_is_help=True, help="Admin commands (service channel only, never MCP).")
     admin.add_typer(_admin_policy_cli(policy), name="policy")
+    admin.add_typer(_admin_user_cli(admin_commands), name="user")
+    admin.add_typer(_admin_token_cli(admin_commands), name="token")
     app.add_typer(admin, name="admin")
+    return app
+
+
+def _admin_user_cli(commands: AdminCommands) -> typer.Typer:
+    app = typer.Typer(no_args_is_help=True, help="Users of the server.")
+
+    @app.command("create")
+    def create_command(
+        name: Annotated[str, typer.Argument(help="Lowercase name, e.g. alice.")], env_file: EnvFileOpt = None
+    ) -> None:
+        """Create a user: active, test environment, read-only until you raise their ceiling."""
+        typer.echo(f"user created: {_user_line(commands.create_user(env_file, name))}")
+
+    @app.command("list")
+    def list_command(env_file: EnvFileOpt = None) -> None:
+        """List all users."""
+        typer.echo(render_users(commands.list_users(env_file)))
+
+    return app
+
+
+def _admin_token_cli(commands: AdminCommands) -> typer.Typer:
+    app = typer.Typer(no_args_is_help=True, help="Bearer access tokens of the remote (HTTP) mode.")
+
+    @app.command("issue")
+    def issue_command(
+        user: Annotated[str, typer.Option(help="User the token acts as.")], env_file: EnvFileOpt = None
+    ) -> None:
+        """Issue a new token for an active user. The token is printed once and never stored."""
+        typer.echo(render_issued_token(commands.issue_token(env_file, user)))
+
+    @app.command("revoke")
+    def revoke_command(
+        token_id: Annotated[str, typer.Argument(help="Token id printed by `admin token issue`.")],
+        env_file: EnvFileOpt = None,
+    ) -> None:
+        """Revoke a token: the next request with it gets HTTP 401."""
+        typer.echo(render_revoked_token(commands.revoke_token(env_file, token_id)))
+
     return app
 
 

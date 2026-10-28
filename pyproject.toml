@@ -14,6 +14,8 @@ dependencies = [
     "sqlalchemy[aiosqlite,asyncio]>=2.1.6,<2.2",
     "alembic>=1.20.1",
     "aiosqlite>=0.22.1",
+    "uvicorn>=0.54.0",  # ASGI server of the remote mode (also a dependency of mcp)
+    "starlette>=1.10.0",  # typed ASGI app returned by streamable_http_app()
 ]
 
 [project.scripts]

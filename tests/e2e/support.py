@@ -7,6 +7,7 @@ from mcp.server import MCPServer
 
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy
+from guarded_exchange.application.ports import UnitOfWorkFactory
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.domain.policy import Permission
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, fixed_principal
@@ -15,7 +16,7 @@ from tests.fakes import FakeClock, FakeExchange, InMemoryDatabase
 
 
 def use_cases(
-    db: InMemoryDatabase, exchange: FakeExchange | None = None, clock: FakeClock | None = None
+    db: UnitOfWorkFactory, exchange: FakeExchange | None = None, clock: FakeClock | None = None
 ) -> UseCases:
     """The MCP use cases wired to fakes, as the composition root wires the real adapters."""
     exchange = exchange or FakeExchange()

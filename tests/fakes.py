@@ -3,10 +3,11 @@
 import json
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from guarded_exchange.domain.access_tokens import TOKEN_PREFIX, AccessToken
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord, canonical_json
 from guarded_exchange.domain.errors import NotFound
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
@@ -170,6 +171,17 @@ class SequentialIds:
 
 
 @dataclass
+class SequentialTokens:
+    """Well-formed, predictable token secrets for tests."""
+
+    issued: int = 0
+
+    def new_token(self) -> str:
+        self.issued += 1
+        return f"{TOKEN_PREFIX}{self.issued:043d}"
+
+
+@dataclass
 class FakeMasterKeyStore:
     present: bool = False
     created: int = 0
@@ -193,12 +205,14 @@ class _State:
     users: dict[str, User] = field(default_factory=dict)
     audit: dict[str, list[AuditRecord]] = field(default_factory=dict)
     policies: dict[str, PolicyRecord] = field(default_factory=dict)
+    access_tokens: dict[str, AccessToken] = field(default_factory=dict)
 
     def copy(self) -> "_State":
         return _State(
             dict(self.users),
             {chain: list(records) for chain, records in self.audit.items()},
             dict(self.policies),
+            dict(self.access_tokens),
         )
 
 
@@ -219,6 +233,39 @@ class InMemoryUserRepository:
 
     async def get_by_name(self, name: str) -> User | None:
         return next((u for u in self._state.users.values() if u.name == name), None)
+
+    async def list(self) -> Sequence[User]:
+        return sorted(self._state.users.values(), key=lambda u: u.name)
+
+
+class InMemoryAccessTokenRepository:
+    def __init__(self, state: _State, *, writable: bool) -> None:
+        self._state = state
+        self._writable = writable
+
+    async def add(self, token: AccessToken) -> None:
+        if not self._writable:
+            raise ReadOnlyViolation("access_tokens.add needs a write unit of work")
+        if token.id in self._state.access_tokens or any(
+            t.token_hash == token.token_hash for t in self._state.access_tokens.values()
+        ):
+            raise ValueError(f"duplicate token {token.id}")
+        if token.user_id not in self._state.users:
+            raise ValueError(f"no user {token.user_id}")  # the SQL table has a foreign key
+        self._state.access_tokens[token.id] = token
+
+    async def get(self, token_id: str) -> AccessToken | None:
+        return self._state.access_tokens.get(token_id)
+
+    async def get_by_hash(self, token_hash: str) -> AccessToken | None:
+        return next((t for t in self._state.access_tokens.values() if t.token_hash == token_hash), None)
+
+    async def revoke(self, token_id: str, at: datetime) -> None:
+        if not self._writable:
+            raise ReadOnlyViolation("access_tokens.revoke needs a write unit of work")
+        token = self._state.access_tokens[token_id]
+        if token.revoked_at is None:
+            self._state.access_tokens[token_id] = replace(token, revoked_at=at)
 
 
 class InMemoryAuditLogRepository:
@@ -266,6 +313,7 @@ class InMemoryUnitOfWork:
         self.users = InMemoryUserRepository(state, writable=write)
         self.audit = InMemoryAuditLogRepository(state, writable=write)
         self.policies = InMemoryPolicyRepository(state, writable=write)
+        self.access_tokens = InMemoryAccessTokenRepository(state, writable=write)
         self._write = write
         self._locks = locks
 

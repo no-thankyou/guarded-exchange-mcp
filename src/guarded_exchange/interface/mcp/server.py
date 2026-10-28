@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from mcp.server import MCPServer
+from mcp.server.auth.provider import TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
@@ -43,9 +45,19 @@ def create_server(
     principal: PrincipalProvider,
     version: str = "",
     tool_permissions: Mapping[str, Permission] = TOOL_PERMISSIONS,
+    token_verifier: TokenVerifier | None = None,
+    auth: AuthSettings | None = None,
 ) -> GuardedMCPServer:
+    """``token_verifier``/``auth`` only for the remote mode (``http.create_http_server``)."""
     gate = ToolGate(use_cases.authorize, principal, tool_permissions)
-    mcp = GuardedMCPServer(SERVER_NAME, gate=gate, instructions=INSTRUCTIONS, version=version)
+    mcp = GuardedMCPServer(
+        SERVER_NAME,
+        gate=gate,
+        instructions=INSTRUCTIONS,
+        version=version,
+        token_verifier=token_verifier,
+        auth=auth,
+    )
     market.register(
         mcp,
         get_ticker=use_cases.get_ticker,

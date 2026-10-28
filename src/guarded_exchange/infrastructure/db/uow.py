@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 
 from guarded_exchange.infrastructure.db.dialect import WRITE_OPTION, configure_sqlite, lock_user
 from guarded_exchange.infrastructure.db.repositories import (
+    SqlAccessTokenRepository,
     SqlAuditLogRepository,
     SqlPolicyRepository,
     SqlUserRepository,
@@ -49,6 +50,7 @@ class SqlUnitOfWork:
         self._users = SqlUserRepository(connection, writable=write)
         self._audit = SqlAuditLogRepository(connection, writable=write)
         self._policies = SqlPolicyRepository(connection, writable=write)
+        self._access_tokens = SqlAccessTokenRepository(connection, writable=write)
 
     @property
     def users(self) -> SqlUserRepository:
@@ -61,6 +63,10 @@ class SqlUnitOfWork:
     @property
     def policies(self) -> SqlPolicyRepository:
         return self._policies
+
+    @property
+    def access_tokens(self) -> SqlAccessTokenRepository:
+        return self._access_tokens
 
     async def lock_user(self, user_id: str) -> None:
         await lock_user(self._connection, user_id)

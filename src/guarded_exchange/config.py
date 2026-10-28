@@ -59,6 +59,18 @@ class Settings(BaseSettings):
     # Local mode has one principal: this user, created by `guarded-exchange init` (ADR-004).
     local_user: str = Field(default="local", min_length=1, max_length=64)
 
+    # Remote mode (ADR-003/004): `serve --transport http`. Loopback by default; to expose it, bind
+    # another address behind a TLS-terminating reverse proxy and list the public Host header.
+    http_host: str = Field(default="127.0.0.1", min_length=1)
+    http_port: int = Field(default=8000, ge=1, le=65_535)
+    # Host/Origin headers accepted on /mcp (DNS rebinding protection is always on); `host:*` = any port.
+    http_allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["127.0.0.1:*", "localhost:*", "[::1]:*"], min_length=1
+    )
+    http_allowed_origins: list[str] = Field(
+        default_factory=lambda: ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+    )
+
     @field_validator("db_path", "master_key_file")
     @classmethod
     def _absolute(cls, value: Path) -> Path:

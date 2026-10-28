@@ -10,6 +10,7 @@ from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Protocol
 
+from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
@@ -70,6 +71,12 @@ class IdGenerator(Protocol):
         ...
 
 
+class TokenGenerator(Protocol):
+    def new_token(self) -> str:
+        """A new bearer token secret: ``TOKEN_PREFIX`` + at least 256 random bits, URL-safe."""
+        ...
+
+
 class UserRepository(Protocol):
     async def add(self, user: User) -> None:
         """Insert a new user. A duplicate id or name is a programming error (raises)."""
@@ -78,6 +85,26 @@ class UserRepository(Protocol):
     async def get(self, user_id: str) -> User | None: ...
 
     async def get_by_name(self, name: str) -> User | None: ...
+
+    async def list(self) -> Sequence[User]:
+        """All users ordered by name."""
+        ...
+
+
+class AccessTokenRepository(Protocol):
+    """Bearer tokens by hash (PLAN ADR-004). The secret itself is never passed to storage."""
+
+    async def add(self, token: AccessToken) -> None:
+        """Insert a new token. A duplicate id or hash is a programming error (raises)."""
+        ...
+
+    async def get(self, token_id: str) -> AccessToken | None: ...
+
+    async def get_by_hash(self, token_hash: str) -> AccessToken | None: ...
+
+    async def revoke(self, token_id: str, at: datetime) -> None:
+        """Set ``revoked_at`` of a not yet revoked token. Needs a write unit of work."""
+        ...
 
 
 class AuditLogRepository(Protocol):
@@ -114,6 +141,22 @@ class MasterKeyStore(Protocol):
         ...
 
 
+class Authenticator(Protocol):
+    """Turns a credential presented by a remote caller into a user id (PLAN ADR-004).
+
+    The only source of the remote principal: never client info, headers or tool arguments.
+    Today: opaque bearer tokens from the database; an OAuth 2.1 adapter (JWT from a real
+    authorization server) would implement the same port without touching use cases.
+    """
+
+    async def authenticate(self, credential: str) -> str | None:
+        """The id of the active user the credential belongs to, or ``None`` (refuse the request).
+
+        Runs on every request, so revoking the token or the user applies to the next request.
+        """
+        ...
+
+
 class UnitOfWork(Protocol):
     """Repositories bound to one database transaction."""
 
@@ -125,6 +168,9 @@ class UnitOfWork(Protocol):
 
     @property
     def policies(self) -> PolicyRepository: ...
+
+    @property
+    def access_tokens(self) -> AccessTokenRepository: ...
 
     async def lock_user(self, user_id: str) -> None:
         """Serialise read-modify-write of one user's state until the transaction ends (PLAN D-8).

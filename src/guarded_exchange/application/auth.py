@@ -1,6 +1,8 @@
-"""Who is calling. Local mode has exactly one principal: the local user from configuration."""
+"""Who is calling. Local mode has exactly one principal: the local user from configuration;
+remote mode: the user a verified bearer token belongs to (PLAN ADR-004)."""
 
 from guarded_exchange.application.ports import UnitOfWorkFactory
+from guarded_exchange.domain.access_tokens import hash_token, is_well_formed, token_matches
 from guarded_exchange.domain.users import User, validate_user_name
 
 
@@ -26,3 +28,24 @@ class ResolveLocalPrincipal:
         if not user.is_active:
             raise PrincipalUnavailable(f"local user {name!r} is {user.status.value}; access is revoked")
         return user
+
+
+class AuthenticateBearerToken:
+    """``Authenticator`` for opaque bearer tokens (PLAN ADR-004), consulted on every HTTP request.
+
+    Accepts only a well-formed token whose hash is stored, not revoked, and whose user is
+    active. Every other case is the same ``None``: the caller learns nothing about why.
+    """
+
+    def __init__(self, uow: UnitOfWorkFactory) -> None:
+        self._uow = uow
+
+    async def authenticate(self, credential: str) -> str | None:
+        if not is_well_formed(credential):
+            return None
+        async with self._uow(write=False) as uow:
+            token = await uow.access_tokens.get_by_hash(hash_token(credential))
+            if token is None or token.is_revoked or not token_matches(token, credential):
+                return None
+            user = await uow.users.get(token.user_id)
+        return user.id if user is not None and user.is_active else None

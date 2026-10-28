@@ -28,7 +28,7 @@ from guarded_exchange.domain.policy import (
 )
 from guarded_exchange.domain.users import Environment, new_user
 from guarded_exchange.infrastructure.db.repositories import ReadOnlyUnitOfWorkError
-from guarded_exchange.interface.cli.main import PolicyCommands, build_cli
+from guarded_exchange.interface.cli.main import AdminCommands, PolicyCommands, build_cli
 from tests.fakes import FakeClock
 from tests.integration.conftest import BUSY_TIMEOUT_MS, make_settings
 
@@ -166,7 +166,13 @@ def _app() -> typer.Typer:
     commands = PolicyCommands(
         show=bootstrap.show_policy, tighten=bootstrap.tighten_policy, set_ceiling=bootstrap.set_ceiling
     )
-    return build_cli(bootstrap.serve, bootstrap.init, commands)
+    admin = AdminCommands(
+        create_user=bootstrap.create_user,
+        list_users=bootstrap.list_users,
+        issue_token=bootstrap.issue_token,
+        revoke_token=bootstrap.revoke_token,
+    )
+    return build_cli(bootstrap.serve, bootstrap.init, commands, admin)
 
 
 @pytest.mark.req("FR-12", "FR-36", "FR-45")
@@ -261,3 +267,45 @@ def test_cli_turns_an_unexpected_failure_into_one_line_and_exit_1(env_file: Path
     assert "guarded-exchange: unexpected error: ValueError: unknown policy fields" in result.stderr
     assert "Traceback" not in result.stderr
     assert result.stdout == ""
+
+
+# --- users and access tokens (ticket 026) -------------------------------------------------
+
+
+@pytest.mark.req("FR-29", "FR-36")
+def test_cli_admin_users_and_tokens_on_a_real_installation(env_file: Path, tmp_path: Path) -> None:
+    app = _app()
+    env = ["--env-file", str(env_file)]
+
+    created = _cli().invoke(app, ["admin", "user", "create", "alice", *env])
+    duplicate = _cli().invoke(app, ["admin", "user", "create", "alice", *env])
+    listed = _cli().invoke(app, ["admin", "user", "list", *env])
+    issued = _cli().invoke(app, ["admin", "token", "issue", "--user", "alice", *env])
+    unknown_user = _cli().invoke(app, ["admin", "token", "issue", "--user", "ghost", *env])
+    token_id = next(line.split()[-1] for line in issued.stdout.splitlines() if line.startswith("token id:"))
+    secret = next(line.split()[-1] for line in issued.stdout.splitlines() if line.startswith("token:"))
+    revoked = _cli().invoke(app, ["admin", "token", "revoke", token_id, *env])
+    again = _cli().invoke(app, ["admin", "token", "revoke", token_id, *env])
+    unknown_token = _cli().invoke(app, ["admin", "token", "revoke", "nope", *env])
+
+    assert created.exit_code == 0, created.output
+    assert duplicate.exit_code == 1
+    assert "already exists" in duplicate.stderr
+    assert [line.split()[0] for line in listed.stdout.splitlines()] == ["name", "alice", "local"]
+    assert issued.exit_code == 0, issued.output
+    assert secret.startswith("gxt_")
+    assert unknown_user.exit_code == 1
+    assert "'ghost' does not exist" in unknown_user.stderr
+    assert revoked.stdout.strip().endswith("revoked")
+    assert again.stdout.strip().endswith("was already revoked")
+    assert unknown_token.exit_code == 1
+    for result in (created, duplicate, listed, issued, unknown_user, revoked, again, unknown_token):
+        assert "Traceback" not in result.output
+        assert secret not in result.stderr
+    settings = make_settings(tmp_path)
+    with sqlite3.connect(settings.db_path) as conn:
+        events = conn.execute(
+            "SELECT event_type, payload FROM audit_log WHERE event_type LIKE 'access_token_%' ORDER BY seq"
+        ).fetchall()
+    assert [e[0] for e in events] == ["access_token_issued", "access_token_revoked"]
+    assert all(token_id in payload and secret not in payload for _, payload in events)

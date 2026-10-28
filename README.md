@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents guarded access to a crypto exchange (Bybit V5): least-privilege permissions, risk limits, human confirmation of risky actions in a channel the model does not control, tenant isolation and a tamper-evident audit log.
 
-> Status: early skeleton. Read-only tools work end to end: market data (`get_ticker`, `get_orderbook`, `get_candles`, `get_instrument_rules`) and `get_my_policy`; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`; the policy (admin ceiling, user tightening) is managed from the CLI. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
+> Status: early skeleton. Read-only tools work end to end: market data (`get_ticker`, `get_orderbook`, `get_candles`, `get_instrument_rules`) and `get_my_policy`; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`; the policy (admin ceiling, user tightening) is managed from the CLI; a remote multi-user mode serves the same tools over Streamable HTTP with per-user bearer tokens. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
 
 ## How to run the skeleton
 
@@ -65,6 +65,23 @@ uv run guarded-exchange policy tighten --max-leverage 20              # refused:
 
 `admin policy set-ceiling` (optionally `--user NAME`) may raise or lower the ceiling within hard bounds (slippage <= 3%, confirmation lifetime <= 600 s); `policy tighten` refuses any value looser than the current effective one and names the fields. **Tightening is one-way:** there is no command to undo it, not even for the admin (raising the ceiling does not lift a stricter user setting); today the only way back is editing the `policies` table directly with SQL, so tighten deliberately. If the admin lowers the ceiling below a user's setting, the ceiling applies. Both write to the user's journal. `tools/list` shows a user only the tools their profile allows (the result is `cacheScope: private`), and every `tools/call` is checked again, so a hidden tool called directly gets `permission_denied`.
 
+### Remote mode (Streamable HTTP + bearer tokens)
+
+Several users can share one server over HTTP. The admin creates users and issues each one an opaque bearer token from the CLI; the server stores only its SHA-256 hash, so the token is printed once and cannot be shown again:
+
+```bash
+uv run guarded-exchange admin user create alice          # active, test environment, read-only policy
+uv run guarded-exchange admin token issue --user alice   # prints the token id and the token (once)
+uv run guarded-exchange serve --transport http           # http://127.0.0.1:8000/mcp
+claude mcp add --transport http guarded-exchange http://127.0.0.1:8000/mcp --header "Authorization: Bearer <token>"
+uv run guarded-exchange admin token revoke <token-id>    # the next request with it gets 401
+uv run guarded-exchange admin user list
+```
+
+Every HTTP request is authenticated: no token, an unknown or revoked token, or a token of a revoked user gets `401` before any MCP processing; the token and the user's status are looked up in the database on each request, so revoking applies immediately. The caller's identity comes **only** from the token: `clientInfo`, other headers and tool arguments cannot change it, and each user sees only their own policy. Host and Origin headers are checked against `GX_HTTP_ALLOWED_HOSTS` / `GX_HTTP_ALLOWED_ORIGINS` (DNS rebinding protection, `421` otherwise). Issuing and revoking tokens is recorded in the user's journal by token id; the token itself never reaches the database, the journal or the logs.
+
+Static bearer tokens are a deliberate simplification of the MCP authorization spec (which recommends OAuth 2.1): the server sits behind a port (`Authenticator`), so an OAuth resource-server adapter can replace it without touching the use cases. Clients that only speak OAuth cannot connect yet. The server speaks plain HTTP: to expose it beyond the machine, bind `GX_HTTP_HOST` to another address **behind a TLS-terminating reverse proxy** and list the public host in `GX_HTTP_ALLOWED_HOSTS`. Revoking a whole user, mainnet and tenant isolation tests are the next tickets (027).
+
 ### Configuration
 
 Environment variables with the `GX_` prefix. A dotenv file is read only when given explicitly: `guarded-exchange serve --env-file path/to/gx.env` or `GX_ENV_FILE=path/to/gx.env` (the option wins). A `.env` in the working directory is deliberately ignored: MCP clients start the server from arbitrary directories. A missing explicit file stops the server with an error.
@@ -81,6 +98,9 @@ Environment variables with the `GX_` prefix. A dotenv file is read only when giv
 | `GX_MASTER_KEY_FILE` | `$XDG_CONFIG_HOME/guarded-exchange/master.key` (`~/.config/...`) | master key file; absolute, must be outside the database directory |
 | `GX_LOCAL_USER` | `local` | name of the local-mode user (the only principal in local mode) |
 | `GX_SQLITE_BUSY_TIMEOUT_MS` | `5000` | how long a writer waits for another process's write lock |
+| `GX_HTTP_HOST` / `GX_HTTP_PORT` | `127.0.0.1` / `8000` | where `serve --transport http` listens |
+| `GX_HTTP_ALLOWED_HOSTS` | `["127.0.0.1:*", "localhost:*", "[::1]:*"]` | JSON list of accepted `Host` headers (`host:*` = any port) |
+| `GX_HTTP_ALLOWED_ORIGINS` | `["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]` | JSON list of accepted `Origin` headers (browsers) |
 
 ## Development
 
@@ -92,7 +112,7 @@ uv run pytest --cov                                   # tests; no external netwo
 uv run pre-commit install                             # optional: run the checks on commit
 ```
 
-Storage tests use real SQLite files in a temporary directory, including a two-process write test. Tests never reach external APIs: the Bybit adapter is tested on recorded responses via `httpx2.MockTransport`, the stdio end-to-end test points the real server at a loopback stub, and an autouse pytest guard fails any connection or DNS lookup to a non-loopback host.
+Storage tests use real SQLite files in a temporary directory, including a two-process write test. Authentication is tested over the SDK's real Streamable HTTP stack in-process (`httpx2.ASGITransport`, no sockets). Tests never reach external APIs: the Bybit adapter is tested on recorded responses via `httpx2.MockTransport`, the stdio end-to-end test points the real server at a loopback stub, and an autouse pytest guard fails any connection or DNS lookup to a non-loopback host.
 
 Requirement-to-test traceability is generated from `@pytest.mark.req(...)` markers:
 
@@ -107,11 +127,12 @@ src/guarded_exchange/
   domain/          pure Python: value objects (Decimal money), rules, domain exceptions with error codes
   application/     use cases + ports (typing.Protocol), e.g. GetTicker -> ExchangeClient, InstrumentRulesCache,
                    InitializeInstallation -> UnitOfWorkFactory, Clock, IdGenerator, MasterKeyStore,
-                   ReadPolicy / SetCeiling / TightenPolicy / AuthorizeAccess (who may call what)
+                   ReadPolicy / SetCeiling / TightenPolicy / AuthorizeAccess (who may call what),
+                   CreateUser / IssueAccessToken / RevokeAccessToken, AuthenticateBearerToken -> Authenticator
   infrastructure/  adapters: bybit/ (httpx2 client, DTO mapper, retCode mapping), db/ (SQLAlchemy Core
                    repositories, unit of work, Alembic migrations), master key file, clock, logging
   interface/       entrypoints: mcp/ (GuardedMCPServer: per-principal tool filter and checks, thin tools,
-                   error mapping), cli/ (typer)
+                   error mapping; http.py: bearer TokenVerifier, Streamable HTTP app), cli/ (typer)
   config.py        pydantic-settings
   bootstrap.py     composition root: the only place that reads config and wires adapters
 ```

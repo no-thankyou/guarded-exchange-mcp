@@ -4,9 +4,10 @@ import json
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import Row, select
+from sqlalchemy import Row, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord, canonical_json
 from guarded_exchange.domain.policy import (
     PolicyRecord,
@@ -17,7 +18,7 @@ from guarded_exchange.domain.policy import (
 )
 from guarded_exchange.domain.users import Environment, User, UserStatus
 from guarded_exchange.infrastructure.db.dialect import insert_for
-from guarded_exchange.infrastructure.db.schema import audit_heads, audit_log, policies, users
+from guarded_exchange.infrastructure.db.schema import access_tokens, audit_heads, audit_log, policies, users
 
 
 class ReadOnlyUnitOfWorkError(RuntimeError):
@@ -54,6 +55,43 @@ class SqlUserRepository(_Repository):
     async def get_by_name(self, name: str) -> User | None:
         row = (await self._conn.execute(select(users).where(users.c.name == name))).one_or_none()
         return None if row is None else _user_from_row(row)
+
+    async def list(self) -> Sequence[User]:
+        return [_user_from_row(row) for row in await self._conn.execute(select(users).order_by(users.c.name))]
+
+
+class SqlAccessTokenRepository(_Repository):
+    """Bearer tokens by SHA-256 hash; the secret never reaches this layer."""
+
+    async def add(self, token: AccessToken) -> None:
+        self._require_writable("access_tokens.add")
+        await self._conn.execute(
+            access_tokens.insert().values(
+                id=token.id,
+                user_id=token.user_id,
+                token_hash=token.token_hash,
+                created_at=token.created_at,
+                revoked_at=token.revoked_at,
+            )
+        )
+
+    async def get(self, token_id: str) -> AccessToken | None:
+        query = select(access_tokens).where(access_tokens.c.id == token_id)
+        row = (await self._conn.execute(query)).one_or_none()
+        return None if row is None else _token_from_row(row)
+
+    async def get_by_hash(self, token_hash: str) -> AccessToken | None:
+        query = select(access_tokens).where(access_tokens.c.token_hash == token_hash)
+        row = (await self._conn.execute(query)).one_or_none()
+        return None if row is None else _token_from_row(row)
+
+    async def revoke(self, token_id: str, at: datetime) -> None:
+        self._require_writable("access_tokens.revoke")
+        await self._conn.execute(
+            update(access_tokens)
+            .where(access_tokens.c.id == token_id, access_tokens.c.revoked_at.is_(None))
+            .values(revoked_at=at)
+        )
 
 
 class SqlAuditLogRepository(_Repository):
@@ -143,4 +181,15 @@ def _user_from_row(row: Row[tuple[object, ...]]) -> User:
         status=UserStatus(mapping["status"]),
         environment=Environment(mapping["environment"]),
         created_at=mapping["created_at"],
+    )
+
+
+def _token_from_row(row: Row[tuple[object, ...]]) -> AccessToken:
+    mapping = row._mapping
+    return AccessToken(
+        id=str(mapping["id"]),
+        user_id=str(mapping["user_id"]),
+        token_hash=str(mapping["token_hash"]),
+        created_at=mapping["created_at"],
+        revoked_at=mapping["revoked_at"],
     )

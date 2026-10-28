@@ -22,6 +22,8 @@ from typing import Any
 
 import structlog
 from mcp.server import MCPServer
+from mcp.server.auth.provider import TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, InputRequiredResult, Tool
@@ -34,8 +36,19 @@ log = structlog.get_logger(__name__)
 
 
 class GuardedMCPServer(MCPServer[Any]):
-    def __init__(self, name: str, *, gate: ToolGate, instructions: str, version: str) -> None:
-        super().__init__(name, instructions=instructions, version=version)
+    def __init__(
+        self,
+        name: str,
+        *,
+        gate: ToolGate,
+        instructions: str,
+        version: str,
+        token_verifier: TokenVerifier | None = None,
+        auth: AuthSettings | None = None,
+    ) -> None:
+        super().__init__(
+            name, instructions=instructions, version=version, token_verifier=token_verifier, auth=auth
+        )
         self._gate = gate
 
     async def list_tools(self) -> list[Tool]:

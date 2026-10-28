@@ -25,6 +25,8 @@ class AuditEventType(StrEnum):
     USER_CREATED = "user_created"
     POLICY_CEILING_SET = "policy_ceiling_set"
     POLICY_TIGHTENED = "policy_tightened"
+    ACCESS_TOKEN_ISSUED = "access_token_issued"  # noqa: S105 - event names, not secrets
+    ACCESS_TOKEN_REVOKED = "access_token_revoked"  # noqa: S105
 
 
 @dataclass(frozen=True, slots=True)

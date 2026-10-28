@@ -6,9 +6,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from guarded_exchange.application.admin import IssuedToken, RevokedToken
 from guarded_exchange.application.policy import PolicyView
+from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.actions import ActionKind
-from guarded_exchange.domain.errors import PermissionDenied
+from guarded_exchange.domain.errors import NotFound, PermissionDenied
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.policy import (
     NO_OVERRIDES,
@@ -20,6 +22,7 @@ from guarded_exchange.domain.policy import (
 )
 from guarded_exchange.domain.users import Environment, User, UserStatus
 from guarded_exchange.interface.cli.main import (
+    AdminCommands,
     InitReport,
     PolicyCommands,
     PolicyOptions,
@@ -97,10 +100,53 @@ class PolicySpy:
         return make_view()
 
 
+SECRET = "gxt_" + "s" * 43
+
+
+@dataclass
+class AdminSpy:
+    created: list[str] = field(default_factory=list)
+    issued_for: list[str] = field(default_factory=list)
+    revoked: list[str] = field(default_factory=list)
+    users: list[User] = field(default_factory=lambda: [USER])
+    already_revoked: bool = False
+    fail_with: Exception | None = None
+
+    def commands(self) -> AdminCommands:
+        return AdminCommands(
+            create_user=self.create_user,
+            list_users=lambda env_file: self.users,
+            issue_token=self.issue_token,
+            revoke_token=self.revoke_token,
+        )
+
+    def create_user(self, env_file: Path | None, name: str) -> User:
+        self.created.append(name)
+        return User("u-2", name, UserStatus.ACTIVE, Environment.TESTNET, datetime(2026, 10, 28, tzinfo=UTC))
+
+    def issue_token(self, env_file: Path | None, user: str) -> IssuedToken:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.issued_for.append(user)
+        return IssuedToken(
+            token_id="t-1",  # noqa: S106 - an id, not a secret
+            user=USER,
+            secret=SECRET,
+            created_at=USER.created_at,
+        )
+
+    def revoke_token(self, env_file: Path | None, token_id: str) -> RevokedToken:
+        self.revoked.append(token_id)
+        token = AccessToken(token_id, "u-1", "0" * 64, USER.created_at, USER.created_at)
+        return RevokedToken(token=token, already_revoked=self.already_revoked)
+
+
 def test_serve_defaults_to_stdio_without_env_file() -> None:
     spy = ServeSpy()
 
-    result = runner.invoke(build_cli(spy, InitSpy(), PolicySpy().commands()), ["serve"])
+    result = runner.invoke(
+        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands()), ["serve"]
+    )
 
     assert result.exit_code == 0, result.output
     assert spy.calls == [("stdio", None)]
@@ -110,7 +156,8 @@ def test_serve_passes_explicit_env_file() -> None:
     spy = ServeSpy()
 
     result = runner.invoke(
-        build_cli(spy, InitSpy(), PolicySpy().commands()), ["serve", "--env-file", "conf/gx.env"]
+        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands()),
+        ["serve", "--env-file", "conf/gx.env"],
     )
 
     assert result.exit_code == 0, result.output
@@ -121,7 +168,8 @@ def test_serve_rejects_unsupported_transport() -> None:
     spy = ServeSpy()
 
     result = runner.invoke(
-        build_cli(spy, InitSpy(), PolicySpy().commands()), ["serve", "--transport", "streamable-http"]
+        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands()),
+        ["serve", "--transport", "streamable-http"],
     )
 
     assert result.exit_code != 0
@@ -132,7 +180,8 @@ def test_init_passes_env_file_and_prints_report() -> None:
     init = InitSpy()
 
     result = runner.invoke(
-        build_cli(ServeSpy(), init, PolicySpy().commands()), ["init", "--env-file", "conf/gx.env"]
+        build_cli(ServeSpy(), init, PolicySpy().commands(), AdminSpy().commands()),
+        ["init", "--env-file", "conf/gx.env"],
     )
 
     assert result.exit_code == 0, result.output
@@ -153,7 +202,9 @@ def test_init_report_for_a_rerun_says_nothing_was_created() -> None:
         user_created=False,
     )
 
-    result = runner.invoke(build_cli(ServeSpy(), InitSpy(rerun), PolicySpy().commands()), ["init"])
+    result = runner.invoke(
+        build_cli(ServeSpy(), InitSpy(rerun), PolicySpy().commands(), AdminSpy().commands()), ["init"]
+    )
 
     assert result.exit_code == 0, result.output
     assert "(kept existing)" in result.output
@@ -167,7 +218,8 @@ def test_policy_show_renders_ceiling_user_setting_and_effective_per_row() -> Non
     spy = PolicySpy()
 
     result = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(), spy.commands()), ["policy", "show", "--user", "bob"]
+        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands()),
+        ["policy", "show", "--user", "bob"],
     )
 
     assert result.exit_code == 0, result.output
@@ -198,7 +250,7 @@ def test_policy_tighten_turns_options_into_a_domain_patch() -> None:
         "--unconfirmed-max-actions", "2", "--unconfirmed-window-s", "3600", "--max-pending", "1",
     ]  # fmt: skip
 
-    result = runner.invoke(build_cli(ServeSpy(), InitSpy(), spy.commands()), args)
+    result = runner.invoke(build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands()), args)
 
     assert result.exit_code == 0, result.output
     assert spy.tightened == [
@@ -227,7 +279,7 @@ def test_set_ceiling_passes_the_user_and_only_the_given_options() -> None:
     args = ["admin", "policy", "set-ceiling", "--user", "alice", "--profile", "trade", "--allow-none",
             "--confirm", "all", "--confirm-above-notional-usdt", "none"]  # fmt: skip
 
-    result = runner.invoke(build_cli(ServeSpy(), InitSpy(), spy.commands()), args)
+    result = runner.invoke(build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands()), args)
 
     assert result.exit_code == 0, result.output
     [(user, change)] = spy.ceilings
@@ -253,7 +305,9 @@ def test_set_ceiling_passes_the_user_and_only_the_given_options() -> None:
 def test_bad_option_values_are_usage_errors_naming_the_setting(args: list[str], hint: str) -> None:
     spy = PolicySpy()
 
-    result = runner.invoke(build_cli(ServeSpy(), InitSpy(), spy.commands()), ["policy", "tighten", *args])
+    result = runner.invoke(
+        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands()), ["policy", "tighten", *args]
+    )
 
     assert result.exit_code == 2
     assert hint in result.stderr
@@ -268,7 +322,96 @@ def test_refusal_from_the_use_case_propagates_to_the_composition_root() -> None:
     spy = PolicySpy(fail_with=PermissionDenied("weaker", details={"field": "max_leverage"}))
 
     result = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(), spy.commands()), ["policy", "tighten", "--max-leverage", "50"]
+        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands()),
+        ["policy", "tighten", "--max-leverage", "50"],
     )
 
     assert isinstance(result.exception, PermissionDenied)  # bootstrap prints it and exits 1
+
+
+@pytest.mark.req("FR-29")
+def test_serve_accepts_the_http_transport() -> None:
+    spy = ServeSpy()
+
+    result = runner.invoke(
+        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands()),
+        ["serve", "--transport", "http"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert spy.calls == [("http", None)]
+
+
+@pytest.mark.req("FR-29")
+def test_admin_user_create_and_list() -> None:
+    spy = AdminSpy()
+    app = build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands())
+
+    created = runner.invoke(app, ["admin", "user", "create", "alice"])
+    listed = runner.invoke(app, ["admin", "user", "list"])
+    empty = runner.invoke(
+        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), AdminSpy(users=[]).commands()),
+        ["admin", "user", "list"],
+    )
+
+    assert created.exit_code == 0, created.output
+    assert spy.created == ["alice"]
+    assert "user created: alice [u-2] (active, testnet)" in created.output
+    assert listed.output.splitlines()[0].split() == ["name", "id", "status", "environment"]
+    assert listed.output.splitlines()[1].split() == ["local", "u-1", "active", "testnet"]
+    assert empty.output.strip() == "no users"
+
+
+@pytest.mark.req("FR-29")
+def test_admin_token_issue_prints_the_secret_once_with_its_id() -> None:
+    spy = AdminSpy()
+
+    result = runner.invoke(
+        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands()),
+        ["admin", "token", "issue", "--user", "local"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert spy.issued_for == ["local"]
+    assert result.output.count(SECRET) == 1
+    assert "token id: t-1" in result.output
+    assert "Shown once" in result.output
+    assert "admin token revoke t-1" in result.output
+
+
+def test_admin_token_issue_requires_a_user() -> None:
+    spy = AdminSpy()
+
+    result = runner.invoke(
+        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands()), ["admin", "token", "issue"]
+    )
+
+    assert result.exit_code == 2
+    assert spy.issued_for == []
+
+
+@pytest.mark.req("FR-29")
+@pytest.mark.parametrize(("already", "expected"), [(False, "revoked"), (True, "was already revoked")])
+def test_admin_token_revoke(already: bool, expected: str) -> None:
+    spy = AdminSpy(already_revoked=already)
+
+    result = runner.invoke(
+        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands()),
+        ["admin", "token", "revoke", "t-1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert spy.revoked == ["t-1"]
+    assert result.output.strip() == f"token t-1 (user id u-1) {expected}"
+
+
+def test_admin_command_failure_propagates_from_the_composition_root() -> None:
+    spy = AdminSpy(fail_with=NotFound("user 'bob' does not exist"))
+
+    result = runner.invoke(
+        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands()),
+        ["admin", "token", "issue", "--user", "bob"],
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, NotFound)  # bootstrap._with_storage turns it into exit 1

@@ -1,20 +1,33 @@
 """Composition root: the only module that reads configuration and wires adapters to use cases."""
 
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import NoReturn
 
 import anyio
 import httpx2
 import structlog
-from mcp.server import MCPServer
 
-from guarded_exchange.application.admin import InitializeInstallation, InitResult, MasterKeyMissing
-from guarded_exchange.application.auth import PrincipalUnavailable, ResolveLocalPrincipal
+from guarded_exchange.application.admin import (
+    CreateUser,
+    InitializeInstallation,
+    InitResult,
+    IssueAccessToken,
+    IssuedToken,
+    ListUsers,
+    MasterKeyMissing,
+    RevokeAccessToken,
+    RevokedToken,
+)
+from guarded_exchange.application.auth import (
+    AuthenticateBearerToken,
+    PrincipalUnavailable,
+    ResolveLocalPrincipal,
+)
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.policy import (
     AuthorizeAccess,
@@ -23,11 +36,12 @@ from guarded_exchange.application.policy import (
     SetCeiling,
     TightenPolicy,
 )
-from guarded_exchange.application.ports import UnitOfWorkFactory
+from guarded_exchange.application.ports import Authenticator, UnitOfWorkFactory
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.config import ConfigError, Settings, load_settings
 from guarded_exchange.domain.errors import DomainError
 from guarded_exchange.domain.policy import PolicyPatch
+from guarded_exchange.domain.users import User
 from guarded_exchange.infrastructure.bybit.client import BybitClient, RetryPolicy
 from guarded_exchange.infrastructure.bybit.http import make_http_client
 from guarded_exchange.infrastructure.clock import SystemClock, UuidGenerator
@@ -40,8 +54,17 @@ from guarded_exchange.infrastructure.db.migrate import (
 from guarded_exchange.infrastructure.db.uow import SqlUnitOfWorkFactory, create_sqlite_async_engine
 from guarded_exchange.infrastructure.logging import configure_logging
 from guarded_exchange.infrastructure.master_key import FileMasterKeyStore, MasterKeyError
-from guarded_exchange.interface.cli.main import InitReport, PolicyCommands, Transport, build_cli
+from guarded_exchange.infrastructure.tokens import SecretTokenGenerator
+from guarded_exchange.interface.cli.main import (
+    AdminCommands,
+    InitReport,
+    PolicyCommands,
+    Transport,
+    build_cli,
+)
 from guarded_exchange.interface.mcp.access import PrincipalProvider, fixed_principal
+from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
+from guarded_exchange.interface.mcp.http import create_http_server, http_app, serve_http
 from guarded_exchange.interface.mcp.server import UseCases, create_server, serve_stdio
 
 
@@ -73,25 +96,41 @@ def build_use_cases(settings: Settings, http: httpx2.AsyncClient, uow: UnitOfWor
     )
 
 
+def public_url(settings: Settings) -> str:
+    host = f"[{settings.http_host}]" if ":" in settings.http_host else settings.http_host
+    return f"http://{host}:{settings.http_port}"
+
+
 @asynccontextmanager
 async def app_server(
     settings: Settings,
     *,
     uow: UnitOfWorkFactory,
-    principal: PrincipalProvider,
+    principal: PrincipalProvider | None = None,
+    authenticator: Authenticator | None = None,
     transport: httpx2.AsyncBaseTransport | None = None,
-) -> AsyncIterator[MCPServer[Any]]:
+) -> AsyncIterator[GuardedMCPServer]:
     """Build a fully wired server and close its resources on exit.
 
+    Exactly one source of the principal: ``principal`` (local mode: the configured user) or
+    ``authenticator`` (remote mode: the bearer token of each HTTP request, ADR-004).
     ``transport`` is a test seam (``httpx2.MockTransport``); production passes ``None``.
     """
+    if (principal is None) == (authenticator is None):
+        raise ValueError("pass exactly one of principal (stdio) or authenticator (http)")
     async with make_http_client(
         str(settings.bybit_base_url),
         connect_timeout_s=settings.bybit_connect_timeout_s,
         read_timeout_s=settings.bybit_read_timeout_s,
         transport=transport,
     ) as http:
-        yield create_server(build_use_cases(settings, http, uow), principal=principal, version=_version())
+        use_cases = build_use_cases(settings, http, uow)
+        if authenticator is not None:
+            yield create_http_server(
+                use_cases, authenticator, public_url=public_url(settings), version=_version()
+            )
+        elif principal is not None:
+            yield create_server(use_cases, principal=principal, version=_version())
 
 
 @asynccontextmanager
@@ -168,6 +207,26 @@ async def _serve_stdio(settings: Settings) -> None:
             await serve_stdio(mcp)
 
 
+async def _serve_http(settings: Settings) -> None:
+    async with (
+        open_storage(settings) as uow,
+        app_server(settings, uow=uow, authenticator=AuthenticateBearerToken(uow)) as mcp,
+    ):
+        app = http_app(
+            mcp, allowed_hosts=settings.http_allowed_hosts, allowed_origins=settings.http_allowed_origins
+        )
+        structlog.get_logger(__name__).info(
+            "http_listening",
+            url=f"{public_url(settings)}/mcp",
+            allowed_hosts=settings.http_allowed_hosts,
+            loopback_only=settings.http_host in _LOOPBACK_HOSTS,
+        )
+        await serve_http(app, host=settings.http_host, port=settings.http_port)
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
 def serve(transport: Transport, env_file: Path | None = None) -> None:
     settings = _load_settings(env_file)
     configure_logging(settings.log_level)  # before MCPServer(): it calls logging.basicConfig
@@ -182,7 +241,7 @@ def serve(transport: Transport, env_file: Path | None = None) -> None:
     try:
         # Never migrate here (D-11): clients start several server processes at once.
         check_storage(settings.db_path, busy_timeout_ms=settings.sqlite_busy_timeout_ms)
-        anyio.run(_serve_stdio, settings)
+        anyio.run(_serve_http if transport == "http" else _serve_stdio, settings)
     except (StorageNotReady, PrincipalUnavailable, DomainError) as exc:
         log.error("startup_refused", reason=str(exc))
         _fail("cannot start", exc, 2)
@@ -229,7 +288,34 @@ def set_ceiling(env_file: Path | None, user: str | None, change: PolicyPatch) ->
     )
 
 
+# --- users and access tokens (remote mode) ------------------------------------------------
+
+
+def create_user(env_file: Path | None, name: str) -> User:
+    return _with_storage(env_file, lambda uow, s: CreateUser(uow, SystemClock(), UuidGenerator())(name))
+
+
+def list_users(env_file: Path | None) -> Sequence[User]:
+    return _with_storage(env_file, lambda uow, s: ListUsers(uow)())
+
+
+def issue_token(env_file: Path | None, user: str) -> IssuedToken:
+    return _with_storage(
+        env_file,
+        lambda uow, s: IssueAccessToken(uow, SystemClock(), UuidGenerator(), SecretTokenGenerator())(user),
+    )
+
+
+def revoke_token(env_file: Path | None, token_id: str) -> RevokedToken:
+    return _with_storage(env_file, lambda uow, s: RevokeAccessToken(uow, SystemClock())(token_id))
+
+
 def cli() -> None:
     build_cli(
-        serve, init, PolicyCommands(show=show_policy, tighten=tighten_policy, set_ceiling=set_ceiling)
+        serve,
+        init,
+        PolicyCommands(show=show_policy, tighten=tighten_policy, set_ceiling=set_ceiling),
+        AdminCommands(
+            create_user=create_user, list_users=list_users, issue_token=issue_token, revoke_token=revoke_token
+        ),
     )()
