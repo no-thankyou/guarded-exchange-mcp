@@ -67,12 +67,22 @@ class TickersResultDTO(BaseModel):
 
 
 def parse_envelope(payload: object) -> Envelope:
+    # The error is raised outside ``except``: a pydantic error quotes the input, which for private
+    # endpoints may contain key material (``query-api`` returns ``apiKey`` and ``secret``), and it
+    # must not survive as ``__cause__`` or ``__context__`` of what we raise.
+    envelope = _validated(Envelope, payload)
+    if envelope is None:
+        raise unavailable("unexpected response format")
+    return envelope
+
+
+def _validated[M: BaseModel](model: type[M], data: object) -> M | None:
+    """``model.model_validate(data)`` or ``None``; the ``ValidationError`` (which quotes the input)
+    is dropped here so callers can raise their own error without any link to it."""
     try:
-        return Envelope.model_validate(payload)
+        return model.model_validate(data)
     except ValidationError:
-        # No cause chained: a pydantic error quotes the input, which for private endpoints may
-        # contain key material (``query-api`` returns ``apiKey`` and ``secret``).
-        raise unavailable("unexpected response format") from None
+        return None
 
 
 def ticker_from_result(
@@ -411,10 +421,9 @@ def key_permissions_from_result(result: dict[str, Any]) -> KeyPermissions:
     ``expiredAt`` of ``1970-01-01T00:00:00Z`` (the documented value for keys bound to an IP) or
     empty means the key does not expire. ``ips`` empty or ``["*"]`` means no IP whitelist.
     """
-    try:
-        parsed = QueryApiDTO.model_validate(result)
-    except ValidationError:
-        raise unavailable("unexpected query-api format") from None  # never chain: input has the secret
+    parsed = _validated(QueryApiDTO, result)  # never chained: the input holds the secret
+    if parsed is None:
+        raise unavailable("unexpected query-api format")
     if parsed.read_only not in (0, 1):
         raise unavailable("unexpected readOnly value in query-api")
     names = frozenset(
@@ -438,10 +447,16 @@ def _expiry(raw: str) -> datetime | None:
     raw = raw.strip()
     if not raw:
         return None
-    try:
-        value = datetime.fromisoformat(raw)
-    except ValueError:
-        raise unavailable("unparsable expiredAt in query-api") from None
+    value = _iso_time(raw)
+    if value is None:
+        raise unavailable("unparsable expiredAt in query-api")
     if value.tzinfo is None:
         raise unavailable("expiredAt without a time zone in query-api")
     return None if value <= _EPOCH else value.astimezone(UTC)
+
+
+def _iso_time(raw: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None

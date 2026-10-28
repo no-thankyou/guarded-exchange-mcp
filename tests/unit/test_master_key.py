@@ -149,3 +149,12 @@ def test_load_refuses_a_missing_open_linked_or_corrupt_key(tmp_path: Path) -> No
     directory.mkdir(mode=0o700)
     with pytest.raises(MasterKeyError, match="not a regular file"):
         FileMasterKeyStore(directory).load()
+
+
+@pytest.mark.req("NFR-1")
+def test_load_refuses_a_fifo_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "master.key"
+    os.mkfifo(fifo, 0o600)  # nobody writes to it: a blocking open would hang the server
+
+    with pytest.raises(MasterKeyError, match="not a regular file"):
+        FileMasterKeyStore(fifo).load()

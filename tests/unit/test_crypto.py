@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from guarded_exchange.domain.credentials import ApiKeyPair, CredentialBinding, CredentialUnreadable
+from guarded_exchange.domain.users import Environment
 from guarded_exchange.infrastructure.crypto import (
     NONCE_BYTES,
     AesGcmCredentialCipher,
@@ -17,7 +18,9 @@ from guarded_exchange.infrastructure.crypto import (
 
 MASTER = bytes(range(32))
 KEYS = ApiKeyPair(api_key="CRYPTOKEY0123456", api_secret="crypto-secret-0123456789abcdefgh")  # noqa: S106 - test value
-ALICE = CredentialBinding(credential_id="c-1", user_id="u-alice", exchange="bybit")
+ALICE = CredentialBinding(
+    credential_id="c-1", user_id="u-alice", exchange="bybit", environment=Environment.TESTNET
+)
 
 
 def test_every_purpose_gets_its_own_deterministic_hkdf_subkey() -> None:
@@ -74,6 +77,7 @@ def test_every_seal_uses_a_fresh_nonce() -> None:
         replace(ALICE, user_id="u-bob"),  # copied into another user's row
         replace(ALICE, credential_id="c-2"),  # into another credential of the same user
         replace(ALICE, exchange="other"),
+        replace(ALICE, environment=Environment.MAINNET),  # D-12: a test key never opens as mainnet
     ],
 )
 def test_a_ciphertext_does_not_open_under_another_binding(other: CredentialBinding) -> None:
@@ -84,7 +88,7 @@ def test_a_ciphertext_does_not_open_under_another_binding(other: CredentialBindi
         cipher.open(sealed, other)
 
     assert err.value.__cause__ is None  # nothing about the plaintext in a traceback
-    assert err.value.__suppress_context__
+    assert err.value.__context__ is None
 
 
 def test_tampering_or_another_master_key_is_detected() -> None:
@@ -101,8 +105,20 @@ def test_tampering_or_another_master_key_is_detected() -> None:
 
 
 def test_aad_parts_are_length_prefixed_so_bindings_cannot_collide() -> None:
-    a = CredentialBinding(credential_id="ab", user_id="c", exchange="bybit")
-    b = CredentialBinding(credential_id="a", user_id="bc", exchange="bybit")
+    a = CredentialBinding(credential_id="ab", user_id="c", exchange="bybit", environment=Environment.TESTNET)
+    b = CredentialBinding(credential_id="a", user_id="bc", exchange="bybit", environment=Environment.TESTNET)
 
     assert credential_aad(a) != credential_aad(b)
-    assert credential_aad(ALICE) == b"\x00\x00\x00\x03c-1\x00\x00\x00\x07u-alice\x00\x00\x00\x05bybit"
+    assert credential_aad(ALICE) == (
+        b"\x00\x00\x00\x03c-1\x00\x00\x00\x07u-alice\x00\x00\x00\x05bybit\x00\x00\x00\x07testnet"
+    )
+
+
+def test_a_tampered_plaintext_error_is_not_linked_to_the_raised_exception() -> None:
+    cipher = AesGcmCredentialCipher(Keyring.single(MASTER))
+    sealed = cipher.seal(KEYS, ALICE)
+
+    with pytest.raises(CredentialUnreadable) as err:
+        cipher.open(replace(sealed, nonce=b"\x00" * NONCE_BYTES), ALICE)
+
+    assert (err.value.__cause__, err.value.__context__) == (None, None)

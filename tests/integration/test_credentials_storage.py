@@ -293,3 +293,54 @@ def test_serve_refuses_an_unknown_or_plain_http_exchange_url(
     assert out == ""
     assert "guarded-exchange: configuration error:" in err
     assert "GX_BYBIT_BASE_URL must be one of" in err
+
+
+@pytest.mark.req("FR-29", "FR-30")
+def test_keys_show_and_delete_work_without_a_usable_master_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = make_settings(tmp_path)
+    bootstrap.run_init(settings)
+    env = _env_file(tmp_path, settings)
+    added = bootstrap.add_key(env, None, ALICE_KEYS, False, transport=httpx2.MockTransport(QueryApi()))
+    settings.master_key_file.write_bytes(b"broken\n")  # e.g. a bad restore: delete must still work
+
+    _, listed = bootstrap.show_keys(env, None)
+    deleted = bootstrap.delete_key(env, None)
+
+    assert [c.id for c in listed] == [added.credential.id]
+    assert deleted.id == added.credential.id
+    assert _rows(settings.db_path, "SELECT status FROM exchange_credentials") == [("deleted",)]
+
+
+@pytest.mark.req("NFR-1")
+@pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_failing_server_still_lets_the_start_up_recheck_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = make_settings(tmp_path)
+    bootstrap.run_init(settings)
+
+    class Crash(Exception):
+        pass
+
+    async def crash(*_: Any, **__: Any) -> None:
+        raise Crash
+
+    monkeypatch.setattr(bootstrap, "serve_http", crash)
+    rechecked: list[bool] = []
+    original = bootstrap.recheck_credentials_on_start
+
+    async def recording(*args: Any, **kwargs: Any) -> None:
+        await original(*args, **kwargs)
+        rechecked.append(True)
+
+    monkeypatch.setattr(bootstrap, "recheck_credentials_on_start", recording)
+
+    with pytest.raises(BaseException) as raised:  # noqa: PT011 - a task group may wrap it
+        bootstrap.serve("http", _env_file(tmp_path, settings))
+
+    assert (
+        raised.group_contains(Crash) if isinstance(raised.value, BaseExceptionGroup) else raised.type is Crash
+    )
+    assert rechecked == [True]  # the background re-check ran to its end instead of being cut off

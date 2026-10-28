@@ -176,10 +176,10 @@ class BybitClient:
         if not response.is_success:
             raise unavailable(f"HTTP {response.status_code}")
 
-        try:
-            payload: Any = response.json()
-        except ValueError as exc:
-            raise unavailable("response is not JSON") from exc
+        payload = _json_or_none(response)
+        if payload is None:
+            # Not chained: a JSON decoding error keeps the whole body, which may hold key material.
+            raise unavailable("response is not JSON")
         envelope = parse_envelope(payload)
         if envelope.ret_code == RET_OK:
             return envelope
@@ -187,3 +187,10 @@ class BybitClient:
         if envelope.ret_code in RETRYABLE_RET_CODES:
             raise _Retryable(error)
         raise error
+
+
+def _json_or_none(response: httpx2.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError:
+        return None

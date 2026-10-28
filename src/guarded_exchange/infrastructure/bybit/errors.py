@@ -42,8 +42,9 @@ def error_for_ret_code(ret_code: int, ret_msg: str) -> DomainError:
             "the exchange did not accept the API key",
             next_step="Check that the key belongs to this environment (a Demo Trading key works only on "
             "api-demo.bybit.com), is not expired and allows this server's IP address.",
+            # No exchange text: authentication errors may echo the signed origin string, which
+            # contains the API key (e.g. "error sign! origin_string[...]").
             details=details,
-            untrusted_text=ret_msg,
         )
     if ret_code == _RATE_LIMITED:
         # Full rate-limit handling (retry_after from X-Bapi-Limit-Reset-Timestamp) is ticket 022.

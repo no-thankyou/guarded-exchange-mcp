@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Final, NoReturn
 
 import anyio
-import anyio.abc
 import httpx2
 import structlog
 
@@ -290,33 +289,46 @@ def init(env_file: Path | None = None) -> InitReport:
 _RECHECK_GRACE_S: Final = 5.0
 
 
-def _stop_after_grace(tasks: anyio.abc.TaskGroup) -> None:
-    """The server stopped: give a start-up re-check still in flight a few seconds to finish its
-    database work (cancelling an aiosqlite call mid-way leaves its worker thread posting to a closed
-    loop), then cancel it."""
-    tasks.cancel_scope.deadline = anyio.current_time() + _RECHECK_GRACE_S
+async def _serve_with_recheck(
+    serve_mcp: Callable[[], Awaitable[None]], settings: Settings, uow: UnitOfWorkFactory, keyring: Keyring
+) -> None:
+    """Serve while the start-up re-check (D-24) runs in the background.
+
+    However the server stops - normally, with an error or cancelled - the re-check gets up to
+    ``_RECHECK_GRACE_S`` (shielded) to finish its database work before it is cancelled: cancelling
+    an aiosqlite call mid-way leaves its worker thread posting to a closed event loop.
+    """
+    done = anyio.Event()
+
+    async def recheck() -> None:
+        try:
+            await recheck_credentials_on_start(settings, uow, keyring)
+        finally:
+            done.set()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(recheck)
+        try:
+            await serve_mcp()
+        finally:
+            with anyio.CancelScope(deadline=anyio.current_time() + _RECHECK_GRACE_S, shield=True):
+                await done.wait()
+            tasks.cancel_scope.cancel()
 
 
 async def _serve_stdio(settings: Settings, keyring: Keyring) -> None:
     async with open_storage(settings) as uow:
         principal = await ResolveLocalPrincipal(uow)(settings.local_user)
         structlog.get_logger(__name__).info("principal_resolved", user_id=principal.id, user=principal.name)
-        async with (
-            app_server(settings, uow=uow, principal=fixed_principal(principal.id)) as mcp,
-            anyio.create_task_group() as tasks,
-        ):
-            tasks.start_soon(recheck_credentials_on_start, settings, uow, keyring)
-            await serve_stdio(mcp)
-            _stop_after_grace(tasks)
+        async with app_server(settings, uow=uow, principal=fixed_principal(principal.id)) as mcp:
+            await _serve_with_recheck(lambda: serve_stdio(mcp), settings, uow, keyring)
 
 
 async def _serve_http(settings: Settings, keyring: Keyring) -> None:
     async with (
         open_storage(settings) as uow,
         app_server(settings, uow=uow, authenticator=AuthenticateBearerToken(uow)) as mcp,
-        anyio.create_task_group() as tasks,
     ):
-        tasks.start_soon(recheck_credentials_on_start, settings, uow, keyring)
         app = http_app(
             mcp, allowed_hosts=settings.http_allowed_hosts, allowed_origins=settings.http_allowed_origins
         )
@@ -331,8 +343,9 @@ async def _serve_http(settings: Settings, keyring: Keyring) -> None:
                 hint="plain HTTP: bearer tokens travel in clear text; expose it only behind a "
                 "TLS-terminating reverse proxy and list the public host in GX_HTTP_ALLOWED_HOSTS",
             )
-        await serve_http(app, host=settings.http_host, port=settings.http_port)
-        _stop_after_grace(tasks)
+        await _serve_with_recheck(
+            lambda: serve_http(app, host=settings.http_host, port=settings.http_port), settings, uow, keyring
+        )
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -470,11 +483,17 @@ def replace_key(
 
 
 def delete_key(env_file: Path | None, user: str | None) -> Credential:
-    return _with_credentials(env_file, lambda c, s: c.delete(user or s.local_user), None)
+    """Needs neither the master key nor the exchange: deleting must work even with a broken key."""
+    return _with_storage(
+        env_file,
+        lambda uow, s: DeleteCredential(
+            uow, SystemClock(), exchange=EXCHANGE_BYBIT, environment=s.bybit_environment
+        )(user or s.local_user),
+    )
 
 
 def show_keys(env_file: Path | None, user: str | None) -> tuple[User, Sequence[Credential]]:
-    return _with_credentials(env_file, lambda c, s: c.list(user or s.local_user), None)
+    return _with_storage(env_file, lambda uow, s: ListCredentials(uow)(user or s.local_user))
 
 
 def cli() -> None:

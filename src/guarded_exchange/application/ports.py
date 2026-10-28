@@ -187,7 +187,13 @@ class CredentialRepository(Protocol):
         """Active credentials of every user on one exchange environment."""
         ...
 
-    async def get_sealed(self, credential_id: str) -> SealedSecret | None: ...
+    async def get_sealed(self, credential_id: str) -> SealedSecret | None:
+        """The secret of any credential, also a deleted one (D-9: outcome reconnaissance)."""
+        ...
+
+    async def get_sealed_active(self, credential_id: str) -> SealedSecret | None:
+        """The secret only while the credential is active; the path for new actions."""
+        ...
 
     async def update_permissions(
         self, credential_id: str, permissions: KeyPermissions, checked_at: datetime

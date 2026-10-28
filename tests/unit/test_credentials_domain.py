@@ -250,3 +250,27 @@ def test_malformed_key_input_is_refused_without_quoting_it(api_key: str, api_sec
     assert err.value.details == {"field": field}
     assert api_secret not in err.value.message or not api_secret
     assert "has a space" not in err.value.message
+
+
+@pytest.mark.req("FR-29", "FR-49")
+def test_a_deleted_key_never_passes_the_trading_check() -> None:
+    with pytest.raises(ExchangeCredentialsInvalid) as err:
+        require_trading_allowed(_credential(perms(), status=CredentialStatus.DELETED, deleted_at=NOW), NOW)
+
+    assert err.value.details == {"reason": "key_replaced_or_deleted"}
+
+
+@pytest.mark.req("FR-49", "NFR-1")
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"admin_attested": False},  # unverified and not attested: should not exist, refuse anyway
+        {"admin_attested": True, "environment": Environment.MAINNET},  # attestation is testnet-only
+    ],
+    ids=["not-attested", "attested-on-mainnet"],
+)
+def test_unverified_permissions_pass_only_for_an_attested_testnet_key(changes: dict[str, object]) -> None:
+    with pytest.raises(ExchangeCredentialsInvalid) as err:
+        require_trading_allowed(_credential(None, **changes), NOW)
+
+    assert err.value.details == {"reason": "permissions_unverified"}

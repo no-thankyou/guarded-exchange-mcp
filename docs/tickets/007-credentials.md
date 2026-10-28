@@ -58,3 +58,16 @@
 - Отпечаток master key в БД (предложение из 005): сейчас подмена ключа обнаружится только как `CredentialUnreadable` при первом использовании.
 - Периодическая перепроверка в долгоживущем процессе (сейчас — при старте и лениво перед изменяющим действием); для удалённого режима с десятками пользователей — ограничить параллелизм/темп перепроверки при старте (сейчас последовательно).
 - Региональные хосты Bybit (`api.bybit.kz`, `api.bybit.eu`, …) в `hosts.py` — по запросу.
+
+Ревью, раунд 1 (CHANGES_REQUESTED, исправлено 2026-10-28):
+- **M1.** `RequireTradingCredential` больше не отдаёт удалённый/заменённый ключ: домен `require_trading_allowed` отказывает для `status != active` (`exchange_credentials_invalid`, `reason=key_replaced_or_deleted`); результат перепроверки с неактивным ключом проходит через ту же проверку; секрет для торгового пути и перепроверки читается новым `CredentialRepository.get_sealed_active` (`status='active'` в SQL), `get_sealed` оставлен для разведки исхода (D-9). Тесты: `test_a_key_deleted_during_the_recheck_is_not_handed_out`, `test_a_key_replaced_between_the_check_and_decryption_is_not_handed_out`, `test_a_deleted_key_never_passes_the_trading_check`. В заметку 011 — финальная сверка под `lock_user` (D-8).
+- m1. Исключение для attest при неудачной перепроверке — только пока `permissions is None` (ключ ни разу не проверялся); проверенный однажды ключ fail closed — `test_an_attested_key_verified_once_is_not_exempt_when_a_later_recheck_fails`.
+- m2. Домен: `permissions is None` разрешено только при `admin_attested` и `environment is TESTNET`, иначе `permissions_unverified` — `test_unverified_permissions_pass_only_for_an_attested_testnet_key`.
+- m3. Для кодов «ключ не принят» текст биржи не передаётся в `untrusted_text` (sign error эхом возвращает строку с API key) — тест с `origin_string[...]`.
+- m4. Фоновая перепроверка при старте вынесена в `_serve_with_recheck`: при любой остановке (норма, исключение, отмена) ей даётся до 5 с в shielded scope, затем отмена — `test_a_failing_server_still_lets_the_start_up_recheck_finish` (предупреждения о потоках — ошибка).
+- m5. `keys delete` и `keys show` работают без master key (только UoW + clock) — `test_keys_show_and_delete_work_without_a_usable_master_key`.
+- m6. Master key открывается с `O_NONBLOCK`: FIFO → «not a regular file» без зависания — `test_load_refuses_a_fifo_without_blocking`.
+- m7. Ошибки, скрывающие `ValidationError`/JSON/крипто-ошибки, создаются вне `except` (`_validated`, `_iso_time`, `_json_or_none`, `_try_open`): ни `__cause__`, ни `__context__` не ссылаются на исходную ошибку; тесты проверяют оба атрибута (в т.ч. не-JSON тело с секретом и `expiredAt` с секретом).
+- **AAD включает environment** (D-12): `credential_id ‖ user_id ‖ exchange ‖ environment`; тест «testnet-ключ не открывается как mainnet»; ADR-009 поправлен. Данных ещё нет — миграция не нужна.
+- README: read-only ключ с лишними группами прав тоже отклоняется — создавать ключ только с нужными правами.
+- Предложение (не делалось, записано в PLAN «Риски»): MAC метаданных строки `exchange_credentials` (`permissions`, `admin_attested`, `status`, `environment`) подключом `credentials` — сейчас запись в БД в обход приложения может «разблокировать» ключ до ближайшей перепроверки.

@@ -33,6 +33,7 @@ from guarded_exchange.domain.credentials import (
     KeyPermissions,
     assess_key,
     disallowed_permissions,
+    key_replaced_or_deleted,
     permissions_to_payload,
     require_trading_allowed,
     unverifiable_key,
@@ -321,6 +322,8 @@ class RecheckCredential:
         self._clock = clock
 
     async def __call__(self, credential: Credential) -> Credential:
+        """The fresh state of ``credential``; if it was deleted or replaced meanwhile, that state
+        (``status`` not active) is returned unchanged and nothing is written."""
         keys = await _open_keys(self._uow, self._cipher, credential)
         permissions = await self._reader.get_key_permissions(keys)
         async with self._uow(write=True) as uow:
@@ -353,10 +356,11 @@ def _changed_event(credential: Credential, permissions: KeyPermissions) -> Audit
 async def _open_keys(
     uow_factory: UnitOfWorkFactory, cipher: CredentialCipher, credential: Credential
 ) -> ApiKeyPair:
+    """Decrypt an **active** key; a key deleted or replaced in the meantime is never handed out."""
     async with uow_factory(write=False) as uow:
-        sealed = await uow.credentials.get_sealed(credential.id)
+        sealed = await uow.credentials.get_sealed_active(credential.id)
     if sealed is None:
-        raise NotFound("the exchange key is gone", details={"field": "credential"})
+        raise key_replaced_or_deleted()
     return cipher.open(sealed, credential.binding)
 
 
@@ -375,7 +379,12 @@ class RequireTradingCredential:
     permissions grew beyond the allowlist -> ``credentials_permissions_changed``; expired or missing
     -> ``exchange_credentials_invalid``; read-only -> ``permission_denied``. If a stale key cannot be
     re-checked, the action is refused (fail closed), unless the key was accepted on the admin's
-    attestation, whose permissions could never be checked in the first place (FR-49, GP-3).
+    attestation and its permissions could never be checked since (FR-49, GP-3). A key deleted or
+    replaced meanwhile -> ``exchange_credentials_invalid`` (``key_replaced_or_deleted``); its secret
+    is only read with ``status = 'active'``.
+
+    The caller (ticket 011) still re-reads the credential under ``lock_user`` right before sending
+    (D-8): between this check and the order a concurrent ``keys replace`` can still win.
     """
 
     def __init__(
@@ -414,8 +423,8 @@ class RequireTradingCredential:
         try:
             return await self._recheck(credential)
         except ExchangeUnavailable as exc:
-            if credential.admin_attested:
-                return credential
+            if credential.admin_attested and credential.permissions is None:
+                return credential  # never verifiable so far: the attestation is all there is
             raise ExchangeUnavailable(
                 "the exchange key's permissions could not be re-checked; state-changing actions are "
                 "blocked until they are",

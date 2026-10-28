@@ -104,13 +104,14 @@ class ApiKeyPair:
 class CredentialBinding:
     """What a stored secret is bound to (ADR-009): the AAD of its encryption.
 
-    A ciphertext copied into another credential's row (another user, another exchange) does not
-    decrypt, so agent B can never trade on user A's key.
+    A ciphertext copied into another credential's row (another user, another exchange or
+    environment, D-12) does not decrypt, so agent B can never trade on user A's key.
     """
 
     credential_id: str
     user_id: str
     exchange: str
+    environment: Environment
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,7 +221,9 @@ class Credential:
 
     @property
     def binding(self) -> CredentialBinding:
-        return CredentialBinding(credential_id=self.id, user_id=self.user_id, exchange=self.exchange)
+        return CredentialBinding(
+            credential_id=self.id, user_id=self.user_id, exchange=self.exchange, environment=self.environment
+        )
 
     @property
     def is_active(self) -> bool:
@@ -239,11 +242,20 @@ def require_trading_allowed(credential: Credential, now: datetime) -> None:
     """Raise unless the key may be used for a state-changing action right now (FR-49).
 
     Permissions grown beyond the allowlist -> ``CredentialsPermissionsChanged``; expired ->
-    ``ExchangeCredentialsInvalid``; read-only -> ``PermissionDenied``. A key accepted on admin
-    attestation and never verified since may trade (that is what the admin attested).
+    ``ExchangeCredentialsInvalid``; read-only -> ``PermissionDenied``; deleted or replaced ->
+    ``ExchangeCredentialsInvalid``. A key accepted on the admin's attestation on the test environment
+    and never verified since may trade (that is what the admin attested); unverified otherwise -> refused.
     """
+    if not credential.is_active:
+        raise key_replaced_or_deleted()
     if credential.permissions is None:
-        return
+        if credential.admin_attested and credential.environment is Environment.TESTNET:
+            return
+        raise ExchangeCredentialsInvalid(
+            "the exchange key's permissions were never verified",
+            next_step="Tell the user to replace the key (`guarded-exchange keys replace`), outside the chat.",
+            details={"reason": "permissions_unverified"},
+        )
     extra = disallowed_permissions(credential.exchange, credential.permissions)
     if extra:
         raise CredentialsPermissionsChanged(
@@ -265,6 +277,14 @@ def require_trading_allowed(credential: Credential, now: datetime) -> None:
             next_step="Do not retry. Tell the user; a trading key can be added outside the chat.",
             details={"reason": "read_only_key"},
         )
+
+
+def key_replaced_or_deleted() -> ExchangeCredentialsInvalid:
+    return ExchangeCredentialsInvalid(
+        "the exchange key was replaced or deleted",
+        next_step="Retry once: the action will use the user's current key, if there is one.",
+        details={"reason": "key_replaced_or_deleted"},
+    )
 
 
 def cap_profile(profile: Profile, credential: Credential | None) -> Profile:

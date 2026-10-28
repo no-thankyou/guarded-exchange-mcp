@@ -183,13 +183,16 @@ async def test_a_permission_name_with_odd_characters_counts_as_an_unknown_permis
 @pytest.mark.req("FR-49", "FR-28")
 @pytest.mark.parametrize("code", [10003, 10004, 10005, 10007, 10010, 33004])
 async def test_a_key_the_exchange_does_not_accept_is_invalid_not_unverifiable(code: int) -> None:
-    body = {"retCode": code, "retMsg": "API key is invalid.", "result": {}, "time": 1}
+    # Bybit's sign error echoes the signed string, which contains the API key.
+    ret_msg = f"error sign! origin_string[{VECTORS['timestamp']}{VECTORS['api_key']}5000]"
+    body = {"retCode": code, "retMsg": ret_msg, "result": {}, "time": 1}
 
     with pytest.raises(ExchangeCredentialsInvalid) as err:
         await _client(Recorder(httpx2.Response(200, json=body))).get_key_permissions(VECTOR_KEYS)
 
     assert err.value.details == {"exchange_code": str(code)}
-    assert err.value.untrusted_text == "API key is invalid."
+    assert err.value.untrusted_text is None  # the exchange text is not passed on
+    assert VECTORS["api_key"] not in f"{err.value!r}{err.value}{err.value.next_step}"
 
 
 @pytest.mark.req("FR-49")
@@ -229,10 +232,12 @@ async def test_query_api_secrets_reach_neither_logs_nor_errors(log_stream: io.St
     ok = Recorder(httpx2.Response(200, json=_query_api()))
     malformed = Recorder(httpx2.Response(200, json=_query_api(readOnly="not-a-number")))
     broken_envelope = Recorder(httpx2.Response(200, json={"result": _query_api()["result"]}))  # no retCode
+    bad_expiry = Recorder(httpx2.Response(200, json=_query_api(expiredAt=f"never-{LEAKY_SECRET}")))
+    not_json = Recorder(httpx2.Response(200, text=f'{{"secret": "{LEAKY_SECRET}", ...'))
 
     permissions = await _client(ok).get_key_permissions(VECTOR_KEYS)
     errors = []
-    for recorder in (malformed, broken_envelope):
+    for recorder in (malformed, broken_envelope, bad_expiry, not_json):
         with pytest.raises(ExchangeUnavailable) as err:
             await _client(recorder).get_key_permissions(VECTOR_KEYS)
         errors.append(err.value)
@@ -241,5 +246,5 @@ async def test_query_api_secrets_reach_neither_logs_nor_errors(log_stream: io.St
     text = log_stream.getvalue() + repr(permissions) + "".join(f"{e!r}{e}{e.__cause__!r}" for e in errors)
     for secret in (LEAKY_API_KEY, LEAKY_SECRET, VECTORS["api_secret"]):
         assert secret not in text
-    assert all(e.__cause__ is None for e in errors)
+    assert all(e.__cause__ is None and e.__context__ is None for e in errors)
     assert json.loads(log_stream.getvalue().splitlines()[-1])["event"] == "boom"

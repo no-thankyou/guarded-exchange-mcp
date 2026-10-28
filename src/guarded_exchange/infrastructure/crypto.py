@@ -4,7 +4,7 @@
   sub-key via HKDF-SHA256 (``KeyPurpose``), so the journal MAC key, the ``requestState`` key and
   the credential key are independent: leaking or misusing one says nothing about the others.
 - Exchange keys are encrypted with AES-256-GCM, a random 96-bit nonce per encryption and
-  AAD = ``credential_id || user_id || exchange`` (length-prefixed, so no two different bindings
+  AAD = ``credential_id || user_id || exchange || environment`` (length-prefixed, so no two different bindings
   encode alike). A ciphertext copied into another user's row fails authentication.
 - The keyring is versioned (``{version: master key}``) for a future ``rotate-keys``; today it
   holds one version.
@@ -83,8 +83,8 @@ class Keyring:
 
 
 def credential_aad(binding: CredentialBinding) -> bytes:
-    """``credential_id || user_id || exchange``, each part prefixed with its 4-byte length."""
-    parts = (binding.credential_id, binding.user_id, binding.exchange)
+    """``credential_id || user_id || exchange || environment``, each prefixed with its 4-byte length."""
+    parts = (binding.credential_id, binding.user_id, binding.exchange, binding.environment.value)
     return b"".join(len(raw).to_bytes(4, "big") + raw for raw in (part.encode() for part in parts))
 
 
@@ -102,14 +102,21 @@ class AesGcmCredentialCipher:
         return SealedSecret(ciphertext=ciphertext, nonce=nonce, key_version=version)
 
     def open(self, sealed: SealedSecret, binding: CredentialBinding) -> ApiKeyPair:
+        keys = self._try_open(sealed, binding)
+        if keys is None:
+            # Raised outside any ``except``: neither ``__cause__`` nor ``__context__`` links to the
+            # decryption or parsing error, so nothing about the plaintext can reach a traceback.
+            raise CredentialUnreadable()
+        return keys
+
+    def _try_open(self, sealed: SealedSecret, binding: CredentialBinding) -> ApiKeyPair | None:
         try:
             aead = self._aead(sealed.key_version)
             plaintext = aead.decrypt(sealed.nonce, sealed.ciphertext, credential_aad(binding))
             data = json.loads(plaintext)
             return ApiKeyPair(api_key=data["api_key"], api_secret=data["api_secret"])
         except (InvalidTag, KeyError, ValueError, TypeError, InvalidParams):
-            # No cause chained: nothing about the plaintext or the key may reach a traceback.
-            raise CredentialUnreadable() from None
+            return None
 
     def _aead(self, version: int) -> AESGCM:
         return AESGCM(self._keyring.subkey(KeyPurpose.CREDENTIALS, version))

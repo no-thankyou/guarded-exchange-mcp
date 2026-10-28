@@ -1,6 +1,6 @@
 """Use cases for exchange keys on in-memory fakes: add/replace/delete, FR-49 branches, re-check."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 
 import pytest
@@ -17,7 +17,13 @@ from guarded_exchange.application.credentials import (
 )
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy, SetCeiling
 from guarded_exchange.domain.audit import AuditRecord
-from guarded_exchange.domain.credentials import EXCHANGE_BYBIT, ApiKeyPair, CredentialStatus, KeyPermissions
+from guarded_exchange.domain.credentials import (
+    EXCHANGE_BYBIT,
+    ApiKeyPair,
+    Credential,
+    CredentialStatus,
+    KeyPermissions,
+)
 from guarded_exchange.domain.errors import (
     CredentialsPermissionsChanged,
     ExchangeCredentialsInvalid,
@@ -28,7 +34,14 @@ from guarded_exchange.domain.errors import (
 )
 from guarded_exchange.domain.policy import Permission, PolicyPatch, Profile
 from guarded_exchange.domain.users import Environment, UserStatus
-from tests.fakes import FakeCipher, FakeClock, FakeKeyReader, InMemoryDatabase, SequentialIds
+from tests.fakes import (
+    FakeCipher,
+    FakeClock,
+    FakeKeyReader,
+    InMemoryCredentialRepository,
+    InMemoryDatabase,
+    SequentialIds,
+)
 
 KEYS = ApiKeyPair(api_key="UNITKEY0123456789", api_secret="unit-secret-abcdefghijklmnopqrstuvwxyz")  # noqa: S106 - test value
 TRADING = frozenset({"ContractTrade.Order", "ContractTrade.Position", "Spot.SpotTrade"})
@@ -411,3 +424,65 @@ async def test_a_ciphertext_bound_to_another_user_is_not_usable(world: World) ->
     with pytest.raises(ExchangeCredentialsInvalid, match="cannot be decrypted"):
         await world.require()("user-bob")
     assert (await world.require()("user-local")).credential.id == local_cred.id
+
+
+# --- review round 1: deleted/replaced keys are never handed out (M1), attestation scope (m1) ----
+
+
+@pytest.mark.req("FR-29", "FR-49")
+async def test_a_key_deleted_during_the_recheck_is_not_handed_out(world: World) -> None:
+    await world.add()("local", KEYS)
+    world.clock.advance(timedelta(hours=2))
+    delete = world.delete()
+    ask_exchange = world.reader.get_key_permissions
+
+    async def delete_while_asking(keys: ApiKeyPair) -> KeyPermissions:
+        await delete("local")  # `keys delete` runs while the exchange is being asked
+        return await ask_exchange(keys)
+
+    world.reader.get_key_permissions = delete_while_asking  # type: ignore[method-assign]
+
+    with pytest.raises(ExchangeCredentialsInvalid) as err:
+        await world.require()("user-local")
+
+    assert err.value.details == {"reason": "key_replaced_or_deleted"}
+    assert [r.event_type for r in world.journal()] == ["credential_added", "credential_deleted"]
+
+
+@pytest.mark.req("FR-29", "FR-49")
+async def test_a_key_replaced_between_the_check_and_decryption_is_not_handed_out(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await world.add()("local", KEYS)  # fresh: no re-check, the race is check -> decrypt
+    original = InMemoryCredentialRepository.get_active
+
+    async def get_then_replaced(
+        self: InMemoryCredentialRepository, user_id: str, exchange: str, environment: Environment
+    ) -> Credential | None:
+        found = await original(self, user_id, exchange, environment)
+        if found is not None:  # a concurrent `keys replace` commits right after this read
+            _, sealed = world.db.state.credentials[found.id]
+            gone = replace(found, status=CredentialStatus.DELETED, deleted_at=world.clock.now())
+            world.db.state.credentials[found.id] = (gone, sealed)
+        return found
+
+    monkeypatch.setattr(InMemoryCredentialRepository, "get_active", get_then_replaced)
+
+    with pytest.raises(ExchangeCredentialsInvalid) as err:
+        await world.require()("user-local")
+
+    assert err.value.details == {"reason": "key_replaced_or_deleted"}
+
+
+@pytest.mark.req("FR-49", "NFR-1")
+async def test_an_attested_key_verified_once_is_not_exempt_when_a_later_recheck_fails(world: World) -> None:
+    world.reader.fail_with = ExchangeUnavailable("HTTP 404")
+    await world.add()("local", KEYS, admin_attested=True)
+    world.reader.fail_with = None
+    await world.require()("user-local")  # the exchange answered: permissions are now verified
+
+    world.clock.advance(timedelta(hours=2))
+    world.reader.fail_with = ExchangeUnavailable("timeout")
+
+    with pytest.raises(ExchangeUnavailable, match="could not be re-checked"):
+        await world.require()("user-local")

@@ -43,10 +43,11 @@ class FileMasterKeyStore:
         """The key bytes, after the same safety checks as ``exists``; missing -> ``MasterKeyError``.
 
         Read through one ``O_NOFOLLOW`` descriptor whose ``fstat`` is checked, so the file that is
-        checked is the file that is read.
+        checked is the file that is read. ``O_NONBLOCK``: a FIFO planted at the path is refused as
+        "not a regular file" instead of hanging the server on open.
         """
         try:
-            fd = os.open(self._path, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = os.open(self._path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             raise MasterKeyError(
                 f"master key not found at {self._path}; run `guarded-exchange init` on a new installation "

@@ -4,7 +4,7 @@ import json
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import Row, select, update
+from sqlalchemy import ColumnElement, Row, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -255,11 +255,20 @@ class SqlCredentialRepository(_Repository):
         return [_credential_from_row(row) for row in await self._conn.execute(query)]
 
     async def get_sealed(self, credential_id: str) -> SealedSecret | None:
+        return await self._sealed(exchange_credentials.c.id == credential_id)
+
+    async def get_sealed_active(self, credential_id: str) -> SealedSecret | None:
+        return await self._sealed(
+            exchange_credentials.c.id == credential_id,
+            exchange_credentials.c.status == CredentialStatus.ACTIVE.value,
+        )
+
+    async def _sealed(self, *where: ColumnElement[bool]) -> SealedSecret | None:
         query = select(
             exchange_credentials.c.ciphertext,
             exchange_credentials.c.nonce,
             exchange_credentials.c.key_version,
-        ).where(exchange_credentials.c.id == credential_id)
+        ).where(*where)
         row = (await self._conn.execute(query)).one_or_none()
         if row is None:
             return None

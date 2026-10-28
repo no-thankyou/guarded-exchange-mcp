@@ -166,11 +166,11 @@ tests/ unit/ integration/ e2e/ testnet/ (маркер, вне CI)
 
 ### ADR-009. Секреты — AES-256-GCM с AAD, один master key, HKDF-подключи
 - **Контекст:** FR-31, FR-50; угроза — подмена шифротекста между пользователями (агент B торгует на аккаунте A).
-- **Решение:** ключи биржи и токен Telegram-бота шифруются AES-256-GCM, случайный 96-битный nonce, AAD = `credential_id ‖ user_id ‖ exchange`. Master key — `SecretStr` из окружения; HKDF выводит подключи `credentials` и `audit`. Keyring `{version: key}`; CLI `rotate-keys` перешифровывает credentials, старые audit-ключи хранятся для verify. Локально `init` генерирует master key в файл 0600 вне каталога БД.
+- **Решение:** ключи биржи и токен Telegram-бота шифруются AES-256-GCM, случайный 96-битный nonce, AAD = `credential_id ‖ user_id ‖ exchange ‖ environment` (environment — D-12, добавлено в ревью тикета 007). Master key — `SecretStr` из окружения; HKDF выводит подключи `credentials` и `audit`. Keyring `{version: key}`; CLI `rotate-keys` перешифровывает credentials, старые audit-ключи хранятся для verify. Локально `init` генерирует master key в файл 0600 вне каталога БД.
 - **Альтернативы:** Fernet (нет AAD — копия строки в чужого пользователя расшифруется); envelope encryption (имеет смысл с KMS, в v1 — преждевременно).
 - **Последствия:** секреты никогда не логируются (structlog-процессор маскирования + тест).
 - **D-14.** HKDF-подключи: `credentials`, `audit`, `request_state` (D-5), `telegram`. AAD токена бота — `"telegram-bot" ‖ bot_id` (AAD биржевых ключей к нему неприменим).
-- **Тикет 007 (реализация):** HKDF-SHA256, `salt=None`, `info = "guarded-exchange/v1/" + purpose`, 32 байта (`infrastructure/crypto.py`); AAD — части `credential_id`, `user_id`, `exchange`, каждая с 4-байтовым префиксом длины (без неоднозначности склейки); открытый текст — JSON `{api_key, api_secret}`; ошибка расшифровки → `CredentialUnreadable` без цепочки исключений. `serve` загружает master key до старта MCP (fail closed, exit 2).
+- **Тикет 007 (реализация):** HKDF-SHA256, `salt=None`, `info = "guarded-exchange/v1/" + purpose`, 32 байта (`infrastructure/crypto.py`); AAD — части `credential_id`, `user_id`, `exchange`, `environment`, каждая с 4-байтовым префиксом длины (без неоднозначности склейки); открытый текст — JSON `{api_key, api_secret}`; ошибка расшифровки → `CredentialUnreadable` без цепочки исключений. `serve` загружает master key до старта MCP (fail closed, exit 2).
 
 ### ADR-010. Market-ордер исполняется как Limit IOC по худшей показанной цене
 - **Контекст:** FR-13 (notional по худшей ожидаемой цене), FR-21, FR-48.
@@ -369,6 +369,7 @@ async def place_order(..., ctx: Context) -> Annotated[CallToolResult, OrderOut] 
 | ~~`InputRequiredResult` нельзя вернуть из `@mcp.tool`~~ | закрыт спайком 002: можно | — |
 | ~~Demo Bybit не поддерживает `query-api` / часть эндпоинтов~~ | закрыт спайком 004: `query-api`, `instruments-info`, торговые и account-эндпоинты на demo работают | открыт вопрос прав demo-ключа (`AccountTransfer`) — «Спайк 004» |
 | Несколько stdio-процессов: SQLite locks, конфликт Telegram polling, раздельные rate buckets | надёжность локального режима | WAL + IMMEDIATE + busy_timeout, lease лидера, тест двух процессов |
+| Запись в БД в обход приложения меняет метаданные ключа (`permissions`, `admin_attested`, `status`, `environment` не защищены AAD) | атакующий с записью в БД может «разблокировать» ключ с расширенными правами до ближайшей перепроверки | AAD защищает секрет и привязку к пользователю/среде; предложение (тикет 007): MAC строки `exchange_credentials` подключом `credentials` или перепроверка прав перед каждым изменяющим действием на mainnet |
 | Агент с shell читает БД/ключи (локально) | гарантии AC-4 | ADR-015: Docker-запуск, threat model в README |
 | Фиктивный `decline` от Claude Desktop | неверная запись журнала | канал в журнале; не используем UI Desktop, пока capability не объявлена |
 | Изменения биржевых лимитов и API | FR-35 | читать заголовки, числа в адаптере с датой проверки |

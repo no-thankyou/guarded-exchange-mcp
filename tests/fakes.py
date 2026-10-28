@@ -407,6 +407,10 @@ class InMemoryCredentialRepository:
         stored = self._state.credentials.get(credential_id)
         return None if stored is None else stored[1]
 
+    async def get_sealed_active(self, credential_id: str) -> SealedSecret | None:
+        stored = self._state.credentials.get(credential_id)
+        return None if stored is None or not stored[0].is_active else stored[1]
+
     async def update_permissions(
         self, credential_id: str, permissions: KeyPermissions, checked_at: datetime
     ) -> None:
