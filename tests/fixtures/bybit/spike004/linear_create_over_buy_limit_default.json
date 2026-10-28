@@ -1,0 +1,10 @@
+{
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "orderId": "6babc4d3-858c-4990-967e-f2b369b57bd6",
+        "orderLinkId": "gx-s004-b0b73c-p9"
+    },
+    "retExtInfo": {},
+    "time": 1793168795542
+}

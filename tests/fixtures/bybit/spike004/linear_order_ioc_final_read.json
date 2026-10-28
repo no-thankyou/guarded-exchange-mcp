@@ -1,0 +1,57 @@
+{
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "list": [
+            {
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "orderLinkId": "gx-s004-b0b73c-b2",
+                "slLimitPrice": "0",
+                "orderId": "fa7b555a-dad9-444c-8f67-e4fc7572ac65",
+                "cancelType": "UNKNOWN",
+                "avgPrice": "80938.4",
+                "stopOrderType": "",
+                "lastPriceOnCreated": "80938.4",
+                "orderStatus": "Filled",
+                "createType": "CreateByUser",
+                "takeProfit": "",
+                "cumExecValue": "80.9384",
+                "tpslMode": "",
+                "smpType": "None",
+                "triggerDirection": 0,
+                "blockTradeId": "",
+                "cumFeeDetail": {
+                    "USDT": "0.04451612"
+                },
+                "isLeverage": "",
+                "rejectReason": "EC_NoError",
+                "price": "81100.4",
+                "orderIv": "",
+                "createdTime": "1793168786386",
+                "tpTriggerBy": "",
+                "positionIdx": 0,
+                "timeInForce": "IOC",
+                "leavesValue": "0",
+                "updatedTime": "1793168786387",
+                "side": "Buy",
+                "smpGroup": "0",
+                "triggerPrice": "",
+                "tpLimitPrice": "0",
+                "cumExecFee": "0.04451612",
+                "leavesQty": "0",
+                "slTriggerBy": "",
+                "closeOnTrigger": false,
+                "placeType": "",
+                "cumExecQty": "0.001",
+                "reduceOnly": false,
+                "qty": "0.001",
+                "stopLoss": "",
+                "marketUnit": "",
+                "smpOrderId": "",
+                "parentOrderLinkId": "",
+                "triggerBy": ""
+            }
+        ]
+    }
+}

@@ -1,0 +1,73 @@
+{
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "list": [
+            {
+                "accountIMRate": "0",
+                "totalMaintenanceMarginByMp": "0",
+                "totalInitialMargin": "0",
+                "accountType": "UNIFIED",
+                "accountMMRate": "0",
+                "accountMMRateByMp": "0",
+                "accountIMRateByMp": "0",
+                "totalInitialMarginByMp": "0",
+                "totalMaintenanceMargin": "0",
+                "totalEquity": "4992.27725481",
+                "totalMarginBalance": "4992.20644097",
+                "totalAvailableBalance": "4992.20644097",
+                "totalPerpUPL": "0",
+                "totalWalletBalance": "4992.20644097",
+                "accountLTV": "0",
+                "coin": [
+                    {
+                        "spotBorrow": "0",
+                        "availableToBorrow": "",
+                        "bonus": "0",
+                        "accruedInterest": "0",
+                        "availableToWithdraw": "",
+                        "totalOrderIM": "0",
+                        "equity": "0.00000087",
+                        "totalPositionMM": "0",
+                        "usdValue": "0.07081384",
+                        "unrealisedPnl": "0",
+                        "collateralSwitch": false,
+                        "spotHedgingQty": "0",
+                        "borrowAmount": "0.000000000000000000",
+                        "totalPositionIM": "0",
+                        "walletBalance": "0.00000087",
+                        "cumRealisedPnl": "-0.00000012",
+                        "locked": "0",
+                        "marginCollateral": true,
+                        "colRes": "0",
+                        "coin": "BTC"
+                    },
+                    {
+                        "spotBorrow": "0",
+                        "availableToBorrow": "",
+                        "bonus": "0",
+                        "accruedInterest": "0",
+                        "availableToWithdraw": "",
+                        "totalOrderIM": "0",
+                        "equity": "4999.73103618",
+                        "totalPositionMM": "0",
+                        "usdValue": "4992.20644097",
+                        "unrealisedPnl": "0",
+                        "collateralSwitch": true,
+                        "spotHedgingQty": "0",
+                        "borrowAmount": "0.000000000000000000",
+                        "totalPositionIM": "0",
+                        "walletBalance": "4999.73103618",
+                        "cumRealisedPnl": "-0.18799621",
+                        "locked": "0",
+                        "marginCollateral": true,
+                        "colRes": "-1",
+                        "coin": "USDT"
+                    }
+                ]
+            }
+        ]
+    },
+    "retExtInfo": {},
+    "time": 1793168782702
+}

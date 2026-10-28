@@ -1,0 +1,17 @@
+{
+    "retCode": 0,
+    "retMsg": "",
+    "result": {
+        "resultCode": "0",
+        "utaDemoApplyMoneyConfig": [
+            {
+                "coin": "USDT",
+                "amountStr": "5000"
+            }
+        ],
+        "orderStatus": "SUCCESS",
+        "retMsg": ""
+    },
+    "retExtInfo": {},
+    "time": 1793168700431
+}
