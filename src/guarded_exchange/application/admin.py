@@ -2,7 +2,7 @@
 users and bearer access tokens of the remote mode (ticket 026, PLAN ADR-004)."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from guarded_exchange.application.policy import ADMIN_ACTOR
@@ -16,8 +16,8 @@ from guarded_exchange.application.ports import (
 )
 from guarded_exchange.domain.access_tokens import AccessToken, hash_token, is_well_formed
 from guarded_exchange.domain.audit import SYSTEM_CHAIN, AuditEvent, AuditEventType
-from guarded_exchange.domain.errors import InvalidParams, NotFound, PermissionDenied
-from guarded_exchange.domain.users import User, new_user, validate_user_name
+from guarded_exchange.domain.errors import NotFound, PermissionDenied
+from guarded_exchange.domain.users import User, UserNameTaken, new_user, validate_user_name
 
 
 class MasterKeyMissing(Exception):
@@ -126,14 +126,10 @@ class CreateUser:
         name = validate_user_name(user_name)
         async with self._uow(write=True) as uow:
             if await uow.users.get_by_name(name) is not None:
-                raise InvalidParams(
-                    f"user {name!r} already exists",
-                    next_step="Pick another name or issue a token for the existing user.",
-                    details={"field": "name"},
-                )
+                raise UserNameTaken(name)
             now = self._clock.now()
             user = new_user(self._ids.new_id(), name, now)
-            await uow.users.add(user)
+            await uow.users.add(user)  # UserNameTaken if a concurrent create won (rolls back)
             await uow.audit.append(SYSTEM_CHAIN, _user_created_event(user, ADMIN_ACTOR), now)
         return user
 
@@ -149,11 +145,14 @@ class ListUsers:
 
 @dataclass(frozen=True, slots=True)
 class IssuedToken:
-    """The only object that ever holds the secret: shown to the admin once, never stored."""
+    """The only object that ever holds the secret: shown to the admin once, never stored.
+
+    ``secret`` is left out of ``repr`` so a stray log line or traceback cannot print it.
+    """
 
     token_id: str
     user: User
-    secret: str
+    secret: str = field(repr=False)
     created_at: datetime
 
 
@@ -210,10 +209,12 @@ class RevokeAccessToken:
             token = await uow.access_tokens.get(token_id)
             if token is None:
                 raise NotFound(f"token {token_id!r} does not exist", details={"field": "token_id"})
-            if token.is_revoked:
-                return RevokedToken(token=token, already_revoked=True)
             now = self._clock.now()
-            await uow.access_tokens.revoke(token.id, now)
+            # The conditional UPDATE decides, not the read above: of two concurrent revokes only
+            # one changes the row and only that one writes the journal record.
+            if token.is_revoked or not await uow.access_tokens.revoke(token.id, now):
+                current = await uow.access_tokens.get(token.id)
+                return RevokedToken(token=current or token, already_revoked=True)
             await uow.audit.append(
                 token.user_id,
                 AuditEvent(AuditEventType.ACCESS_TOKEN_REVOKED, ADMIN_ACTOR, {"token_id": token.id}),

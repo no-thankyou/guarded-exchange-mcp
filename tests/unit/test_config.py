@@ -14,6 +14,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "GX_DB_PATH",
         "GX_MASTER_KEY_FILE",
         "GX_LOCAL_USER",
+        "GX_HTTP_HOST",
+        "GX_HTTP_PORT",
+        "GX_HTTP_ALLOWED_HOSTS",
+        "GX_HTTP_ALLOWED_ORIGINS",
         "XDG_DATA_HOME",
         "XDG_CONFIG_HOME",
     ):
@@ -106,3 +110,54 @@ def test_invalid_values_become_config_errors(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="log_level"):
         load_settings(env, environ={})
+
+
+# --- remote mode (ticket 026) --------------------------------------------------------------
+
+
+def test_http_defaults_listen_on_loopback_and_accept_only_loopback_hosts() -> None:
+    settings = load_settings(environ={})
+
+    assert (settings.http_host, settings.http_port) == ("127.0.0.1", 8000)
+    assert settings.http_allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    assert settings.http_allowed_origins == ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+
+
+def test_http_lists_are_read_as_json(tmp_path: Path) -> None:
+    env = tmp_path / "gx.env"
+    env.write_text(
+        'GX_HTTP_ALLOWED_HOSTS=["mcp.example.com"]\nGX_HTTP_ALLOWED_ORIGINS=[]\nGX_HTTP_HOST=::1\n'
+    )
+
+    settings = load_settings(env, environ={})
+
+    assert settings.http_allowed_hosts == ["mcp.example.com"]
+    assert settings.http_allowed_origins == []  # no browser origin at all is a valid choice
+    assert settings.http_host == "::1"
+
+
+@pytest.mark.parametrize(
+    ("line", "field"),
+    [
+        ("GX_HTTP_ALLOWED_HOSTS=[]", "http_allowed_hosts"),  # would refuse every request: say so now
+        ("GX_HTTP_HOST=http://0.0.0.0", "http_host"),
+        ("GX_HTTP_HOST=0.0.0.0:8000", "http_host"),
+        ("GX_HTTP_HOST=my host", "http_host"),
+        ("GX_HTTP_HOST=-bad.example", "http_host"),
+        ("GX_HTTP_PORT=0", "http_port"),
+    ],
+)
+def test_bad_http_settings_are_configuration_errors(tmp_path: Path, line: str, field: str) -> None:
+    env = tmp_path / "gx.env"
+    env.write_text(line + "\n")
+
+    with pytest.raises(ConfigError, match=field):
+        load_settings(env, environ={})
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "10.1.2.3", "mcp-1.internal", "localhost"])  # noqa: S104
+def test_http_host_accepts_addresses_and_host_names(tmp_path: Path, host: str) -> None:
+    env = tmp_path / "gx.env"
+    env.write_text(f"GX_HTTP_HOST={host}\n")
+
+    assert load_settings(env, environ={}).http_host == host

@@ -13,8 +13,9 @@ from sqlalchemy import Column, MetaData, String, Table, insert, select, text
 from sqlalchemy.exc import IntegrityError
 
 from guarded_exchange.application.ports import UnitOfWorkFactory
+from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.audit import SYSTEM_CHAIN, AuditEvent
-from guarded_exchange.domain.users import new_user
+from guarded_exchange.domain.users import UserNameTaken, new_user
 from guarded_exchange.infrastructure.db.dialect import WRITE_OPTION, DecimalText, EpochMillis, lock_user
 from guarded_exchange.infrastructure.db.repositories import ReadOnlyUnitOfWorkError
 from guarded_exchange.infrastructure.db.schema import metadata
@@ -55,9 +56,12 @@ async def test_duplicate_user_name_is_rejected_by_the_database(uow: SqlUnitOfWor
     async with uow(write=True) as tx:
         await tx.users.add(new_user("u-1", "local", AT))
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(UserNameTaken, match="'local' already exists"):
         async with uow(write=True) as tx:
             await tx.users.add(new_user("u-2", "local", AT))
+    with pytest.raises(IntegrityError):  # a duplicate id is a programming error, not a domain one
+        async with uow(write=True) as tx:
+            await tx.users.add(new_user("u-1", "other", AT))
 
 
 @pytest.mark.req("FR-36")
@@ -267,3 +271,21 @@ def test_users_constraints_reject_unknown_status(db_path: Path) -> None:
             )
     finally:
         conn.close()
+
+
+async def test_access_token_revoke_reports_whether_it_changed_the_row(uow: SqlUnitOfWorkFactory) -> None:
+    async with uow(write=True) as tx:
+        await tx.users.add(new_user("u-1", "alice", AT))
+        await tx.access_tokens.add(AccessToken("t-1", "u-1", "a" * 64, AT))
+
+    async with uow(write=True) as tx:
+        first = await tx.access_tokens.revoke("t-1", AT + timedelta(seconds=1))
+    async with uow(write=True) as tx:
+        second = await tx.access_tokens.revoke("t-1", AT + timedelta(seconds=2))
+        missing = await tx.access_tokens.revoke("nope", AT)
+    async with uow(write=False) as tx:
+        stored = await tx.access_tokens.get("t-1")
+
+    assert (first, second, missing) == (True, False, False)
+    assert stored is not None
+    assert stored.revoked_at == AT + timedelta(seconds=1)  # the second call did not move it

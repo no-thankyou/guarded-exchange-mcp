@@ -36,6 +36,17 @@
 - **Не сделано (не в scope):** `RequestStateSecurity` с ключом из master key (D-5) — в 020 вместе с MRTR; stateless/json_response-режимы оставлены по умолчанию SDK (legacy-сессии SDK привязывает к principal сам); отзыв пользователя с аннулированием pending — 027.
 - Тестовая гигиена: тесты, перенаправляющие root logger, восстанавливают его фикстурой `restore_logging` (иначе последующие тесты писали в закрытый capture-поток).
 
+Ревью, раунд 1 (APPROVE с 8 minor, исправлено 2026-10-28; смержен main 840d85a):
+1. 401-кейс «токен + лишний символ» и «на символ короче» — на **активном** токене (второй токен alice, его валидность проверена через `AuthenticateBearerToken`).
+2. `test_unknown_host_header_is_refused_before_mcp`; новый `test_auth_runs_before_the_host_check` (без токена на чужой Host → 401); строка в PLAN ADR-004.
+3. Регрессия legacy 2025-11-25 сырыми POST: `initialize` с токеном alice → запрос с токеном bob и сессией alice → 404 без данных alice; после отзыва токена alice в её же сессии → 401.
+4. Unit-тесты конфигурации: loopback-дефолты, JSON-списки, `GX_HTTP_ALLOWED_HOSTS=[]` → `ConfigError`.
+5. `http_host` валидируется в `Settings` (IP или имя хоста; схема/порт/пробелы → `ConfigError`) → `serve --transport http` выходит с кодом 2 одной строкой, без трейсбека (тест).
+6. `IssuedToken.secret` — `field(repr=False)`, тест на `repr`.
+7. `AccessTokenRepository.revoke` → `bool` по rowcount; событие журнала только если UPDATE изменил строку (тест гонки на fake + интеграционный на SQL). `CreateUser`: доменная `UserNameTaken(InvalidParams)` — и при проверке, и из `SqlUserRepository.add` на `IntegrityError` уникальности имени (гонка на Postgres; на SQLite её исключает `BEGIN IMMEDIATE`); дубликат id остаётся `IntegrityError`.
+8. `RequestIdMiddleware` (внешний ASGI): `http_request_id` в контексте structlog для всего запроса (`bearer_rejected`, `bearer_check_failed`, логи инструментов) и заголовок ответа `X-Request-Id`. Имя `http_request_id`, а не `request_id`: `request_id` уже занят id вызова инструмента, который видит модель в `internal_error`, и внутри вызова перекрыл бы HTTP-id.
+- К обсуждению — сделано: `http_not_loopback` warning с напоминанием про TLS-прокси при bind не на loopback (тест); docstring `http.py` — сырой `Authorization` остаётся в ASGI scope, заголовки запроса не логировать; в тикет 027 — отзыв не обрывает открытые потоки.
+
 Предложения (вне scope):
 - `admin token list [--user]` (id, пользователь, создан, отозван) — сейчас id токена виден только при выдаче и в журнале.
 - Срок жизни токена (`expires_at`; SDK уже отклоняет `AccessToken.expires_at` в прошлом) и `last_used_at` для аудита неиспользуемых токенов.

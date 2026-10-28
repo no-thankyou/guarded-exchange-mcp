@@ -203,7 +203,8 @@ def _structured(result: CallToolResult) -> dict[str, Any]:
         "Basic YWxpY2U6c2VjcmV0",
         "Bearer not-a-token",
         f"Bearer {TOKEN_PREFIX}{'A' * 43}",  # well-formed, never issued
-        "Bearer {alice}x",  # an issued token with one extra character
+        "Bearer {alice_active}x",  # an active token with one extra character
+        "Bearer {alice_active_truncated}",  # ... or one character short
         "Bearer {alice_revoked}",
         "Bearer {bob_user_revoked}",
     ],
@@ -219,12 +220,16 @@ async def test_requests_without_a_valid_token_get_401_and_reach_nothing(
     body: dict[str, Any],
 ) -> None:
     await tenants.revoke_token("alice")
-    alice_revoked = tenants.secrets["alice"]
+    active = (
+        await IssueAccessToken(uow, SystemClock(), UuidGenerator(), SecretTokenGenerator())("alice")
+    ).secret
+    assert await AuthenticateBearerToken(uow).authenticate(active) == tenants.user_ids["alice"]
     with sqlite3.connect(db_path) as conn:  # revoking a user is ticket 027; the state is what matters
         conn.execute("UPDATE users SET status = 'revoked' WHERE name = 'bob'")
     secrets = {
-        "alice": alice_revoked,
-        "alice_revoked": alice_revoked,
+        "alice_active": active,
+        "alice_active_truncated": active[:-1],
+        "alice_revoked": tenants.secrets["alice"],
         "bob_user_revoked": tenants.secrets["bob"],
     }
     headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
@@ -237,6 +242,7 @@ async def test_requests_without_a_valid_token_get_401_and_reach_nothing(
     assert response.status_code == 401
     assert response.headers["www-authenticate"].startswith("Bearer ")
     assert response.json()["error"] == "invalid_token"
+    assert len(response.headers["x-request-id"]) == 32  # correlates with the server log line
     assert exchange.calls == []  # no tool ran
 
 
@@ -302,14 +308,37 @@ async def test_a_failing_token_check_refuses_with_401_and_logs_no_secret(
 
     assert response.status_code == 401
     events = [json.loads(line) for line in logs.getvalue().splitlines()]
-    assert {"event": "bearer_check_failed", "error_type": "RuntimeError"}.items() <= next(
-        e for e in events if e["event"] == "bearer_check_failed"
-    ).items()
+    failed = next(e for e in events if e["event"] == "bearer_check_failed")
+    assert failed["error_type"] == "RuntimeError"
+    assert failed["http_request_id"] == response.headers["x-request-id"]
     assert tenants.secrets["alice"] not in logs.getvalue()
 
 
+@pytest.mark.req("NFR-3")
+@pytest.mark.usefixtures("restore_logging")
+async def test_rejected_and_accepted_requests_are_logged_with_their_http_request_id(
+    uow: SqlUnitOfWorkFactory, tenants: Tenants, exchange: FakeExchange
+) -> None:
+    logs = io.StringIO()
+    configure_logging("INFO", stream=logs)
+    async with serving(production_server(uow, exchange)) as server, server.raw() as http:
+        rejected = await http.post(
+            "/mcp", json=LIST_TOOLS, headers={"Authorization": f"Bearer {TOKEN_PREFIX}{'A' * 43}"}
+        )
+        async with server.connect(tenants.secrets["alice"]) as alice:
+            await alice.call_tool("get_my_policy", {})
+
+    events = [json.loads(line) for line in logs.getvalue().splitlines()]
+    [denied] = [e for e in events if e["event"] == "bearer_rejected"]
+    [tool] = [e for e in events if e["event"] == "tool_ok"]
+    assert denied["http_request_id"] == rejected.headers["x-request-id"]
+    assert len(tool["http_request_id"]) == 32
+    assert tool["http_request_id"] != denied["http_request_id"]
+    assert tool["request_id"] != tool["http_request_id"]  # the per-tool-call id stays separate
+
+
 @pytest.mark.req("NFR-1")
-async def test_unknown_host_header_is_refused_before_auth(
+async def test_unknown_host_header_is_refused_before_mcp(
     uow: SqlUnitOfWorkFactory, tenants: Tenants, exchange: FakeExchange
 ) -> None:
     """DNS rebinding protection (ADR-003): a Host outside ``allowed_hosts`` never reaches MCP."""
@@ -327,6 +356,78 @@ async def test_unknown_host_header_is_refused_before_auth(
 
     assert response.status_code == 421
     assert exchange.calls == []
+
+
+async def test_auth_runs_before_the_host_check(uow: SqlUnitOfWorkFactory, exchange: FakeExchange) -> None:
+    """Order of the SDK stack: bearer middleware (Starlette) wraps the transport, whose first
+    step is the Host/Origin check. An unauthenticated request to a wrong Host gets 401, not 421."""
+    async with serving(production_server(uow, exchange)) as server, server.raw() as http:
+        response = await http.post("/mcp", json=CALL_TICKER, headers={"Host": "evil.example"})
+
+    assert response.status_code == 401
+
+
+# --- legacy protocol 2025-11-25 (sessions) ----------------------------------------------
+
+LEGACY = "2025-11-25"
+JSON_AND_SSE = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+
+
+def _jsonrpc(response: httpx2.Response) -> dict[str, Any]:
+    """The JSON-RPC message of a plain JSON or a single-event SSE response."""
+    if response.text.startswith("{"):
+        return dict(response.json())
+    data = next(line[5:] for line in response.text.splitlines() if line.startswith("data:"))
+    return dict(json.loads(data))
+
+
+@pytest.mark.req("FR-29", "FR-33")
+async def test_legacy_session_is_bound_to_its_token_user_and_revocation_applies(
+    uow: SqlUnitOfWorkFactory, tenants: Tenants, exchange: FakeExchange
+) -> None:
+    """Regression for the 2025-11-25 path (``Mcp-Session-Id``): the SDK binds a session to the
+    principal that created it, so another user's token cannot ride it (404), and a revoked token
+    is refused on the next request of its own session (401)."""
+
+    def headers(user: str, session: str | None = None) -> dict[str, str]:
+        out = {**JSON_AND_SSE, "Authorization": f"Bearer {tenants.secrets[user]}"}
+        if session is not None:  # after initialize the legacy client sends the version and session
+            out |= {"MCP-Protocol-Version": LEGACY, "Mcp-Session-Id": session}
+        return out
+
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": LEGACY,
+            "capabilities": {},
+            "clientInfo": {"name": "t", "version": "1"},
+        },
+    }
+    initialized = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    call = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "get_my_policy", "arguments": {}},
+    }
+    async with serving(production_server(uow, exchange)) as server, server.raw() as http:
+        # No MCP-Protocol-Version header on initialize: that is what routes to the legacy handshake.
+        opened = await http.post("/mcp", json=initialize, headers=headers("alice"))
+        session = opened.headers["mcp-session-id"]
+        acked = await http.post("/mcp", json=initialized, headers=headers("alice", session))
+        own = await http.post("/mcp", json=call, headers=headers("alice", session))
+        hijack = await http.post("/mcp", json=call, headers=headers("bob", session))
+        await tenants.revoke_token("alice")
+        after_revoke = await http.post("/mcp", json=call, headers=headers("alice", session))
+
+    assert (opened.status_code, acked.status_code, own.status_code) == (200, 202, 200)
+    assert _jsonrpc(opened)["result"]["protocolVersion"] == LEGACY
+    assert json.loads(_jsonrpc(own)["result"]["content"][0]["text"])["profile"] == "trade"
+    assert hijack.status_code == 404  # "Session not found": nothing about alice leaks to bob
+    assert "trade" not in hijack.text
+    assert after_revoke.status_code == 401
 
 
 # --- AC 1: the principal comes from the token only --------------------------------------
@@ -569,3 +670,59 @@ def test_app_server_needs_exactly_one_principal_source(tmp_path: Path) -> None:
         anyio.run(
             lambda: build(principal=lambda: "u", authenticator=AuthenticateBearerToken(InMemoryDatabase()))
         )
+
+
+def _http_env(tmp_path: Path, extra: str) -> Path:
+    settings = make_settings(tmp_path)
+    bootstrap.run_init(settings)
+    env = tmp_path / "gx.env"
+    env.write_text(f"GX_DB_PATH={settings.db_path}\nGX_MASTER_KEY_FILE={settings.master_key_file}\n{extra}\n")
+    return env
+
+
+@pytest.mark.req("NFR-1")
+@pytest.mark.usefixtures("restore_logging")
+@pytest.mark.parametrize("host", ["http://0.0.0.0", "0.0.0.0:8000", "two words"])
+def test_serve_http_with_a_bad_bind_host_exits_2_without_a_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    started: list[str] = []
+
+    async def never(app: Starlette, *, host: str, port: int) -> None:  # pragma: no cover - must not run
+        started.append(host)
+
+    monkeypatch.setattr(bootstrap, "serve_http", never)
+    env = _http_env(tmp_path, f"GX_HTTP_HOST={host}")
+
+    with pytest.raises(SystemExit) as exit_info:
+        bootstrap.serve("http", env)
+
+    err = capsys.readouterr().err
+    assert exit_info.value.code == 2
+    assert "guarded-exchange: configuration error: http_host" in err
+    assert "Traceback" not in err
+    assert started == []
+
+
+@pytest.mark.usefixtures("restore_logging")
+@pytest.mark.parametrize(("host", "warned"), [("0.0.0.0", True), ("127.0.0.1", False)])  # noqa: S104
+def test_binding_beyond_loopback_warns_about_tls(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+    warned: bool,
+) -> None:
+    async def stop_at_once(app: Starlette, *, host: str, port: int) -> None:
+        return None
+
+    monkeypatch.setattr(bootstrap, "serve_http", stop_at_once)
+
+    bootstrap.serve("http", _http_env(tmp_path, f"GX_HTTP_HOST={host}"))
+
+    lines = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")]
+    warnings = [e for e in lines if e["event"] == "http_not_loopback"]
+    assert bool(warnings) is warned
+    if warned:
+        assert warnings[0]["level"] == "warning"
+        assert "TLS" in warnings[0]["hint"]

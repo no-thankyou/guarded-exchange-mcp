@@ -35,6 +35,17 @@ class User:
         return self.status is UserStatus.ACTIVE
 
 
+class UserNameTaken(InvalidParams):
+    """A user with this name already exists (also when a concurrent ``create`` won the race)."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"user {name!r} already exists",
+            next_step="Pick another name or issue a token for the existing user.",
+            details={"field": "name"},
+        )
+
+
 def validate_user_name(raw: str) -> str:
     """Return the canonical user name or raise ``InvalidParams`` (lowercase, 1-64 chars)."""
     name = raw.strip().lower()

@@ -13,7 +13,7 @@ from guarded_exchange.domain.errors import NotFound
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
 from guarded_exchange.domain.market import Candle, CandleInterval, Candles, Orderbook, OrderbookLevel, Ticker
 from guarded_exchange.domain.policy import PolicyRecord
-from guarded_exchange.domain.users import Environment, User, UserStatus
+from guarded_exchange.domain.users import Environment, User, UserNameTaken, UserStatus
 
 
 def make_ticker(symbol: str = "BTCUSDT", category: Category = Category.LINEAR) -> Ticker:
@@ -224,8 +224,10 @@ class InMemoryUserRepository:
     async def add(self, user: User) -> None:
         if not self._writable:
             raise ReadOnlyViolation("users.add needs a write unit of work")
-        if user.id in self._state.users or any(u.name == user.name for u in self._state.users.values()):
-            raise ValueError(f"duplicate user {user.id}/{user.name}")
+        if any(u.name == user.name for u in self._state.users.values()):
+            raise UserNameTaken(user.name)
+        if user.id in self._state.users:
+            raise ValueError(f"duplicate user id {user.id}")
         self._state.users[user.id] = user
 
     async def get(self, user_id: str) -> User | None:
@@ -260,12 +262,14 @@ class InMemoryAccessTokenRepository:
     async def get_by_hash(self, token_hash: str) -> AccessToken | None:
         return next((t for t in self._state.access_tokens.values() if t.token_hash == token_hash), None)
 
-    async def revoke(self, token_id: str, at: datetime) -> None:
+    async def revoke(self, token_id: str, at: datetime) -> bool:
         if not self._writable:
             raise ReadOnlyViolation("access_tokens.revoke needs a write unit of work")
-        token = self._state.access_tokens[token_id]
-        if token.revoked_at is None:
-            self._state.access_tokens[token_id] = replace(token, revoked_at=at)
+        token = self._state.access_tokens.get(token_id)
+        if token is None or token.revoked_at is not None:
+            return False
+        self._state.access_tokens[token_id] = replace(token, revoked_at=at)
+        return True
 
 
 class InMemoryAuditLogRepository:

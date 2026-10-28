@@ -5,7 +5,9 @@ implicitly from the current directory: an MCP client may start the server in any
 directory, and a stray ``.env`` there must not silently change where the server sends requests.
 """
 
+import ipaddress
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal
@@ -32,6 +34,11 @@ def default_master_key_file() -> Path:
     # A different directory from the database on purpose (PLAN ADR-009): copying or sharing
     # the data directory must not hand over the key that decrypts it.
     return _xdg_dir("XDG_CONFIG_HOME", ".config") / "master.key"
+
+
+_HOSTNAME_RE: Final = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+)
 
 
 class ConfigError(Exception):
@@ -70,6 +77,19 @@ class Settings(BaseSettings):
     http_allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
     )
+
+    @field_validator("http_host")
+    @classmethod
+    def _bind_address(cls, value: str) -> str:
+        # Only an address to bind to: no scheme, port, path or spaces (they would surface later as
+        # a traceback from the URL model or the ASGI server instead of a configuration error).
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            pass
+        if not _HOSTNAME_RE.fullmatch(value):
+            raise ValueError(f"must be an IP address or a host name like 127.0.0.1, got {value!r}")
+        return value
 
     @field_validator("db_path", "master_key_file")
     @classmethod

@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from sqlalchemy import Row, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from guarded_exchange.domain.access_tokens import AccessToken
@@ -16,7 +17,7 @@ from guarded_exchange.domain.policy import (
     patch_to_payload,
     settings_to_payload,
 )
-from guarded_exchange.domain.users import Environment, User, UserStatus
+from guarded_exchange.domain.users import Environment, User, UserNameTaken, UserStatus
 from guarded_exchange.infrastructure.db.dialect import insert_for
 from guarded_exchange.infrastructure.db.schema import access_tokens, audit_heads, audit_log, policies, users
 
@@ -38,15 +39,21 @@ class _Repository:
 class SqlUserRepository(_Repository):
     async def add(self, user: User) -> None:
         self._require_writable("users.add")
-        await self._conn.execute(
-            users.insert().values(
-                id=user.id,
-                name=user.name,
-                status=user.status.value,
-                environment=user.environment.value,
-                created_at=user.created_at,
+        try:
+            await self._conn.execute(
+                users.insert().values(
+                    id=user.id,
+                    name=user.name,
+                    status=user.status.value,
+                    environment=user.environment.value,
+                    created_at=user.created_at,
+                )
             )
-        )
+        except IntegrityError as exc:
+            # SQLite names the column, Postgres the constraint; a duplicate id stays a raw error.
+            if any(marker in str(exc.orig) for marker in ("users.name", "uq_users_name")):
+                raise UserNameTaken(user.name) from exc
+            raise
 
     async def get(self, user_id: str) -> User | None:
         row = (await self._conn.execute(select(users).where(users.c.id == user_id))).one_or_none()
@@ -85,13 +92,14 @@ class SqlAccessTokenRepository(_Repository):
         row = (await self._conn.execute(query)).one_or_none()
         return None if row is None else _token_from_row(row)
 
-    async def revoke(self, token_id: str, at: datetime) -> None:
+    async def revoke(self, token_id: str, at: datetime) -> bool:
         self._require_writable("access_tokens.revoke")
-        await self._conn.execute(
+        result = await self._conn.execute(
             update(access_tokens)
             .where(access_tokens.c.id == token_id, access_tokens.c.revoked_at.is_(None))
             .values(revoked_at=at)
         )
+        return result.rowcount == 1
 
 
 class SqlAuditLogRepository(_Repository):

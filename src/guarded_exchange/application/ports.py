@@ -79,7 +79,8 @@ class TokenGenerator(Protocol):
 
 class UserRepository(Protocol):
     async def add(self, user: User) -> None:
-        """Insert a new user. A duplicate id or name is a programming error (raises)."""
+        """Insert a new user. A taken name raises ``UserNameTaken`` (a concurrent writer may have
+        inserted it after the caller checked); a duplicate id is a programming error (raises)."""
         ...
 
     async def get(self, user_id: str) -> User | None: ...
@@ -102,8 +103,11 @@ class AccessTokenRepository(Protocol):
 
     async def get_by_hash(self, token_hash: str) -> AccessToken | None: ...
 
-    async def revoke(self, token_id: str, at: datetime) -> None:
-        """Set ``revoked_at`` of a not yet revoked token. Needs a write unit of work."""
+    async def revoke(self, token_id: str, at: datetime) -> bool:
+        """Set ``revoked_at`` if the token is not revoked yet; ``True`` only if this call did it.
+
+        Needs a write unit of work.
+        """
         ...
 
 

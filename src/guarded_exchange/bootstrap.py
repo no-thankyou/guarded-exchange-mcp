@@ -215,12 +215,17 @@ async def _serve_http(settings: Settings) -> None:
         app = http_app(
             mcp, allowed_hosts=settings.http_allowed_hosts, allowed_origins=settings.http_allowed_origins
         )
-        structlog.get_logger(__name__).info(
-            "http_listening",
-            url=f"{public_url(settings)}/mcp",
-            allowed_hosts=settings.http_allowed_hosts,
-            loopback_only=settings.http_host in _LOOPBACK_HOSTS,
+        log = structlog.get_logger(__name__)
+        log.info(
+            "http_listening", url=f"{public_url(settings)}/mcp", allowed_hosts=settings.http_allowed_hosts
         )
+        if settings.http_host not in _LOOPBACK_HOSTS:
+            log.warning(
+                "http_not_loopback",
+                host=settings.http_host,
+                hint="plain HTTP: bearer tokens travel in clear text; expose it only behind a "
+                "TLS-terminating reverse proxy and list the public host in GX_HTTP_ALLOWED_HOSTS",
+            )
         await serve_http(app, host=settings.http_host, port=settings.http_port)
 
 

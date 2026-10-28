@@ -2,7 +2,7 @@
 
 import hashlib
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -24,12 +24,13 @@ from guarded_exchange.domain.access_tokens import (
 )
 from guarded_exchange.domain.audit import SYSTEM_CHAIN
 from guarded_exchange.domain.errors import InvalidParams, NotFound, PermissionDenied
-from guarded_exchange.domain.users import Environment, UserStatus
+from guarded_exchange.domain.users import Environment, UserNameTaken, UserStatus
 from guarded_exchange.infrastructure.tokens import SecretTokenGenerator
 from tests.fakes import (
     FakeClock,
     InMemoryAccessTokenRepository,
     InMemoryDatabase,
+    InMemoryUserRepository,
     SequentialIds,
     SequentialTokens,
 )
@@ -103,9 +104,29 @@ async def test_create_user_refuses_a_duplicate_and_writes_nothing() -> None:
     db = InMemoryDatabase()
     db.add_user("alice")
 
-    with pytest.raises(InvalidParams, match="already exists"):
+    with pytest.raises(UserNameTaken, match="already exists"):
         await CreateUser(db, FakeClock(), SequentialIds())("alice")
 
+    assert db.all_audit() == []
+
+
+async def test_create_user_losing_a_race_gets_a_clear_error_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another admin inserted the same name after our check: the insert fails, nothing is kept."""
+    db = InMemoryDatabase()
+    db.add_user("alice")
+
+    async def not_there_yet(self: InMemoryUserRepository, name: str) -> None:
+        return None
+
+    monkeypatch.setattr(InMemoryUserRepository, "get_by_name", not_there_yet)
+
+    with pytest.raises(UserNameTaken) as info:
+        await CreateUser(db, FakeClock(), SequentialIds())("alice")
+
+    assert isinstance(info.value, InvalidParams)  # the CLI shows it as a refusal, exit 1
+    assert list(db.state.users) == ["user-alice"]
     assert db.all_audit() == []
 
 
@@ -130,6 +151,7 @@ async def test_issue_stores_only_the_hash_and_journals_only_the_id() -> None:
 
     issued = await IssueAccessToken(db, clock, SequentialIds("tok"), SequentialTokens())("alice")
 
+    assert issued.secret not in repr(issued)  # never printed by a stray log line or traceback
     stored = db.state.access_tokens[issued.token_id]
     assert stored == AccessToken(issued.token_id, user.id, hash_token(issued.secret), clock.now())
     assert issued.secret not in repr(stored)
@@ -187,6 +209,28 @@ async def test_revoke_is_journaled_once_and_idempotent() -> None:
     assert second.already_revoked
     assert second.token.revoked_at == first.token.revoked_at
     assert [r.event_type for r in db.state.audit[user.id]] == ["access_token_issued", "access_token_revoked"]
+
+
+async def test_revoke_that_loses_a_race_writes_no_second_journal_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both revokes read the token as active; only the one whose UPDATE changed the row journals."""
+    db, clock = InMemoryDatabase(), FakeClock()
+    user = db.add_user("alice")
+    issued = await IssueAccessToken(db, clock, SequentialIds("tok"), SequentialTokens())("alice")
+    real_revoke = InMemoryAccessTokenRepository.revoke
+
+    async def concurrent_revoke_won(self: InMemoryAccessTokenRepository, token_id: str, at: datetime) -> bool:
+        await real_revoke(self, token_id, at)  # the other admin's revoke lands first
+        return False
+
+    monkeypatch.setattr(InMemoryAccessTokenRepository, "revoke", concurrent_revoke_won)
+
+    result = await RevokeAccessToken(db, clock)(issued.token_id)
+
+    assert result.already_revoked
+    assert result.token.revoked_at == clock.now()
+    assert [r.event_type for r in db.state.audit[user.id]] == ["access_token_issued"]
 
 
 async def test_revoke_unknown_token_is_not_found() -> None:

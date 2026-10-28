@@ -9,9 +9,16 @@
   the client sends - ``clientInfo``, other headers, tool arguments - can change it (FR-33).
 - ``subject`` also binds ``requestState`` (MRTR, ticket 020) and legacy HTTP sessions to the user.
 - The secret never leaves the verifier: the ``AccessToken`` kept in the request context carries a
-  placeholder instead of it, and nothing here logs it.
+  placeholder instead of it, and nothing here logs it. The raw ``Authorization`` header still
+  sits in the ASGI scope (``scope["headers"]``, ``request.headers``) for the whole request:
+  never log request headers or the scope.
+- Every HTTP request gets an ``http_request_id`` bound to the log context (and returned as the
+  ``X-Request-Id`` response header), so ``bearer_rejected``/``bearer_check_failed`` and the tool
+  logs of the same request can be correlated. ``request_id`` stays the per-tool-call id that the
+  model sees in ``internal_error``.
 """
 
+import uuid
 from collections.abc import Sequence
 from typing import Final
 
@@ -23,6 +30,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from guarded_exchange.application.ports import Authenticator
 from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
@@ -55,6 +63,30 @@ class BearerTokenVerifier:
             log.info("bearer_rejected")
             return None
         return AccessToken(token=REDACTED, client_id=CLIENT_ID, scopes=[], subject=user_id)
+
+
+class RequestIdMiddleware:
+    """Outermost ASGI middleware: one ``http_request_id`` per HTTP request, in logs and response."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        request_id = uuid.uuid4().hex
+
+        async def send_with_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message = {
+                    **message,
+                    "headers": [*message.get("headers", []), (b"x-request-id", request_id.encode())],
+                }
+            await send(message)
+
+        with structlog.contextvars.bound_contextvars(http_request_id=request_id):
+            await self._app(scope, receive, send_with_id)
 
 
 def token_principal() -> str | None:
@@ -99,7 +131,9 @@ def http_app(
         allowed_hosts=list(allowed_hosts),
         allowed_origins=list(allowed_origins),
     )
-    return mcp.streamable_http_app(streamable_http_path=MCP_PATH, transport_security=security)
+    app = mcp.streamable_http_app(streamable_http_path=MCP_PATH, transport_security=security)
+    app.add_middleware(RequestIdMiddleware)  # outermost: also covers 401 from the auth middleware
+    return app
 
 
 async def serve_http(app: Starlette, *, host: str, port: int) -> None:
