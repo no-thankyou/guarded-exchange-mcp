@@ -28,7 +28,7 @@ from guarded_exchange.domain.policy import (
 )
 from guarded_exchange.domain.users import Environment, new_user
 from guarded_exchange.infrastructure.db.repositories import ReadOnlyUnitOfWorkError
-from guarded_exchange.interface.cli.main import AdminCommands, PolicyCommands, build_cli
+from guarded_exchange.interface.cli.main import AdminCommands, KeyCommands, PolicyCommands, build_cli
 from tests.fakes import FakeClock
 from tests.integration.conftest import BUSY_TIMEOUT_MS, make_settings
 
@@ -172,7 +172,13 @@ def _app() -> typer.Typer:
         issue_token=bootstrap.issue_token,
         revoke_token=bootstrap.revoke_token,
     )
-    return build_cli(bootstrap.serve, bootstrap.init, commands, admin)
+    keys = KeyCommands(
+        add=bootstrap.add_key,
+        replace=bootstrap.replace_key,
+        delete=bootstrap.delete_key,
+        show=bootstrap.show_keys,
+    )
+    return build_cli(bootstrap.serve, bootstrap.init, commands, admin, keys)
 
 
 @pytest.mark.req("FR-12", "FR-36", "FR-45")

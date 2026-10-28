@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents guarded access to a crypto exchange (Bybit V5): least-privilege permissions, risk limits, human confirmation of risky actions in a channel the model does not control, tenant isolation and a tamper-evident audit log.
 
-> Status: early skeleton. Read-only tools work end to end: market data (`get_ticker`, `get_orderbook`, `get_candles`, `get_instrument_rules`) and `get_my_policy`; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`; the policy (admin ceiling, user tightening) is managed from the CLI; a remote multi-user mode serves the same tools over Streamable HTTP with per-user bearer tokens. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
+> Status: early skeleton. Read-only tools work end to end: market data (`get_ticker`, `get_orderbook`, `get_candles`, `get_instrument_rules`) and `get_my_policy`; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`; the policy (admin ceiling, user tightening) and exchange API keys (encrypted, permission-checked) are managed from the CLI; a remote multi-user mode serves the same tools over Streamable HTTP with per-user bearer tokens. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
 
 ## How to run the skeleton
 
@@ -16,7 +16,7 @@ uv run guarded-exchange serve          # MCP over stdio; JSON logs go to stderr
 
 `init` creates (or migrates) the SQLite database, generates a 256-bit master key in a file with mode `0600` in a directory **outside** the database directory, creates the local user (active, test environment) and records both in the append-only journal. Re-running it changes nothing and never replaces the key; if the installation exists but the key file is gone, `init` refuses instead of generating a new one. **Back up the master key**: without it, secrets stored later cannot be decrypted.
 
-`serve` never migrates (several MCP clients may start server processes at once) and opens the database read-only for its checks. On start it checks SQLite >= 3.35, that the schema revision is exactly the one this version expects, that the append-only triggers on `audit_log` (no UPDATE, no DELETE, no INSERT OR REPLACE over an existing record) are present and exactly as shipped and that the local user exists and is active; otherwise it exits with code 2 and a reason on stderr, e.g. ``guarded-exchange: cannot start: database not found at ...; run `guarded-exchange init` first``.
+`serve` never migrates (several MCP clients may start server processes at once) and opens the database read-only for its checks. On start it checks SQLite >= 3.35, that the schema revision is exactly the one this version expects, that the append-only triggers on `audit_log` (no UPDATE, no DELETE, no INSERT OR REPLACE over an existing record) are present and exactly as shipped, that the master key file is a regular file (not a symlink) with mode `0600` holding a valid 256-bit key, and that the local user exists and is active; otherwise it exits with code 2 and a reason on stderr, e.g. ``guarded-exchange: cannot start: database not found at ...; run `guarded-exchange init` first``.
 
 The server talks to Bybit **Demo Trading** public market data (`https://api-demo.bybit.com`); no API keys are needed for the market data tools.
 
@@ -65,6 +65,21 @@ uv run guarded-exchange policy tighten --max-leverage 20              # refused:
 
 `admin policy set-ceiling` (optionally `--user NAME`) may raise or lower the ceiling within hard bounds (slippage <= 3%, confirmation lifetime <= 600 s); `policy tighten` refuses any value looser than the current effective one and names the fields. **Tightening is one-way:** there is no command to undo it, not even for the admin (raising the ceiling does not lift a stricter user setting); today the only way back is editing the `policies` table directly with SQL, so tighten deliberately. If the admin lowers the ceiling below a user's setting, the ceiling applies. Both write to the user's journal. `tools/list` shows a user only the tools their profile allows (the result is `cacheScope: private`), and every `tools/call` is checked again, so a hidden tool called directly gets `permission_denied`.
 
+### Exchange API keys
+
+Keys are typed into the CLI (no echo), never passed through the AI client or its context (FR-30):
+
+```bash
+uv run guarded-exchange keys add                 # prompts for the Bybit API key and secret
+uv run guarded-exchange keys show                # id, status, last checked permissions; never the key
+uv run guarded-exchange keys replace             # new key; the old one is soft-deleted
+uv run guarded-exchange keys delete
+```
+
+On `add`/`replace` the server asks Bybit (`GET /v5/user/query-api`, signed with HMAC-SHA256) what the key may do and accepts it only if **every** permission is on an explicit allowlist: `ContractTrade.Order`, `ContractTrade.Position`, `Spot.SpotTrade` (`PERMISSION_ALLOWLIST` in `domain/credentials.py`). Anything else - withdrawals, transfers (`Wallet.*`), options, convert, `Derivatives.DerivativesTrade`, or a permission Bybit adds tomorrow - rejects the key; so does an expired key or one Bybit refuses. A read-only key is accepted and caps the user's profile at `read_only` whatever the policy ceiling says. A key not bound to an IP address is accepted with a warning. When creating a Bybit key for this server, tick only Contract "Orders" and "Positions" and Spot "Trade" (or "Read-Only"). If the permissions cannot be checked at all (exchange unreachable, endpoint missing), the key is refused; on the test environment only, the admin may accept it with `keys add --admin-attest` after confirming it has no withdrawal or transfer permission (journaled), and never on mainnet.
+
+Keys are stored encrypted with AES-256-GCM under a sub-key derived from the master key (HKDF), with the credential id, user id and exchange as associated data: a ciphertext copied into another user's row does not decrypt. The key and secret never reach the logs, the journal or command output; the journal records key ids, permission names and verdicts. Permissions are re-checked when the server starts and, before any state-changing action, if the last check is over an hour old; if they have grown beyond the allowlist, trading is blocked with `credentials_permissions_changed` until the key is fixed or replaced. One active key per user and exchange environment; the environment comes from `GX_BYBIT_BASE_URL` and must match the user's.
+
 ### Remote mode (Streamable HTTP + bearer tokens)
 
 Several users can share one server over HTTP. The admin creates users and issues each one an opaque bearer token from the CLI; the server stores only its SHA-256 hash, so the token is printed once and cannot be shown again:
@@ -89,7 +104,8 @@ Environment variables with the `GX_` prefix. A dotenv file is read only when giv
 | Variable | Default | Meaning |
 |---|---|---|
 | `GX_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `GX_BYBIT_BASE_URL` | `https://api-demo.bybit.com` | Bybit REST base URL |
+| `GX_BYBIT_BASE_URL` | `https://api-demo.bybit.com` | Bybit REST base URL: only `https://api-demo.bybit.com`, `https://api-testnet.bybit.com` (test environment), `https://api.bybit.com`, `https://api.bytick.com` (mainnet), no path; anything else stops the server (signed requests never go to an unknown host) |
+| `GX_TEST_ALLOW_LOOPBACK_BYBIT_URL` | `false` | tests only: also accept a loopback stub (`http://127.0.0.1:PORT`) as the exchange, treated as the test environment |
 | `GX_BYBIT_CONNECT_TIMEOUT_S` / `GX_BYBIT_READ_TIMEOUT_S` | `3` / `5` | HTTP timeouts, seconds |
 | `GX_BYBIT_GET_MAX_ATTEMPTS` | `3` | attempts for read (GET) requests; writes are never retried automatically |
 | `GX_BYBIT_GET_BACKOFF_BASE_S` | `0.2` | exponential backoff base, seconds |
@@ -112,7 +128,7 @@ uv run pytest --cov                                   # tests; no external netwo
 uv run pre-commit install                             # optional: run the checks on commit
 ```
 
-Storage tests use real SQLite files in a temporary directory, including a two-process write test. Authentication is tested over the SDK's real Streamable HTTP stack in-process (`httpx2.ASGITransport`, no sockets). Tests never reach external APIs: the Bybit adapter is tested on recorded responses via `httpx2.MockTransport`, the stdio end-to-end test points the real server at a loopback stub, and an autouse pytest guard fails any connection or DNS lookup to a non-loopback host.
+Storage tests use real SQLite files in a temporary directory, including a two-process write test. Authentication is tested over the SDK's real Streamable HTTP stack in-process (`httpx2.ASGITransport`, no sockets). Tests never reach external APIs: the Bybit adapter is tested on recorded responses via `httpx2.MockTransport`, request signing is checked against HMAC vectors computed independently with OpenSSL (`tests/fixtures/bybit/signature_vectors.json`), the stdio end-to-end test points the real server at a loopback stub (`GX_TEST_ALLOW_LOOPBACK_BYBIT_URL=true`), and an autouse pytest guard fails any connection or DNS lookup to a non-loopback host.
 
 Requirement-to-test traceability is generated from `@pytest.mark.req(...)` markers:
 
@@ -128,9 +144,12 @@ src/guarded_exchange/
   application/     use cases + ports (typing.Protocol), e.g. GetTicker -> ExchangeClient, InstrumentRulesCache,
                    InitializeInstallation -> UnitOfWorkFactory, Clock, IdGenerator, MasterKeyStore,
                    ReadPolicy / SetCeiling / TightenPolicy / AuthorizeAccess (who may call what),
-                   CreateUser / IssueAccessToken / RevokeAccessToken, AuthenticateBearerToken -> Authenticator
-  infrastructure/  adapters: bybit/ (httpx2 client, DTO mapper, retCode mapping), db/ (SQLAlchemy Core
-                   repositories, unit of work, Alembic migrations), master key file, clock, logging
+                   CreateUser / IssueAccessToken / RevokeAccessToken, AuthenticateBearerToken -> Authenticator,
+                   Add/Replace/DeleteCredential, RecheckCredential, RequireTradingCredential
+                   -> KeyPermissionsReader, CredentialCipher, CredentialRepository
+  infrastructure/  adapters: bybit/ (httpx2 client, request signing, known hosts, DTO mapper, retCode
+                   mapping), db/ (SQLAlchemy Core repositories, unit of work, Alembic migrations),
+                   crypto (HKDF keyring, AES-256-GCM), master key file, clock, logging
   interface/       entrypoints: mcp/ (GuardedMCPServer: per-principal tool filter and checks, thin tools,
                    error mapping; http.py: bearer TokenVerifier, Streamable HTTP app), cli/ (typer)
   config.py        pydantic-settings

@@ -11,6 +11,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from guarded_exchange.domain.credentials import KeyPermissions
 from guarded_exchange.domain.errors import ExchangeUnavailable, InvalidParams, NotFound
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
 from guarded_exchange.domain.market import (
@@ -68,8 +69,10 @@ class TickersResultDTO(BaseModel):
 def parse_envelope(payload: object) -> Envelope:
     try:
         return Envelope.model_validate(payload)
-    except ValidationError as exc:
-        raise unavailable("unexpected response format") from exc
+    except ValidationError:
+        # No cause chained: a pydantic error quotes the input, which for private endpoints may
+        # contain key material (``query-api`` returns ``apiKey`` and ``secret``).
+        raise unavailable("unexpected response format") from None
 
 
 def ticker_from_result(
@@ -376,3 +379,69 @@ def _rules(item: InstrumentInfoDTO, *, category: Category) -> InstrumentRules:
         min_notional=min_notional,
         max_leverage=max_leverage,
     )
+
+
+# --- API key permissions (query-api) ----------------------------------------------------------
+
+_PERMISSION_PART_RE: Final = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+UNRECOGNISED_PERMISSION: Final = "<unrecognised>"
+_NO_IP_RESTRICTION: Final = frozenset({"*", ""})
+
+
+class QueryApiDTO(BaseModel):
+    """The fields of ``GET /v5/user/query-api`` this server needs; nothing else is ever parsed.
+
+    The response also carries ``apiKey`` and ``secret`` (spike 004): ``extra="ignore"`` drops them
+    and nothing here copies them anywhere. https://bybit-exchange.github.io/docs/v5/user/apikey-info
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    read_only: int = Field(alias="readOnly")
+    permissions: dict[str, list[str]]
+    ips: list[str] = Field(default_factory=list)
+    expired_at: str = Field(default="", alias="expiredAt")
+
+
+def key_permissions_from_result(result: dict[str, Any]) -> KeyPermissions:
+    """``readOnly`` 0/1, permission groups (empty group = no permission), IP whitelist, expiry.
+
+    A permission or group name with unexpected characters becomes ``<unrecognised>``: it is
+    never on the allowlist, so the key is refused rather than "cannot be checked".
+    ``expiredAt`` of ``1970-01-01T00:00:00Z`` (the documented value for keys bound to an IP) or
+    empty means the key does not expire. ``ips`` empty or ``["*"]`` means no IP whitelist.
+    """
+    try:
+        parsed = QueryApiDTO.model_validate(result)
+    except ValidationError:
+        raise unavailable("unexpected query-api format") from None  # never chain: input has the secret
+    if parsed.read_only not in (0, 1):
+        raise unavailable("unexpected readOnly value in query-api")
+    names = frozenset(
+        _permission(group, name) for group, members in parsed.permissions.items() for name in members
+    )
+    return KeyPermissions(
+        read_only=parsed.read_only == 1,
+        permissions=names,
+        expires_at=_expiry(parsed.expired_at),
+        ip_restricted=not set(parsed.ips) <= _NO_IP_RESTRICTION,
+    )
+
+
+def _permission(group: str, name: str) -> str:
+    if _PERMISSION_PART_RE.fullmatch(group) and _PERMISSION_PART_RE.fullmatch(name):
+        return f"{group}.{name}"
+    return UNRECOGNISED_PERMISSION
+
+
+def _expiry(raw: str) -> datetime | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        raise unavailable("unparsable expiredAt in query-api") from None
+    if value.tzinfo is None:
+        raise unavailable("expiredAt without a time zone in query-api")
+    return None if value <= _EPOCH else value.astimezone(UTC)

@@ -82,6 +82,7 @@ async def test_stdio_server_answers_and_keeps_stdout_protocol_only(
             "GX_TEST_ERR": str(stderr_log),
             "GX_TEST_OUT": str(stdout_log),
             "GX_BYBIT_BASE_URL": bybit_stub_url,
+            "GX_TEST_ALLOW_LOOPBACK_BYBIT_URL": "true",
             "GX_BYBIT_GET_MAX_ATTEMPTS": "1",
             "GX_LOG_LEVEL": "INFO",
             "GX_DB_PATH": str(db_path),

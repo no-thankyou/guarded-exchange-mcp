@@ -6,15 +6,19 @@ current head and must stay in sync with them
 """
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     ForeignKey,
+    Index,
     Integer,
+    LargeBinary,
     MetaData,
     PrimaryKeyConstraint,
     String,
     Table,
     Text,
+    text,
 )
 
 from guarded_exchange.infrastructure.db.dialect import EpochMillis
@@ -85,4 +89,41 @@ access_tokens = Table(
     Column("created_at", EpochMillis(), nullable=False),
     Column("revoked_at", EpochMillis(), nullable=True),
     CheckConstraint("length(token_hash) = 64", name="token_hash_sha256"),
+)
+
+# Exchange API keys (ticket 007, PLAN 5.2, D-9, D-12, ADR-009). ``ciphertext`` is AES-256-GCM of the
+# key pair with AAD = credential_id || user_id || exchange; nothing else holds key material.
+# ``permissions`` is the last answer of the exchange as canonical JSON (NULL: accepted on admin
+# attestation, never verified). Soft delete: ``status = 'deleted'`` + ``deleted_at``.
+exchange_credentials = Table(
+    "exchange_credentials",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("user_id", String(64), ForeignKey("users.id"), nullable=False),
+    Column("exchange", String(32), nullable=False),
+    Column("environment", String(16), nullable=False),
+    Column("ciphertext", LargeBinary, nullable=False),
+    Column("nonce", LargeBinary, nullable=False),
+    Column("key_version", Integer, nullable=False),
+    Column("permissions", Text, nullable=True),
+    Column("permissions_checked_at", EpochMillis(), nullable=True),
+    Column("admin_attested", Boolean, nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("created_at", EpochMillis(), nullable=False),
+    Column("deleted_at", EpochMillis(), nullable=True),
+    CheckConstraint("environment IN ('testnet', 'mainnet')", name="environment"),
+    CheckConstraint("status IN ('active', 'deleted')", name="status"),
+    CheckConstraint("length(nonce) = 12", name="nonce_96_bits"),
+    CheckConstraint("key_version >= 1", name="key_version_positive"),
+    CheckConstraint("(status = 'deleted') = (deleted_at IS NOT NULL)", name="deleted_at_iff_deleted"),
+)
+# D-12: at most one active key per user, exchange and environment (partial unique index).
+Index(
+    "uq_exchange_credentials_active",
+    exchange_credentials.c.user_id,
+    exchange_credentials.c.exchange,
+    exchange_credentials.c.environment,
+    unique=True,
+    sqlite_where=text("status = 'active'"),
+    postgresql_where=text("status = 'active'"),
 )

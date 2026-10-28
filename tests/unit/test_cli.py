@@ -2,14 +2,26 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from guarded_exchange.application.admin import IssuedToken, RevokedToken
+from guarded_exchange.application.credentials import StoredCredential
 from guarded_exchange.application.policy import PolicyView
 from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.actions import ActionKind
+from guarded_exchange.domain.credentials import (
+    EXCHANGE_BYBIT,
+    WARNING_NO_IP_WHITELIST,
+    ApiKeyPair,
+    Credential,
+    CredentialStatus,
+    KeyAssessment,
+    KeyPermissions,
+)
 from guarded_exchange.domain.errors import NotFound, PermissionDenied
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.policy import (
@@ -24,6 +36,7 @@ from guarded_exchange.domain.users import Environment, User, UserStatus
 from guarded_exchange.interface.cli.main import (
     AdminCommands,
     InitReport,
+    KeyCommands,
     PolicyCommands,
     PolicyOptions,
     Transport,
@@ -145,7 +158,8 @@ def test_serve_defaults_to_stdio_without_env_file() -> None:
     spy = ServeSpy()
 
     result = runner.invoke(
-        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands()), ["serve"]
+        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands(), KeySpy().commands()),
+        ["serve"],
     )
 
     assert result.exit_code == 0, result.output
@@ -156,7 +170,7 @@ def test_serve_passes_explicit_env_file() -> None:
     spy = ServeSpy()
 
     result = runner.invoke(
-        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands()),
+        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands(), KeySpy().commands()),
         ["serve", "--env-file", "conf/gx.env"],
     )
 
@@ -168,7 +182,7 @@ def test_serve_rejects_unsupported_transport() -> None:
     spy = ServeSpy()
 
     result = runner.invoke(
-        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands()),
+        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands(), KeySpy().commands()),
         ["serve", "--transport", "streamable-http"],
     )
 
@@ -180,7 +194,7 @@ def test_init_passes_env_file_and_prints_report() -> None:
     init = InitSpy()
 
     result = runner.invoke(
-        build_cli(ServeSpy(), init, PolicySpy().commands(), AdminSpy().commands()),
+        build_cli(ServeSpy(), init, PolicySpy().commands(), AdminSpy().commands(), KeySpy().commands()),
         ["init", "--env-file", "conf/gx.env"],
     )
 
@@ -203,7 +217,10 @@ def test_init_report_for_a_rerun_says_nothing_was_created() -> None:
     )
 
     result = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(rerun), PolicySpy().commands(), AdminSpy().commands()), ["init"]
+        build_cli(
+            ServeSpy(), InitSpy(rerun), PolicySpy().commands(), AdminSpy().commands(), KeySpy().commands()
+        ),
+        ["init"],
     )
 
     assert result.exit_code == 0, result.output
@@ -218,7 +235,7 @@ def test_policy_show_renders_ceiling_user_setting_and_effective_per_row() -> Non
     spy = PolicySpy()
 
     result = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands()),
+        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands(), KeySpy().commands()),
         ["policy", "show", "--user", "bob"],
     )
 
@@ -250,7 +267,9 @@ def test_policy_tighten_turns_options_into_a_domain_patch() -> None:
         "--unconfirmed-max-actions", "2", "--unconfirmed-window-s", "3600", "--max-pending", "1",
     ]  # fmt: skip
 
-    result = runner.invoke(build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands()), args)
+    result = runner.invoke(
+        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands(), KeySpy().commands()), args
+    )
 
     assert result.exit_code == 0, result.output
     assert spy.tightened == [
@@ -279,7 +298,9 @@ def test_set_ceiling_passes_the_user_and_only_the_given_options() -> None:
     args = ["admin", "policy", "set-ceiling", "--user", "alice", "--profile", "trade", "--allow-none",
             "--confirm", "all", "--confirm-above-notional-usdt", "none"]  # fmt: skip
 
-    result = runner.invoke(build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands()), args)
+    result = runner.invoke(
+        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands(), KeySpy().commands()), args
+    )
 
     assert result.exit_code == 0, result.output
     [(user, change)] = spy.ceilings
@@ -306,7 +327,8 @@ def test_bad_option_values_are_usage_errors_naming_the_setting(args: list[str], 
     spy = PolicySpy()
 
     result = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands()), ["policy", "tighten", *args]
+        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands(), KeySpy().commands()),
+        ["policy", "tighten", *args],
     )
 
     assert result.exit_code == 2
@@ -322,7 +344,7 @@ def test_refusal_from_the_use_case_propagates_to_the_composition_root() -> None:
     spy = PolicySpy(fail_with=PermissionDenied("weaker", details={"field": "max_leverage"}))
 
     result = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands()),
+        build_cli(ServeSpy(), InitSpy(), spy.commands(), AdminSpy().commands(), KeySpy().commands()),
         ["policy", "tighten", "--max-leverage", "50"],
     )
 
@@ -334,7 +356,7 @@ def test_serve_accepts_the_http_transport() -> None:
     spy = ServeSpy()
 
     result = runner.invoke(
-        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands()),
+        build_cli(spy, InitSpy(), PolicySpy().commands(), AdminSpy().commands(), KeySpy().commands()),
         ["serve", "--transport", "http"],
     )
 
@@ -345,12 +367,14 @@ def test_serve_accepts_the_http_transport() -> None:
 @pytest.mark.req("FR-29")
 def test_admin_user_create_and_list() -> None:
     spy = AdminSpy()
-    app = build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands())
+    app = build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands(), KeySpy().commands())
 
     created = runner.invoke(app, ["admin", "user", "create", "alice"])
     listed = runner.invoke(app, ["admin", "user", "list"])
     empty = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), AdminSpy(users=[]).commands()),
+        build_cli(
+            ServeSpy(), InitSpy(), PolicySpy().commands(), AdminSpy(users=[]).commands(), KeySpy().commands()
+        ),
         ["admin", "user", "list"],
     )
 
@@ -367,7 +391,7 @@ def test_admin_token_issue_prints_the_secret_once_with_its_id() -> None:
     spy = AdminSpy()
 
     result = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands()),
+        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands(), KeySpy().commands()),
         ["admin", "token", "issue", "--user", "local"],
     )
 
@@ -383,7 +407,8 @@ def test_admin_token_issue_requires_a_user() -> None:
     spy = AdminSpy()
 
     result = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands()), ["admin", "token", "issue"]
+        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands(), KeySpy().commands()),
+        ["admin", "token", "issue"],
     )
 
     assert result.exit_code == 2
@@ -396,7 +421,7 @@ def test_admin_token_revoke(already: bool, expected: str) -> None:
     spy = AdminSpy(already_revoked=already)
 
     result = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands()),
+        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands(), KeySpy().commands()),
         ["admin", "token", "revoke", "t-1"],
     )
 
@@ -409,9 +434,152 @@ def test_admin_command_failure_propagates_from_the_composition_root() -> None:
     spy = AdminSpy(fail_with=NotFound("user 'bob' does not exist"))
 
     result = runner.invoke(
-        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands()),
+        build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), spy.commands(), KeySpy().commands()),
         ["admin", "token", "issue", "--user", "bob"],
     )
 
     assert result.exit_code != 0
     assert isinstance(result.exception, NotFound)  # bootstrap._with_storage turns it into exit 1
+
+
+# --- exchange keys (ticket 007) ---------------------------------------------------------------
+
+API_KEY = "CLIKEY0123456789AB"
+API_SECRET = "cli-secret-0123456789abcdefghijklmnop"  # noqa: S105 - test value
+
+
+def _credential(**changes: Any) -> Credential:
+    values: dict[str, Any] = {
+        "id": "cred-1",
+        "user_id": "u-1",
+        "exchange": EXCHANGE_BYBIT,
+        "environment": Environment.TESTNET,
+        "status": CredentialStatus.ACTIVE,
+        "permissions": KeyPermissions(
+            read_only=False,
+            permissions=frozenset({"ContractTrade.Order", "Spot.SpotTrade"}),
+            expires_at=None,
+            ip_restricted=False,
+        ),
+        "permissions_checked_at": USER.created_at,
+        "admin_attested": False,
+        "created_at": USER.created_at,
+        **changes,
+    }
+    return Credential(**values)
+
+
+@dataclass
+class KeySpy:
+    stored: list[tuple[str, str | None, ApiKeyPair, bool]] = field(default_factory=list)
+    deleted: list[str | None] = field(default_factory=list)
+    credential: Credential = field(default_factory=_credential)
+
+    def commands(self) -> KeyCommands:
+        return KeyCommands(
+            add=lambda env, user, keys, attest: self._store("add", user, keys, attest),
+            replace=lambda env, user, keys, attest: self._store("replace", user, keys, attest),
+            delete=self.delete,
+            show=lambda env, user: (
+                USER,
+                [self.credential, _credential(id="cred-0", status=CredentialStatus.DELETED)],
+            ),
+        )
+
+    def _store(self, action: str, user: str | None, keys: ApiKeyPair, attest: bool) -> StoredCredential:
+        self.stored.append((action, user, keys, attest))
+        return StoredCredential(
+            user=USER,
+            credential=self.credential,
+            assessment=KeyAssessment(profile=Profile.TRADE, warnings=(WARNING_NO_IP_WHITELIST,)),
+            replaced_id="cred-0" if action == "replace" else None,
+        )
+
+    def delete(self, env_file: Path | None, user: str | None) -> Credential:
+        self.deleted.append(user)
+        return _credential(status=CredentialStatus.DELETED)
+
+
+def _keys_app(spy: KeySpy) -> typer.Typer:
+    return build_cli(ServeSpy(), InitSpy(), PolicySpy().commands(), AdminSpy().commands(), spy.commands())
+
+
+@pytest.mark.req("FR-30", "FR-31")
+def test_keys_add_prompts_without_echo_and_never_prints_the_key() -> None:
+    spy = KeySpy()
+
+    result = runner.invoke(
+        _keys_app(spy),
+        ["keys", "add", "--user", "local"],
+        input=f"{API_KEY}\n{API_SECRET}\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [(a, u, k.api_key, k.api_secret, at) for a, u, k, at in spy.stored] == [
+        ("add", "local", API_KEY, API_SECRET, False)
+    ]
+    assert API_KEY not in result.output  # hide_input: the prompt does not echo what was typed
+    assert API_SECRET not in result.output
+    assert "Bybit API key:" in result.output
+    assert "key cred-1 added for local (bybit, testnet): profile trade" in result.output
+    assert "not bound to an IP address" in result.output
+    assert "never shown again" in result.output
+
+
+@pytest.mark.req("FR-30")
+def test_keys_input_is_validated_without_echoing_it() -> None:
+    spy = KeySpy()
+
+    result = runner.invoke(_keys_app(spy), ["keys", "add"], input="short\nsecret with spaces inside\n")
+
+    assert result.exit_code == 2
+    assert spy.stored == []
+    assert "api_key must be 8-256 printable characters" in result.output
+    assert "secret with spaces" not in result.output
+
+
+@pytest.mark.req("FR-49")
+def test_keys_admin_attest_asks_for_explicit_confirmation() -> None:
+    declined = KeySpy()
+    accepted = KeySpy()
+
+    no = runner.invoke(
+        _keys_app(declined),
+        ["keys", "add", "--admin-attest"],
+        input=f"{API_KEY}\n{API_SECRET}\nn\n",
+    )
+    yes = runner.invoke(
+        _keys_app(accepted),
+        ["keys", "add", "--admin-attest"],
+        input=f"{API_KEY}\n{API_SECRET}\ny\n",
+    )
+
+    assert no.exit_code == 1  # aborted
+    assert declined.stored == []
+    assert "NO withdrawal and NO transfer permission" in no.output
+    assert yes.exit_code == 0, yes.output
+    assert [attest for *_, attest in accepted.stored] == [True]
+
+
+@pytest.mark.req("FR-30", "FR-29")
+def test_keys_replace_delete_and_show() -> None:
+    spy = KeySpy()
+    app = _keys_app(spy)
+
+    replaced = runner.invoke(app, ["keys", "replace"], input=f"{API_KEY}\n{API_SECRET}\n")
+    refused = runner.invoke(app, ["keys", "delete"], input="n\n")
+    deleted = runner.invoke(app, ["keys", "delete", "--yes"])
+    shown = runner.invoke(app, ["keys", "show"])
+
+    assert replaced.exit_code == 0, replaced.output
+    assert [a for a, *_ in spy.stored] == ["replace"]
+    assert "previous key cred-0 is deleted" in replaced.output
+    assert refused.exit_code == 1
+    assert deleted.exit_code == 0, deleted.output
+    assert spy.deleted == [None]  # the local user
+    assert "key cred-1 (bybit, testnet) deleted" in deleted.output
+    assert shown.exit_code == 0, shown.output
+    assert "key cred-1 (bybit, testnet): active" in shown.output
+    assert "key cred-0 (bybit, testnet): deleted" in shown.output
+    assert "ContractTrade.Order, Spot.SpotTrade" in shown.output
+    assert API_KEY not in shown.output

@@ -1,0 +1,24 @@
+{
+    "description": "Bybit V5 HMAC_SHA256 reference vectors: sign = hex(HMAC_SHA256(api_secret, timestamp + api_key + recv_window + payload)), https://bybit-exchange.github.io/docs/v5/guide#authentication. Expected values were computed independently of this code base with OpenSSL 3 (2026-10-28): printf '%s' \"<timestamp><api_key><recv_window><payload>\" | openssl dgst -sha256 -hmac \"<api_secret>\". Keys are made up.",
+    "api_key": "TESTAPIKEY012345678",
+    "api_secret": "TestSecretValue0123456789abcdefghijklmn",
+    "timestamp": "1793168780000",
+    "recv_window": "5000",
+    "vectors": [
+        {
+            "name": "GET without parameters (query-api)",
+            "payload": "",
+            "sign": "165fc6e67b0a78349e745c0791847a0d0e7f54b0480663f41122d6e20c0f0225"
+        },
+        {
+            "name": "GET with a query string",
+            "payload": "category=linear&symbol=BTCUSDT",
+            "sign": "e1ae8b57085676712df8a6157ea7c2fb0f8bba908f51b0bbdfe6201ab92041d7"
+        },
+        {
+            "name": "POST with a JSON body",
+            "payload": "{\"category\":\"linear\",\"symbol\":\"BTCUSDT\",\"side\":\"Buy\",\"orderType\":\"Limit\",\"qty\":\"0.001\",\"price\":\"50000\"}",
+            "sign": "c08230b900061ac05734243b795928962446839df9c4207811109e7915583812"
+        }
+    ]
+}

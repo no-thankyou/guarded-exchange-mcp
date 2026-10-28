@@ -15,8 +15,12 @@ from typing import Final, Literal
 from pydantic import Field, HttpUrl, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from guarded_exchange.domain.users import Environment
+from guarded_exchange.infrastructure.bybit.hosts import BYBIT_HOSTS, LOOPBACK_HOSTS
+
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 ENV_FILE_VAR: Final = "GX_ENV_FILE"
+_HTTPS_PORT: Final = 443
 APP_DIR: Final = "guarded-exchange"
 
 
@@ -50,8 +54,13 @@ class Settings(BaseSettings):
 
     log_level: LogLevel = "INFO"
 
-    # Bybit V5 REST. Default is Demo Trading (PLAN ADR-001); tests point it at a local stub.
+    # Bybit V5 REST. Default is Demo Trading (PLAN ADR-001). Only known Bybit hosts over https
+    # (``infrastructure/bybit/hosts.py``): signed requests carry the API key and must never go
+    # elsewhere. Tests point it at a loopback stub, which needs the explicit test flag below.
     bybit_base_url: HttpUrl = HttpUrl("https://api-demo.bybit.com")
+    # FOR TESTS ONLY: also accept a loopback base URL (http or https, any port), treated as the
+    # test environment. Never set it in a real deployment.
+    test_allow_loopback_bybit_url: bool = False
     bybit_connect_timeout_s: float = Field(default=3.0, gt=0, le=30)
     bybit_read_timeout_s: float = Field(default=5.0, gt=0, le=60)
     bybit_get_max_attempts: int = Field(default=3, ge=1, le=5)
@@ -90,6 +99,27 @@ class Settings(BaseSettings):
         if not _HOSTNAME_RE.fullmatch(value):
             raise ValueError(f"must be an IP address or a host name like 127.0.0.1, got {value!r}")
         return value
+
+    @model_validator(mode="after")
+    def _known_exchange_host(self) -> "Settings":
+        url = self.bybit_base_url
+        host = (url.host or "").strip("[]").lower()
+        plain_origin = url.path in (None, "", "/") and not (url.query or url.fragment or url.username)
+        if host in BYBIT_HOSTS and url.scheme == "https" and url.port == _HTTPS_PORT and plain_origin:
+            return self
+        if self.test_allow_loopback_bybit_url and host in LOOPBACK_HOSTS and plain_origin:
+            return self
+        known = ", ".join(f"https://{name}" for name in BYBIT_HOSTS)
+        raise ValueError(
+            f"GX_BYBIT_BASE_URL must be one of {known} (no path), got {str(url)!r}; signed requests are "
+            "never sent to an unknown host"
+        )
+
+    @property
+    def bybit_environment(self) -> Environment:
+        """Exchange environment of the configured base URL; a loopback test stub counts as testnet."""
+        host = (self.bybit_base_url.host or "").strip("[]").lower()
+        return BYBIT_HOSTS.get(host, Environment.TESTNET)
 
     @field_validator("db_path", "master_key_file")
     @classmethod

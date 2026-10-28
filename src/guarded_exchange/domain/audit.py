@@ -27,6 +27,11 @@ class AuditEventType(StrEnum):
     POLICY_TIGHTENED = "policy_tightened"
     ACCESS_TOKEN_ISSUED = "access_token_issued"  # noqa: S105 - event names, not secrets
     ACCESS_TOKEN_REVOKED = "access_token_revoked"  # noqa: S105
+    CREDENTIAL_ADDED = "credential_added"
+    CREDENTIAL_REPLACED = "credential_replaced"
+    CREDENTIAL_DELETED = "credential_deleted"
+    CREDENTIAL_REJECTED = "credential_rejected"
+    CREDENTIAL_PERMISSIONS_CHANGED = "credential_permissions_changed"
 
 
 @dataclass(frozen=True, slots=True)

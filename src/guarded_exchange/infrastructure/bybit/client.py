@@ -10,13 +10,16 @@
 
 import asyncio
 import random
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
+from urllib.parse import urlencode
 
 import httpx2
 import structlog
 
+from guarded_exchange.domain.credentials import ApiKeyPair, KeyPermissions
 from guarded_exchange.domain.errors import DomainError
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
@@ -30,11 +33,13 @@ from guarded_exchange.infrastructure.bybit.mapper import (
     KLINE_INTERVALS,
     Envelope,
     candles_from_result,
+    key_permissions_from_result,
     orderbook_from_result,
     parse_envelope,
     rules_from_result,
     ticker_from_result,
 )
+from guarded_exchange.infrastructure.bybit.signing import signed_headers
 
 DEMO_BASE_URL: Final = "https://api-demo.bybit.com"
 
@@ -44,6 +49,11 @@ _HTTP_SERVER_ERROR: Final = 500
 log = structlog.get_logger(__name__)
 
 Sleep = Callable[[float], Awaitable[None]]
+NowMs = Callable[[], int]
+
+
+def _system_now_ms() -> int:
+    return time.time_ns() // 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +78,12 @@ class _Retryable(Exception):
 
 
 class BybitClient:
-    """Public market data now; signed account and trading endpoints arrive in later tickets."""
+    """Public market data and signed private reads (``query-api``); trading arrives in later tickets.
+
+    Signed requests: the query string is built here once and both signed and sent verbatim, so
+    the signature always covers exactly what goes on the wire. Signed headers and response bodies
+    of private endpoints are never logged.
+    """
 
     def __init__(
         self,
@@ -76,10 +91,17 @@ class BybitClient:
         *,
         retry: RetryPolicy | None = None,
         sleep: Sleep = asyncio.sleep,
+        now_ms: NowMs = _system_now_ms,
     ) -> None:
         self._http = http
         self._retry = retry or RetryPolicy()
         self._sleep = sleep
+        self._now_ms = now_ms
+
+    async def get_key_permissions(self, keys: ApiKeyPair) -> KeyPermissions:
+        """``GET /v5/user/query-api``: what the key may do (FR-49). ``KeyPermissionsReader`` port."""
+        envelope = await self._get("/v5/user/query-api", {}, keys=keys)
+        return key_permissions_from_result(envelope.result)
 
     async def get_ticker(self, symbol: str, category: Category) -> Ticker:
         envelope = await self._get("/v5/market/tickers", {"category": category.value, "symbol": symbol})
@@ -109,12 +131,12 @@ class BybitClient:
         )
         return rules_from_result(envelope.result, symbol=symbol, category=category)
 
-    async def _get(self, path: str, params: Mapping[str, str]) -> Envelope:
+    async def _get(self, path: str, params: Mapping[str, str], *, keys: ApiKeyPair | None = None) -> Envelope:
         attempts = max(1, self._retry.max_attempts)
         attempt = 0
         while True:
             try:
-                return await self._get_once(path, params)
+                return await self._get_once(path, params, keys)
             except _Retryable as retryable:
                 attempt += 1
                 if attempt >= attempts:
@@ -129,9 +151,15 @@ class BybitClient:
                 )
                 await self._sleep(delay)
 
-    async def _get_once(self, path: str, params: Mapping[str, str]) -> Envelope:
+    async def _get_once(self, path: str, params: Mapping[str, str], keys: ApiKeyPair | None) -> Envelope:
         try:
-            response = await self._http.get(path, params=dict(params))
+            if keys is None:
+                response = await self._http.get(path, params=dict(params))
+            else:
+                # Signed per attempt: a retry gets a fresh timestamp inside the receive window.
+                query = urlencode(sorted(params.items()))
+                headers = signed_headers(keys, timestamp_ms=self._now_ms(), payload=query)
+                response = await self._http.get(f"{path}?{query}" if query else path, headers=headers)
         except httpx2.TimeoutException as exc:
             raise _Retryable(unavailable(f"timeout ({type(exc).__name__})")) from exc
         except httpx2.TransportError as exc:

@@ -6,11 +6,12 @@ it which tools to list and whether a call may proceed; it never decides by itsel
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 from guarded_exchange.application.ports import Clock, UnitOfWork, UnitOfWorkFactory
 from guarded_exchange.domain.audit import AuditEvent, AuditEventType
+from guarded_exchange.domain.credentials import EXCHANGE_BYBIT, cap_profile
 from guarded_exchange.domain.errors import InvalidParams, NotFound, PermissionDenied
 from guarded_exchange.domain.policy import (
     NO_OVERRIDES,
@@ -44,6 +45,7 @@ class PolicyView:
     ceiling_is_default: bool
     overrides: UserOverrides
     effective: EffectivePolicy
+    key_read_only: bool = False  # the active exchange key is read-only and caps the profile (FR-49)
 
 
 async def _view(uow: UnitOfWork, user: User) -> PolicyView:
@@ -51,12 +53,15 @@ async def _view(uow: UnitOfWork, user: User) -> PolicyView:
     stored_ceiling = record.ceiling if record is not None else None
     overrides = record.overrides if record is not None else NO_OVERRIDES
     ceiling = stored_ceiling if stored_ceiling is not None else default_ceiling(user.environment)
+    effective = strictest(ceiling, overrides, user.environment)
+    key = await uow.credentials.get_active(user.id, EXCHANGE_BYBIT, user.environment)
     return PolicyView(
         user=user,
         ceiling=ceiling,
         ceiling_is_default=stored_ceiling is None,
         overrides=overrides,
-        effective=strictest(ceiling, overrides, user.environment),
+        effective=replace(effective, profile=cap_profile(effective.profile, key)),
+        key_read_only=key is not None and key.read_only,
     )
 
 

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from guarded_exchange.config import ConfigError, load_settings, resolve_env_file
+from guarded_exchange.domain.users import Environment
 
 
 @pytest.fixture(autouse=True)
@@ -11,6 +12,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "GX_ENV_FILE",
         "GX_LOG_LEVEL",
         "GX_BYBIT_BASE_URL",
+        "GX_TEST_ALLOW_LOOPBACK_BYBIT_URL",
         "GX_DB_PATH",
         "GX_MASTER_KEY_FILE",
         "GX_LOCAL_USER",
@@ -161,3 +163,75 @@ def test_http_host_accepts_addresses_and_host_names(tmp_path: Path, host: str) -
     env.write_text(f"GX_HTTP_HOST={host}\n")
 
     assert load_settings(env, environ={}).http_host == host
+
+
+# --- exchange host allowlist (ticket 007) ---------------------------------------------------
+
+
+@pytest.mark.req("NFR-1")
+@pytest.mark.parametrize(
+    ("url", "environment"),
+    [
+        ("https://api-demo.bybit.com", Environment.TESTNET),
+        ("https://api-testnet.bybit.com/", Environment.TESTNET),
+        ("https://api.bybit.com", Environment.MAINNET),
+        ("https://api.bytick.com:443", Environment.MAINNET),
+        ("https://API-DEMO.bybit.com", Environment.TESTNET),
+    ],
+)
+def test_known_bybit_hosts_over_https_are_accepted(
+    tmp_path: Path, url: str, environment: Environment
+) -> None:
+    env = tmp_path / "gx.env"
+    env.write_text(f"GX_BYBIT_BASE_URL={url}\n")
+
+    settings = load_settings(env, environ={})
+
+    assert settings.bybit_environment is environment
+
+
+def test_the_default_base_url_is_demo_trading() -> None:
+    assert load_settings(environ={}).bybit_environment is Environment.TESTNET
+
+
+@pytest.mark.req("NFR-1")
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://api-demo.bybit.com",  # plain http to a known host
+        "https://api-demo.bybit.com.evil.example",
+        "https://evil.example",
+        "https://bybit.com",
+        "https://api-demo.bybit.com:8443",
+        "https://api-demo.bybit.com/proxy",
+        "https://api-demo.bybit.com/?x=1",
+        "https://user:pass@api-demo.bybit.com",
+        "http://127.0.0.1:8080",  # loopback without the test flag
+        "https://localhost",
+    ],
+)
+def test_other_exchange_urls_are_configuration_errors(tmp_path: Path, url: str) -> None:
+    env = tmp_path / "gx.env"
+    env.write_text(f"GX_BYBIT_BASE_URL={url}\n")
+
+    with pytest.raises(ConfigError, match="GX_BYBIT_BASE_URL must be one of"):
+        load_settings(env, environ={})
+
+
+@pytest.mark.req("NFR-1")
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8080", "http://localhost:9", "http://[::1]:8000"])
+def test_the_test_flag_allows_a_loopback_stub_as_testnet(tmp_path: Path, url: str) -> None:
+    env = tmp_path / "gx.env"
+    env.write_text(f"GX_BYBIT_BASE_URL={url}\nGX_TEST_ALLOW_LOOPBACK_BYBIT_URL=true\n")
+
+    assert load_settings(env, environ={}).bybit_environment is Environment.TESTNET
+
+
+@pytest.mark.req("NFR-1")
+@pytest.mark.parametrize("url", ["http://evil.example", "https://10.0.0.1", "http://127.0.0.1/path"])
+def test_the_test_flag_allows_nothing_but_loopback(tmp_path: Path, url: str) -> None:
+    env = tmp_path / "gx.env"
+    env.write_text(f"GX_BYBIT_BASE_URL={url}\nGX_TEST_ALLOW_LOOPBACK_BYBIT_URL=true\n")
+
+    with pytest.raises(ConfigError, match="GX_BYBIT_BASE_URL"):
+        load_settings(env, environ={})

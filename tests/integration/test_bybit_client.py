@@ -165,12 +165,12 @@ async def test_param_error_ret_code_is_invalid_params_with_untrusted_exchange_te
 
 @pytest.mark.req("FR-28")
 async def test_unknown_ret_code_is_exchange_rejected() -> None:
-    client, _ = _client(Recorder(_json({"retCode": 33004, "retMsg": "api key expired", "result": {}})))
+    client, _ = _client(Recorder(_json({"retCode": 170213, "retMsg": "Order does not exist.", "result": {}})))
 
     with pytest.raises(ExchangeRejected) as err:
         await client.get_ticker("BTCUSDT", Category.LINEAR)
 
-    assert err.value.details == {"exchange_code": "33004"}
+    assert err.value.details == {"exchange_code": "170213"}
 
 
 @pytest.mark.req("FR-28")

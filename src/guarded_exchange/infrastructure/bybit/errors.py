@@ -7,13 +7,22 @@ Source: https://bybit-exchange.github.io/docs/v5/error (checked 2026-10-27).
 
 from typing import Final
 
-from guarded_exchange.domain.errors import DomainError, ExchangeRejected, ExchangeUnavailable, InvalidParams
+from guarded_exchange.domain.errors import (
+    DomainError,
+    ExchangeCredentialsInvalid,
+    ExchangeRejected,
+    ExchangeUnavailable,
+    InvalidParams,
+)
 
 RET_OK: Final = 0
 # Transient server-side failures: safe to retry for GET requests.
 RETRYABLE_RET_CODES: Final = frozenset({10000, 10016})
 _PARAM_ERROR: Final = 10001
 _RATE_LIMITED: Final = 10006
+# The key itself is not accepted: invalid / other environment, bad signature, no permission for the
+# endpoint, authentication failed, IP not whitelisted, expired.
+CREDENTIAL_RET_CODES: Final = frozenset({10003, 10004, 10005, 10007, 10010, 33004})
 
 _RETRY_LATER = "Retry in a few seconds; if it keeps failing, tell the user the exchange is unavailable."
 
@@ -25,6 +34,14 @@ def error_for_ret_code(ret_code: int, ret_msg: str) -> DomainError:
         return InvalidParams(
             "the exchange rejected the request parameters",
             next_step="Check the symbol and category (spot or linear), e.g. BTCUSDT on linear.",
+            details=details,
+            untrusted_text=ret_msg,
+        )
+    if ret_code in CREDENTIAL_RET_CODES:
+        return ExchangeCredentialsInvalid(
+            "the exchange did not accept the API key",
+            next_step="Check that the key belongs to this environment (a Demo Trading key works only on "
+            "api-demo.bybit.com), is not expired and allows this server's IP address.",
             details=details,
             untrusted_text=ret_msg,
         )

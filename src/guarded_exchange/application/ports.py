@@ -12,10 +12,17 @@ from typing import Protocol
 
 from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord
+from guarded_exchange.domain.credentials import (
+    ApiKeyPair,
+    Credential,
+    CredentialBinding,
+    KeyPermissions,
+    SealedSecret,
+)
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
 from guarded_exchange.domain.policy import PolicyRecord
-from guarded_exchange.domain.users import User
+from guarded_exchange.domain.users import Environment, User
 
 
 class ExchangeClient(Protocol):
@@ -54,6 +61,31 @@ class ExchangeClient(Protocol):
         Raises the same exceptions as ``get_ticker``; an instrument the adapter cannot
         represent in the domain (e.g. a dated future in ``linear``) raises ``InvalidParams``.
         """
+        ...
+
+
+class KeyPermissionsReader(Protocol):
+    """Asks the exchange what an API key may do (FR-49). Configured for one environment."""
+
+    async def get_key_permissions(self, keys: ApiKeyPair) -> KeyPermissions:
+        """Return the key's permissions as reported by the exchange.
+
+        Raises:
+            ExchangeCredentialsInvalid: the exchange does not accept the key (invalid, wrong
+                environment, bad signature, IP not whitelisted, expired).
+            ExchangeUnavailable: the permissions cannot be checked right now (network, timeout,
+                5xx, endpoint missing, unexpected response).
+        """
+        ...
+
+
+class CredentialCipher(Protocol):
+    """Encrypts exchange keys bound to their owner (ADR-009: AES-256-GCM, AAD = binding)."""
+
+    def seal(self, keys: ApiKeyPair, binding: CredentialBinding) -> SealedSecret: ...
+
+    def open(self, sealed: SealedSecret, binding: CredentialBinding) -> ApiKeyPair:
+        """Decrypt; a wrong binding, key or tampered data raises ``CredentialUnreadable``."""
         ...
 
 
@@ -133,6 +165,41 @@ class PolicyRepository(Protocol):
         ...
 
 
+class CredentialRepository(Protocol):
+    """Exchange keys (D-9, D-12). The secret is stored only as ``SealedSecret``."""
+
+    async def add(self, credential: Credential, sealed: SealedSecret) -> None:
+        """Insert a new credential. A second active one for the same user, exchange and
+        environment violates a unique index (raises). Needs a write unit of work."""
+        ...
+
+    async def get(self, credential_id: str) -> Credential | None: ...
+
+    async def get_active(
+        self, user_id: str, exchange: str, environment: Environment
+    ) -> Credential | None: ...
+
+    async def list_for_user(self, user_id: str) -> Sequence[Credential]:
+        """All credentials of the user, active and deleted, oldest first."""
+        ...
+
+    async def list_active(self, exchange: str, environment: Environment) -> Sequence[Credential]:
+        """Active credentials of every user on one exchange environment."""
+        ...
+
+    async def get_sealed(self, credential_id: str) -> SealedSecret | None: ...
+
+    async def update_permissions(
+        self, credential_id: str, permissions: KeyPermissions, checked_at: datetime
+    ) -> None:
+        """Store the latest permissions reported by the exchange. Needs a write unit of work."""
+        ...
+
+    async def mark_deleted(self, credential_id: str, at: datetime) -> bool:
+        """Soft-delete an active credential; ``True`` only if this call changed it (D-9)."""
+        ...
+
+
 class MasterKeyStore(Protocol):
     """Where the local master key lives (PLAN ADR-009). Never exposes the key to use cases."""
 
@@ -175,6 +242,9 @@ class UnitOfWork(Protocol):
 
     @property
     def access_tokens(self) -> AccessTokenRepository: ...
+
+    @property
+    def credentials(self) -> CredentialRepository: ...
 
     async def lock_user(self, user_id: str) -> None:
         """Serialise read-modify-write of one user's state until the transaction ends (PLAN D-8).

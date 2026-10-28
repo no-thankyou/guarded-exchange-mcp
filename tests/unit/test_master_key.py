@@ -106,3 +106,46 @@ def test_failed_write_leaves_no_key_and_no_temp_file(tmp_path: Path, monkeypatch
         FileMasterKeyStore(path).create()
 
     assert list(tmp_path.iterdir()) == []
+
+
+# --- load (ticket 007: serve and key commands read the key) --------------------------------
+
+
+@pytest.mark.req("NFR-1")
+def test_load_returns_the_32_key_bytes(tmp_path: Path) -> None:
+    store = FileMasterKeyStore(tmp_path / "master.key")
+    store.create()
+
+    key = store.load()
+
+    assert key == base64.urlsafe_b64decode((tmp_path / "master.key").read_bytes().strip())
+    assert len(key) == 32
+
+
+@pytest.mark.req("NFR-1")
+def test_load_refuses_a_missing_open_linked_or_corrupt_key(tmp_path: Path) -> None:
+    good = FileMasterKeyStore(tmp_path / "master.key")
+    good.create()
+
+    with pytest.raises(MasterKeyError, match="not found"):
+        FileMasterKeyStore(tmp_path / "missing.key").load()
+
+    link = tmp_path / "link.key"
+    link.symlink_to(tmp_path / "master.key")
+    with pytest.raises(MasterKeyError, match="cannot be opened safely"):
+        FileMasterKeyStore(link).load()
+
+    (tmp_path / "master.key").chmod(0o640)
+    with pytest.raises(MasterKeyError, match="group/others"):
+        good.load()
+
+    corrupt = tmp_path / "corrupt.key"
+    corrupt.write_bytes(b"not a key\n")
+    corrupt.chmod(0o600)
+    with pytest.raises(MasterKeyError, match="corrupt"):
+        FileMasterKeyStore(corrupt).load()
+
+    directory = tmp_path / "dir.key"
+    directory.mkdir(mode=0o700)
+    with pytest.raises(MasterKeyError, match="not a regular file"):
+        FileMasterKeyStore(directory).load()

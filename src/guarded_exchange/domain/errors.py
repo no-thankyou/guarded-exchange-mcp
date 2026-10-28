@@ -59,3 +59,15 @@ class ExchangeRejected(DomainError):
     """The exchange understood the request and refused it."""
 
     code: ClassVar[str] = "exchange_rejected"
+
+
+class ExchangeCredentialsInvalid(DomainError):
+    """The exchange key is missing, refused by the exchange, expired or not acceptable (FR-28, FR-49)."""
+
+    code: ClassVar[str] = "exchange_credentials_invalid"
+
+
+class CredentialsPermissionsChanged(DomainError):
+    """A re-check found the key's permissions outside the allowlist: trading is blocked (FR-49, D-18)."""
+
+    code: ClassVar[str] = "credentials_permissions_changed"

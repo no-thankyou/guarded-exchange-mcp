@@ -16,6 +16,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "uvicorn>=0.54.0",  # ASGI server of the remote mode (also a dependency of mcp)
     "starlette>=1.10.0",  # typed ASGI app returned by streamable_http_app()
+    "cryptography>=50.0.2",  # AES-256-GCM + HKDF for exchange keys (ADR-009); also a dependency of mcp
 ]
 
 [project.scripts]
@@ -117,11 +118,13 @@ type = "forbidden"
 source_modules = ["guarded_exchange.domain"]
 forbidden_modules = [
     "mcp", "mcp_types", "httpx2", "pydantic", "pydantic_settings", "structlog", "typer",
-    "sqlalchemy", "alembic", "aiosqlite",
+    "sqlalchemy", "alembic", "aiosqlite", "cryptography",
 ]
 
 [[tool.importlinter.contracts]]
 name = "Application knows no transport, SDK, HTTP or SQL"
 type = "forbidden"
 source_modules = ["guarded_exchange.application"]
-forbidden_modules = ["mcp", "mcp_types", "httpx2", "pydantic_settings", "typer", "sqlalchemy", "alembic", "aiosqlite"]
+forbidden_modules = [
+    "mcp", "mcp_types", "httpx2", "pydantic_settings", "typer", "sqlalchemy", "alembic", "aiosqlite", "cryptography",
+]

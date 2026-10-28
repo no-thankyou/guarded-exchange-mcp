@@ -9,9 +9,11 @@ from typing import Annotated, Literal
 import typer
 
 from guarded_exchange.application.admin import IssuedToken, RevokedToken
+from guarded_exchange.application.credentials import StoredCredential
 from guarded_exchange.application.policy import PolicyView
 from guarded_exchange.domain.actions import ALL_ACTION_KINDS
-from guarded_exchange.domain.audit import canonical_decimal
+from guarded_exchange.domain.audit import canonical_decimal, canonical_time
+from guarded_exchange.domain.credentials import WARNING_NO_IP_WHITELIST, ApiKeyPair, Credential
 from guarded_exchange.domain.errors import InvalidParams
 from guarded_exchange.domain.policy import (
     UNSET,
@@ -67,6 +69,19 @@ class AdminCommands:
     revoke_token: Callable[[Path | None, str], RevokedToken]
 
 
+@dataclass(frozen=True, slots=True)
+class KeyCommands:
+    """Exchange key behaviour from the composition root (FR-30). ``user=None``: the local user.
+
+    ``add``/``replace`` take ``(env_file, user, keys, admin_attest)``.
+    """
+
+    add: Callable[[Path | None, str | None, ApiKeyPair, bool], StoredCredential]
+    replace: Callable[[Path | None, str | None, ApiKeyPair, bool], StoredCredential]
+    delete: Callable[[Path | None, str | None], Credential]
+    show: Callable[[Path | None, str | None], tuple[User, Sequence[Credential]]]
+
+
 _ENV_FILE_HELP = "dotenv file with GX_* settings (else $GX_ENV_FILE; no implicit ./.env)."
 EnvFileOpt = Annotated[Path | None, typer.Option(help=_ENV_FILE_HELP, dir_okay=False)]
 UserOpt = Annotated[str | None, typer.Option(help="User name (default: the local user).")]
@@ -119,6 +134,127 @@ def render_revoked_token(revoked: RevokedToken) -> str:
     return f"token {revoked.token.id} (user id {revoked.token.user_id}) {state}"
 
 
+# --- exchange keys ------------------------------------------------------------------------
+
+_WARNINGS = {
+    WARNING_NO_IP_WHITELIST: "the key is not bound to an IP address: anyone who obtains it can use it from "
+    "anywhere, and Bybit expires such keys after 90 days. Bind it to this server's IP if you can.",
+    "permissions_not_verified": "the exchange could not confirm the key's permissions; it was accepted on "
+    "the admin's attestation and will be re-checked when possible.",
+}
+
+
+def _permissions_line(credential: Credential) -> str:
+    if credential.permissions is None:
+        return "permissions: not verified (accepted on admin attestation)"
+    names = ", ".join(sorted(credential.permissions.permissions)) or "(none)"
+    mode = "read-only" if credential.permissions.read_only else "read-write"
+    checked = canonical_time(credential.permissions_checked_at) if credential.permissions_checked_at else "-"
+    expires = (
+        canonical_time(credential.permissions.expires_at) if credential.permissions.expires_at else "never"
+    )
+    return f"permissions: {mode}; {names} (checked {checked}; key expires {expires})"
+
+
+def render_stored_credential(stored: StoredCredential, action: str) -> str:
+    credential = stored.credential
+    lines = [
+        f"key {credential.id} {action} for {stored.user.name} "
+        f"({credential.exchange}, {credential.environment.value}): profile {stored.assessment.profile.value}",
+        _permissions_line(credential),
+    ]
+    if stored.replaced_id is not None:
+        lines.append(f"previous key {stored.replaced_id} is deleted and will not be used again")
+    lines += [f"warning: {_WARNINGS.get(w, w)}" for w in stored.assessment.warnings]
+    lines.append("The key and secret are stored encrypted and are never shown again.")
+    return "\n".join(lines)
+
+
+def render_credentials(user: User, credentials: Sequence[Credential]) -> str:
+    if not credentials:
+        return f"user {user.name} has no exchange keys"
+    blocks = [
+        f"key {c.id} ({c.exchange}, {c.environment.value}): {c.status.value}, created "
+        f"{canonical_time(c.created_at)}\n  {_permissions_line(c)}"
+        for c in credentials
+    ]
+    return "\n".join([f"user: {_user_line(user)}", *blocks])
+
+
+def _read_keys() -> ApiKeyPair:
+    """Prompt for the key and the secret without echo (FR-30: never via the AI client)."""
+    api_key = typer.prompt("Bybit API key", hide_input=True).strip()
+    api_secret = typer.prompt("Bybit API secret", hide_input=True).strip()
+    try:
+        return ApiKeyPair(api_key=api_key, api_secret=api_secret)
+    except InvalidParams as exc:  # the message names the field, never the value
+        raise typer.BadParameter(exc.message, param_hint=exc.details.get("field")) from None
+
+
+_ATTEST_QUESTION = (
+    "Admin attestation (test environment only, used only if the exchange cannot report the key's "
+    "permissions): do you confirm this key has NO withdrawal and NO transfer permission?"
+)
+AttestOpt = Annotated[
+    bool,
+    typer.Option(
+        "--admin-attest",
+        help="Admin: accept a test-environment key whose permissions the exchange cannot report, after "
+        "confirming it has no withdrawal or transfer permission (journaled). Never accepted on mainnet.",
+    ),
+]
+YesOpt = Annotated[bool, typer.Option("--yes", help="Do not ask for confirmation.")]
+
+
+def _keys_cli(commands: KeyCommands) -> typer.Typer:
+    app = typer.Typer(
+        no_args_is_help=True,
+        help="Exchange API keys (typed here, never through the AI client; stored encrypted).",
+    )
+
+    def _store(action: str, user: str | None, admin_attest: bool, yes: bool, env_file: Path | None) -> None:
+        keys = _read_keys()
+        if admin_attest and not yes:
+            typer.confirm(_ATTEST_QUESTION, abort=True)
+        store = commands.replace if action == "replaced" else commands.add
+        typer.echo(render_stored_credential(store(env_file, user, keys, admin_attest), action))
+
+    @app.command("add")
+    def add_command(
+        user: UserOpt = None,
+        admin_attest: AttestOpt = False,
+        yes: YesOpt = False,
+        env_file: EnvFileOpt = None,
+    ) -> None:
+        """Add the user's key: checks its permissions on the exchange, refuses withdrawal/transfer."""
+        _store("added", user, admin_attest, yes, env_file)
+
+    @app.command("replace")
+    def replace_command(
+        user: UserOpt = None,
+        admin_attest: AttestOpt = False,
+        yes: YesOpt = False,
+        env_file: EnvFileOpt = None,
+    ) -> None:
+        """Replace the user's key with a new one (same checks); the old one is deleted."""
+        _store("replaced", user, admin_attest, yes, env_file)
+
+    @app.command("delete")
+    def delete_command(user: UserOpt = None, yes: YesOpt = False, env_file: EnvFileOpt = None) -> None:
+        """Delete the user's active key: it is never used for new actions again."""
+        if not yes:
+            typer.confirm("Delete the active exchange key?", abort=True)
+        deleted = commands.delete(env_file, user)
+        typer.echo(f"key {deleted.id} ({deleted.exchange}, {deleted.environment.value}) deleted")
+
+    @app.command("show")
+    def show_command(user: UserOpt = None, env_file: EnvFileOpt = None) -> None:
+        """List the user's keys and their last checked permissions (never the key itself)."""
+        typer.echo(render_credentials(*commands.show(env_file, user)))
+
+    return app
+
+
 # --- policy rendering and parsing ---------------------------------------------------------
 
 
@@ -158,7 +294,8 @@ def render_policy(view: PolicyView) -> str:
     ]
     user = view.user
     header = f"user: {user.name} [{user.id}] ({user.status.value}, {user.environment.value})"
-    return "\n".join([header, "", *table])
+    note = ["", "note: the exchange key is read-only, so the effective profile is read_only"]
+    return "\n".join([header, "", *table, *(note if view.key_read_only else [])])
 
 
 def _set[T](value: T | None) -> T | Unset:
@@ -262,7 +399,9 @@ PendingOpt = Annotated[int | None, typer.Option(help="Confirmations waiting at t
 # --- commands -----------------------------------------------------------------------------
 
 
-def build_cli(serve: Serve, init: Init, policy: PolicyCommands, admin_commands: AdminCommands) -> typer.Typer:
+def build_cli(
+    serve: Serve, init: Init, policy: PolicyCommands, admin_commands: AdminCommands, keys: KeyCommands
+) -> typer.Typer:
     app = typer.Typer(name="guarded-exchange", no_args_is_help=True, add_completion=False)
 
     @app.callback()
@@ -291,6 +430,7 @@ def build_cli(serve: Serve, init: Init, policy: PolicyCommands, admin_commands: 
         typer.echo(render_init_report(init(env_file)))
 
     app.add_typer(_policy_cli(policy), name="policy")
+    app.add_typer(_keys_cli(keys), name="keys")
     admin = typer.Typer(no_args_is_help=True, help="Admin commands (service channel only, never MCP).")
     admin.add_typer(_admin_policy_cli(policy), name="policy")
     admin.add_typer(_admin_user_cli(admin_commands), name="user")

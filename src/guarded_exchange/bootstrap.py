@@ -3,12 +3,14 @@
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import NoReturn
+from typing import Final, NoReturn
 
 import anyio
+import anyio.abc
 import httpx2
 import structlog
 
@@ -28,6 +30,15 @@ from guarded_exchange.application.auth import (
     PrincipalUnavailable,
     ResolveLocalPrincipal,
 )
+from guarded_exchange.application.credentials import (
+    AddCredential,
+    DeleteCredential,
+    ListCredentials,
+    RecheckActiveCredentials,
+    RecheckCredential,
+    ReplaceCredential,
+    StoredCredential,
+)
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.policy import (
     AuthorizeAccess,
@@ -39,12 +50,14 @@ from guarded_exchange.application.policy import (
 from guarded_exchange.application.ports import Authenticator, UnitOfWorkFactory
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.config import ConfigError, Settings, load_settings
+from guarded_exchange.domain.credentials import EXCHANGE_BYBIT, ApiKeyPair, Credential
 from guarded_exchange.domain.errors import DomainError
 from guarded_exchange.domain.policy import PolicyPatch
 from guarded_exchange.domain.users import User
 from guarded_exchange.infrastructure.bybit.client import BybitClient, RetryPolicy
 from guarded_exchange.infrastructure.bybit.http import make_http_client
 from guarded_exchange.infrastructure.clock import SystemClock, UuidGenerator
+from guarded_exchange.infrastructure.crypto import AesGcmCredentialCipher, Keyring
 from guarded_exchange.infrastructure.db.migrate import (
     StorageNotReady,
     check_storage,
@@ -58,6 +71,7 @@ from guarded_exchange.infrastructure.tokens import SecretTokenGenerator
 from guarded_exchange.interface.cli.main import (
     AdminCommands,
     InitReport,
+    KeyCommands,
     PolicyCommands,
     Transport,
     build_cli,
@@ -75,14 +89,27 @@ def _version() -> str:
         return "0.0.0"
 
 
-def build_use_cases(settings: Settings, http: httpx2.AsyncClient, uow: UnitOfWorkFactory) -> UseCases:
-    exchange = BybitClient(
+def _bybit_client(settings: Settings, http: httpx2.AsyncClient) -> BybitClient:
+    return BybitClient(
         http,
         retry=RetryPolicy(
             max_attempts=settings.bybit_get_max_attempts,
             base_delay_s=settings.bybit_get_backoff_base_s,
         ),
     )
+
+
+def _exchange_http(settings: Settings, transport: httpx2.AsyncBaseTransport | None) -> httpx2.AsyncClient:
+    return make_http_client(
+        str(settings.bybit_base_url),
+        connect_timeout_s=settings.bybit_connect_timeout_s,
+        read_timeout_s=settings.bybit_read_timeout_s,
+        transport=transport,
+    )
+
+
+def build_use_cases(settings: Settings, http: httpx2.AsyncClient, uow: UnitOfWorkFactory) -> UseCases:
+    exchange = _bybit_client(settings, http)
     rules = InstrumentRulesCache(
         exchange, SystemClock(), ttl=timedelta(seconds=settings.instrument_rules_ttl_s)
     )
@@ -118,12 +145,7 @@ async def app_server(
     """
     if (principal is None) == (authenticator is None):
         raise ValueError("pass exactly one of principal (stdio) or authenticator (http)")
-    async with make_http_client(
-        str(settings.bybit_base_url),
-        connect_timeout_s=settings.bybit_connect_timeout_s,
-        read_timeout_s=settings.bybit_read_timeout_s,
-        transport=transport,
-    ) as http:
+    async with _exchange_http(settings, transport) as http:
         use_cases = build_use_cases(settings, http, uow)
         if authenticator is not None:
             yield create_http_server(
@@ -153,6 +175,72 @@ def _load_settings(env_file: Path | None) -> Settings:
         return load_settings(env_file)
     except ConfigError as exc:
         _fail("configuration error", exc, 2)
+
+
+# --- master key and exchange keys -----------------------------------------------------------
+
+
+def load_keyring(settings: Settings) -> Keyring:
+    """The master key (0600, regular file, 32 bytes) as a keyring; ``MasterKeyError`` otherwise."""
+    return Keyring.single(FileMasterKeyStore(settings.master_key_file).load())
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialUseCases:
+    add: AddCredential
+    replace: ReplaceCredential
+    delete: DeleteCredential
+    list: ListCredentials
+    recheck_all: RecheckActiveCredentials
+
+
+def build_credential_use_cases(
+    settings: Settings, uow: UnitOfWorkFactory, http: httpx2.AsyncClient, keyring: Keyring
+) -> CredentialUseCases:
+    """Key management for the exchange environment of the configured base URL (D-12)."""
+    clock, cipher, reader = SystemClock(), AesGcmCredentialCipher(keyring), _bybit_client(settings, http)
+    exchange, environment = EXCHANGE_BYBIT, settings.bybit_environment
+    recheck = RecheckCredential(uow, cipher, reader, clock)
+    return CredentialUseCases(
+        add=AddCredential(
+            uow, cipher, reader, clock, UuidGenerator(), exchange=exchange, environment=environment
+        ),
+        replace=ReplaceCredential(
+            uow, cipher, reader, clock, UuidGenerator(), exchange=exchange, environment=environment
+        ),
+        delete=DeleteCredential(uow, clock, exchange=exchange, environment=environment),
+        list=ListCredentials(uow),
+        recheck_all=RecheckActiveCredentials(uow, recheck, clock, exchange=exchange, environment=environment),
+    )
+
+
+async def recheck_credentials_on_start(
+    settings: Settings,
+    uow: UnitOfWorkFactory,
+    keyring: Keyring,
+    transport: httpx2.AsyncBaseTransport | None = None,
+) -> None:
+    """D-24: re-check every active key when the server starts; never stops the server.
+
+    A failure is only logged: state-changing actions re-check stale permissions themselves and
+    refuse if that fails (``RequireTradingCredential``).
+    """
+    log = structlog.get_logger(__name__)
+    try:
+        async with _exchange_http(settings, transport) as http:
+            outcomes = await build_credential_use_cases(settings, uow, http, keyring).recheck_all()
+    except Exception as exc:  # a background check must not take the server down
+        log.warning("credentials_recheck_failed", error_type=type(exc).__name__)
+        return
+    for outcome in outcomes:
+        level = log.info if outcome.status in {"ok", "read_only"} else log.warning
+        level(
+            "credential_rechecked",
+            credential_id=outcome.credential_id,
+            user_id=outcome.user_id,
+            status=outcome.status,
+            reason=outcome.reason,
+        )
 
 
 # --- init ---------------------------------------------------------------------------------
@@ -199,19 +287,36 @@ def init(env_file: Path | None = None) -> InitReport:
 # --- serve --------------------------------------------------------------------------------
 
 
-async def _serve_stdio(settings: Settings) -> None:
+_RECHECK_GRACE_S: Final = 5.0
+
+
+def _stop_after_grace(tasks: anyio.abc.TaskGroup) -> None:
+    """The server stopped: give a start-up re-check still in flight a few seconds to finish its
+    database work (cancelling an aiosqlite call mid-way leaves its worker thread posting to a closed
+    loop), then cancel it."""
+    tasks.cancel_scope.deadline = anyio.current_time() + _RECHECK_GRACE_S
+
+
+async def _serve_stdio(settings: Settings, keyring: Keyring) -> None:
     async with open_storage(settings) as uow:
         principal = await ResolveLocalPrincipal(uow)(settings.local_user)
         structlog.get_logger(__name__).info("principal_resolved", user_id=principal.id, user=principal.name)
-        async with app_server(settings, uow=uow, principal=fixed_principal(principal.id)) as mcp:
+        async with (
+            app_server(settings, uow=uow, principal=fixed_principal(principal.id)) as mcp,
+            anyio.create_task_group() as tasks,
+        ):
+            tasks.start_soon(recheck_credentials_on_start, settings, uow, keyring)
             await serve_stdio(mcp)
+            _stop_after_grace(tasks)
 
 
-async def _serve_http(settings: Settings) -> None:
+async def _serve_http(settings: Settings, keyring: Keyring) -> None:
     async with (
         open_storage(settings) as uow,
         app_server(settings, uow=uow, authenticator=AuthenticateBearerToken(uow)) as mcp,
+        anyio.create_task_group() as tasks,
     ):
+        tasks.start_soon(recheck_credentials_on_start, settings, uow, keyring)
         app = http_app(
             mcp, allowed_hosts=settings.http_allowed_hosts, allowed_origins=settings.http_allowed_origins
         )
@@ -227,6 +332,7 @@ async def _serve_http(settings: Settings) -> None:
                 "TLS-terminating reverse proxy and list the public host in GX_HTTP_ALLOWED_HOSTS",
             )
         await serve_http(app, host=settings.http_host, port=settings.http_port)
+        _stop_after_grace(tasks)
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -246,8 +352,11 @@ def serve(transport: Transport, env_file: Path | None = None) -> None:
     try:
         # Never migrate here (D-11): clients start several server processes at once.
         check_storage(settings.db_path, busy_timeout_ms=settings.sqlite_busy_timeout_ms)
-        anyio.run(_serve_http if transport == "http" else _serve_stdio, settings)
-    except (StorageNotReady, PrincipalUnavailable, DomainError) as exc:
+        # The master key is loaded before MCP starts: missing, too open, a symlink or corrupt ->
+        # refuse to start (fail closed) instead of failing later on the first key operation.
+        keyring = load_keyring(settings)
+        anyio.run(_serve_http if transport == "http" else _serve_stdio, settings, keyring)
+    except (StorageNotReady, PrincipalUnavailable, DomainError, MasterKeyError) as exc:
         log.error("startup_refused", reason=str(exc))
         _fail("cannot start", exc, 2)
 
@@ -274,6 +383,8 @@ def _with_storage[T](
         _fail("refused", RuntimeError(f"{exc.message}{hint}"), 1)
     except StorageNotReady as exc:
         _fail("cannot open storage", exc, 1)
+    except MasterKeyError as exc:
+        _fail("cannot use the master key", exc, 1)
     except Exception as exc:  # anything else (e.g. a corrupt policy row): one clear line, no traceback
         structlog.get_logger(__name__).error("cli_command_failed", error_type=type(exc).__name__)
         _fail("unexpected error", RuntimeError(f"{type(exc).__name__}: {exc}"), 1)
@@ -315,6 +426,57 @@ def revoke_token(env_file: Path | None, token_id: str) -> RevokedToken:
     return _with_storage(env_file, lambda uow, s: RevokeAccessToken(uow, SystemClock())(token_id))
 
 
+# --- exchange keys ------------------------------------------------------------------------
+
+
+def _with_credentials[T](
+    env_file: Path | None,
+    action: Callable[[CredentialUseCases, Settings], Awaitable[T]],
+    transport: httpx2.AsyncBaseTransport | None,
+) -> T:
+    async def run(uow: UnitOfWorkFactory, settings: Settings) -> T:
+        keyring = load_keyring(settings)
+        async with _exchange_http(settings, transport) as http:
+            return await action(build_credential_use_cases(settings, uow, http, keyring), settings)
+
+    return _with_storage(env_file, run)
+
+
+def add_key(
+    env_file: Path | None,
+    user: str | None,
+    keys: ApiKeyPair,
+    admin_attest: bool,
+    *,
+    transport: httpx2.AsyncBaseTransport | None = None,
+) -> StoredCredential:
+    """``transport`` is a test seam (``httpx2.MockTransport``); the CLI passes ``None``."""
+    return _with_credentials(
+        env_file, lambda c, s: c.add(user or s.local_user, keys, admin_attested=admin_attest), transport
+    )
+
+
+def replace_key(
+    env_file: Path | None,
+    user: str | None,
+    keys: ApiKeyPair,
+    admin_attest: bool,
+    *,
+    transport: httpx2.AsyncBaseTransport | None = None,
+) -> StoredCredential:
+    return _with_credentials(
+        env_file, lambda c, s: c.replace(user or s.local_user, keys, admin_attested=admin_attest), transport
+    )
+
+
+def delete_key(env_file: Path | None, user: str | None) -> Credential:
+    return _with_credentials(env_file, lambda c, s: c.delete(user or s.local_user), None)
+
+
+def show_keys(env_file: Path | None, user: str | None) -> tuple[User, Sequence[Credential]]:
+    return _with_credentials(env_file, lambda c, s: c.list(user or s.local_user), None)
+
+
 def cli() -> None:
     build_cli(
         serve,
@@ -323,4 +485,5 @@ def cli() -> None:
         AdminCommands(
             create_user=create_user, list_users=list_users, issue_token=issue_token, revoke_token=revoke_token
         ),
+        KeyCommands(add=add_key, replace=replace_key, delete=delete_key, show=show_keys),
     )()

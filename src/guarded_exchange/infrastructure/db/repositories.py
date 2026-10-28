@@ -10,6 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord, canonical_json
+from guarded_exchange.domain.credentials import (
+    Credential,
+    CredentialStatus,
+    KeyPermissions,
+    SealedSecret,
+    permissions_from_payload,
+    permissions_to_payload,
+)
 from guarded_exchange.domain.policy import (
     PolicyRecord,
     ceiling_from_payload,
@@ -19,7 +27,14 @@ from guarded_exchange.domain.policy import (
 )
 from guarded_exchange.domain.users import Environment, User, UserNameTaken, UserStatus
 from guarded_exchange.infrastructure.db.dialect import insert_for
-from guarded_exchange.infrastructure.db.schema import access_tokens, audit_heads, audit_log, policies, users
+from guarded_exchange.infrastructure.db.schema import (
+    access_tokens,
+    audit_heads,
+    audit_log,
+    exchange_credentials,
+    policies,
+    users,
+)
 
 
 class ReadOnlyUnitOfWorkError(RuntimeError):
@@ -179,6 +194,130 @@ class SqlPolicyRepository(_Repository):
         await self._conn.execute(
             upsert.on_conflict_do_update(index_elements=[policies.c.user_id], set_=values)
         )
+
+
+class SqlCredentialRepository(_Repository):
+    """Exchange keys; ``ciphertext``/``nonce`` leave this class only as ``SealedSecret``."""
+
+    async def add(self, credential: Credential, sealed: SealedSecret) -> None:
+        self._require_writable("credentials.add")
+        await self._conn.execute(
+            exchange_credentials.insert().values(
+                id=credential.id,
+                user_id=credential.user_id,
+                exchange=credential.exchange,
+                environment=credential.environment.value,
+                ciphertext=sealed.ciphertext,
+                nonce=sealed.nonce,
+                key_version=sealed.key_version,
+                permissions=_permissions_json(credential.permissions),
+                permissions_checked_at=credential.permissions_checked_at,
+                admin_attested=credential.admin_attested,
+                status=credential.status.value,
+                created_at=credential.created_at,
+                deleted_at=credential.deleted_at,
+            )
+        )
+
+    async def get(self, credential_id: str) -> Credential | None:
+        query = select(*_CREDENTIAL_COLUMNS).where(exchange_credentials.c.id == credential_id)
+        row = (await self._conn.execute(query)).one_or_none()
+        return None if row is None else _credential_from_row(row)
+
+    async def get_active(self, user_id: str, exchange: str, environment: Environment) -> Credential | None:
+        query = select(*_CREDENTIAL_COLUMNS).where(
+            exchange_credentials.c.user_id == user_id,
+            exchange_credentials.c.exchange == exchange,
+            exchange_credentials.c.environment == environment.value,
+            exchange_credentials.c.status == CredentialStatus.ACTIVE.value,
+        )
+        row = (await self._conn.execute(query)).one_or_none()
+        return None if row is None else _credential_from_row(row)
+
+    async def list_for_user(self, user_id: str) -> Sequence[Credential]:
+        query = (
+            select(*_CREDENTIAL_COLUMNS)
+            .where(exchange_credentials.c.user_id == user_id)
+            .order_by(exchange_credentials.c.created_at, exchange_credentials.c.id)
+        )
+        return [_credential_from_row(row) for row in await self._conn.execute(query)]
+
+    async def list_active(self, exchange: str, environment: Environment) -> Sequence[Credential]:
+        query = (
+            select(*_CREDENTIAL_COLUMNS)
+            .where(
+                exchange_credentials.c.exchange == exchange,
+                exchange_credentials.c.environment == environment.value,
+                exchange_credentials.c.status == CredentialStatus.ACTIVE.value,
+            )
+            .order_by(exchange_credentials.c.created_at, exchange_credentials.c.id)
+        )
+        return [_credential_from_row(row) for row in await self._conn.execute(query)]
+
+    async def get_sealed(self, credential_id: str) -> SealedSecret | None:
+        query = select(
+            exchange_credentials.c.ciphertext,
+            exchange_credentials.c.nonce,
+            exchange_credentials.c.key_version,
+        ).where(exchange_credentials.c.id == credential_id)
+        row = (await self._conn.execute(query)).one_or_none()
+        if row is None:
+            return None
+        return SealedSecret(
+            ciphertext=bytes(row.ciphertext), nonce=bytes(row.nonce), key_version=row.key_version
+        )
+
+    async def update_permissions(
+        self, credential_id: str, permissions: KeyPermissions, checked_at: datetime
+    ) -> None:
+        self._require_writable("credentials.update_permissions")
+        await self._conn.execute(
+            update(exchange_credentials)
+            .where(exchange_credentials.c.id == credential_id)
+            .values(permissions=_permissions_json(permissions), permissions_checked_at=checked_at)
+        )
+
+    async def mark_deleted(self, credential_id: str, at: datetime) -> bool:
+        self._require_writable("credentials.mark_deleted")
+        result = await self._conn.execute(
+            update(exchange_credentials)
+            .where(
+                exchange_credentials.c.id == credential_id,
+                exchange_credentials.c.status == CredentialStatus.ACTIVE.value,
+            )
+            .values(status=CredentialStatus.DELETED.value, deleted_at=at)
+        )
+        return result.rowcount == 1
+
+
+# Every column except the encrypted secret: listing keys never loads ciphertext.
+_CREDENTIAL_COLUMNS = tuple(
+    column for column in exchange_credentials.c if column.name not in {"ciphertext", "nonce", "key_version"}
+)
+
+
+def _permissions_json(permissions: KeyPermissions | None) -> str | None:
+    payload = permissions_to_payload(permissions)
+    return None if payload is None else canonical_json(payload)
+
+
+def _credential_from_row(row: Row[tuple[object, ...]]) -> Credential:
+    mapping = row._mapping
+    raw_permissions = mapping["permissions"]
+    return Credential(
+        id=str(mapping["id"]),
+        user_id=str(mapping["user_id"]),
+        exchange=str(mapping["exchange"]),
+        environment=Environment(mapping["environment"]),
+        status=CredentialStatus(mapping["status"]),
+        permissions=None
+        if raw_permissions is None
+        else permissions_from_payload(json.loads(str(raw_permissions))),
+        permissions_checked_at=mapping["permissions_checked_at"],
+        admin_attested=bool(mapping["admin_attested"]),
+        created_at=mapping["created_at"],
+        deleted_at=mapping["deleted_at"],
+    )
 
 
 def _user_from_row(row: Row[tuple[object, ...]]) -> User:

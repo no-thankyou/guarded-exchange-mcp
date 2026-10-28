@@ -35,6 +35,37 @@ class FileMasterKeyStore:
             info = self._path.lstat()
         except FileNotFoundError:
             return False
+        self._check_mode(info)
+        self._decode(self._path.read_bytes())
+        return True
+
+    def load(self) -> bytes:
+        """The key bytes, after the same safety checks as ``exists``; missing -> ``MasterKeyError``.
+
+        Read through one ``O_NOFOLLOW`` descriptor whose ``fstat`` is checked, so the file that is
+        checked is the file that is read.
+        """
+        try:
+            fd = os.open(self._path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            raise MasterKeyError(
+                f"master key not found at {self._path}; run `guarded-exchange init` on a new installation "
+                "or restore the key from backup (or point GX_MASTER_KEY_FILE at it)"
+            ) from None
+        except OSError as exc:  # ELOOP: a symlink was planted there; EACCES: not ours
+            raise MasterKeyError(
+                f"master key {self._path} cannot be opened safely ({exc.strerror})"
+            ) from None
+        try:
+            info = os.fstat(fd)
+            self._check_mode(info)
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                raw = handle.read(1024)
+        finally:
+            os.close(fd)
+        return self._decode(raw)
+
+    def _check_mode(self, info: os.stat_result) -> None:
         if not stat.S_ISREG(info.st_mode):
             raise MasterKeyError(f"master key {self._path} is not a regular file")
         if info.st_mode & 0o077:
@@ -42,8 +73,6 @@ class FileMasterKeyStore:
                 f"master key {self._path} is accessible by group/others "
                 f"(mode {stat.S_IMODE(info.st_mode):o}); run `chmod 600 {self._path}`"
             )
-        self._decode(self._path.read_bytes())
-        return True
 
     def create(self) -> None:
         """Write the key atomically: a crash leaves either no key file or a complete one.

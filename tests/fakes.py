@@ -9,6 +9,15 @@ from decimal import Decimal
 
 from guarded_exchange.domain.access_tokens import TOKEN_PREFIX, AccessToken
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord, canonical_json
+from guarded_exchange.domain.credentials import (
+    ApiKeyPair,
+    Credential,
+    CredentialBinding,
+    CredentialStatus,
+    CredentialUnreadable,
+    KeyPermissions,
+    SealedSecret,
+)
 from guarded_exchange.domain.errors import NotFound
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
 from guarded_exchange.domain.market import Candle, CandleInterval, Candles, Orderbook, OrderbookLevel, Ticker
@@ -201,11 +210,46 @@ class ReadOnlyViolation(RuntimeError):
 
 
 @dataclass
+class FakeKeyReader:
+    """``KeyPermissionsReader``: returns ``permissions`` or raises ``fail_with``; records the keys asked."""
+
+    permissions: KeyPermissions | None = None
+    fail_with: Exception | None = None
+    calls: list[ApiKeyPair] = field(default_factory=list)
+
+    async def get_key_permissions(self, keys: ApiKeyPair) -> KeyPermissions:
+        self.calls.append(keys)
+        if self.fail_with is not None:
+            raise self.fail_with
+        assert self.permissions is not None, "configure FakeKeyReader.permissions"
+        return self.permissions
+
+
+class FakeCipher:
+    """``CredentialCipher`` without cryptography: the binding must match, like AES-GCM's AAD."""
+
+    def __init__(self) -> None:
+        self._sealed: dict[bytes, tuple[CredentialBinding, ApiKeyPair]] = {}
+
+    def seal(self, keys: ApiKeyPair, binding: CredentialBinding) -> SealedSecret:
+        token = f"sealed-{len(self._sealed) + 1}".encode()
+        self._sealed[token] = (binding, keys)
+        return SealedSecret(ciphertext=token, nonce=b"n" * 12, key_version=1)
+
+    def open(self, sealed: SealedSecret, binding: CredentialBinding) -> ApiKeyPair:
+        stored = self._sealed.get(sealed.ciphertext)
+        if stored is None or stored[0] != binding:
+            raise CredentialUnreadable()
+        return stored[1]
+
+
+@dataclass
 class _State:
     users: dict[str, User] = field(default_factory=dict)
     audit: dict[str, list[AuditRecord]] = field(default_factory=dict)
     policies: dict[str, PolicyRecord] = field(default_factory=dict)
     access_tokens: dict[str, AccessToken] = field(default_factory=dict)
+    credentials: dict[str, tuple[Credential, SealedSecret]] = field(default_factory=dict)
 
     def copy(self) -> "_State":
         return _State(
@@ -213,6 +257,7 @@ class _State:
             {chain: list(records) for chain, records in self.audit.items()},
             dict(self.policies),
             dict(self.access_tokens),
+            dict(self.credentials),
         )
 
 
@@ -312,12 +357,81 @@ class InMemoryPolicyRepository:
         self._state.policies[user_id] = record
 
 
+class InMemoryCredentialRepository:
+    def __init__(self, state: _State, *, writable: bool) -> None:
+        self._state = state
+        self._writable = writable
+
+    def _write(self, operation: str) -> None:
+        if not self._writable:
+            raise ReadOnlyViolation(f"credentials.{operation} needs a write unit of work")
+
+    async def add(self, credential: Credential, sealed: SealedSecret) -> None:
+        self._write("add")
+        if credential.user_id not in self._state.users:
+            raise ValueError(f"no user {credential.user_id}")  # the SQL table has a foreign key
+        if credential.is_active and await self.get_active(
+            credential.user_id, credential.exchange, credential.environment
+        ):
+            raise ValueError("a second active credential violates the unique index")  # D-12
+        self._state.credentials[credential.id] = (credential, sealed)
+
+    async def get(self, credential_id: str) -> Credential | None:
+        stored = self._state.credentials.get(credential_id)
+        return None if stored is None else stored[0]
+
+    async def get_active(self, user_id: str, exchange: str, environment: Environment) -> Credential | None:
+        return next(
+            (
+                c
+                for c, _ in self._state.credentials.values()
+                if c.user_id == user_id
+                and c.exchange == exchange
+                and c.environment is environment
+                and c.is_active
+            ),
+            None,
+        )
+
+    async def list_for_user(self, user_id: str) -> Sequence[Credential]:
+        return [c for c, _ in self._state.credentials.values() if c.user_id == user_id]
+
+    async def list_active(self, exchange: str, environment: Environment) -> Sequence[Credential]:
+        return [
+            c
+            for c, _ in self._state.credentials.values()
+            if c.exchange == exchange and c.environment is environment and c.is_active
+        ]
+
+    async def get_sealed(self, credential_id: str) -> SealedSecret | None:
+        stored = self._state.credentials.get(credential_id)
+        return None if stored is None else stored[1]
+
+    async def update_permissions(
+        self, credential_id: str, permissions: KeyPermissions, checked_at: datetime
+    ) -> None:
+        self._write("update_permissions")
+        credential, sealed = self._state.credentials[credential_id]
+        updated = replace(credential, permissions=permissions, permissions_checked_at=checked_at)
+        self._state.credentials[credential_id] = (updated, sealed)
+
+    async def mark_deleted(self, credential_id: str, at: datetime) -> bool:
+        self._write("mark_deleted")
+        credential, sealed = self._state.credentials[credential_id]
+        if not credential.is_active:
+            return False
+        deleted = replace(credential, status=CredentialStatus.DELETED, deleted_at=at)
+        self._state.credentials[credential_id] = (deleted, sealed)
+        return True
+
+
 class InMemoryUnitOfWork:
     def __init__(self, state: _State, *, write: bool, locks: list[str]) -> None:
         self.users = InMemoryUserRepository(state, writable=write)
         self.audit = InMemoryAuditLogRepository(state, writable=write)
         self.policies = InMemoryPolicyRepository(state, writable=write)
         self.access_tokens = InMemoryAccessTokenRepository(state, writable=write)
+        self.credentials = InMemoryCredentialRepository(state, writable=write)
         self._write = write
         self._locks = locks
 

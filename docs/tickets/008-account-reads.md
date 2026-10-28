@@ -23,3 +23,4 @@
 
 ## Заметки
 - Из 005: `lock_user` на SQLite — no-op (сериализацию даёт `BEGIN IMMEDIATE` write-UoW; вне write-UoW он падает). Значит, на SQLite «блокировка пользователя» = блокировка всей БД на время write-транзакции: держать их короткими, без сетевого I/O (D-10). Ветка Postgres (`FOR UPDATE`) — в 028.
+- Из 007: ключ пользователя для чтения брать из `uow.credentials.get_active(user_id, EXCHANGE_BYBIT, settings.bybit_environment)` и расшифровывать `CredentialCipher.open(sealed, credential.binding)` (ошибка → `CredentialUnreadable`, код `exchange_credentials_invalid`); перепроверка прав для чтения не обязательна (D-24 — только перед изменяющими действиями), но истёкший/удалённый ключ — понятная ошибка. Подписанный GET уже есть в `BybitClient._get(..., keys=...)`: query строится один раз, подписывается и отправляется как есть.

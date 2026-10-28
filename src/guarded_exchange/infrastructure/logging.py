@@ -16,6 +16,8 @@ import structlog
 from pydantic import SecretBytes, SecretStr
 from structlog.typing import EventDict, Processor, WrappedLogger
 
+from guarded_exchange.domain.credentials import ApiKeyPair
+
 MASK: Final = "***"
 _SECRET_KEY_RE: Final = re.compile(
     r"(secret|password|passwd|token|api[_-]?key|authorization|signature|master[_-]?key|cookie)",
@@ -24,7 +26,7 @@ _SECRET_KEY_RE: Final = re.compile(
 
 
 def mask_secrets(_logger: WrappedLogger, _method: str, event_dict: EventDict) -> EventDict:
-    """Replace values whose key looks secret, and any ``SecretStr``/``SecretBytes`` value."""
+    """Replace values whose key looks secret, and any ``SecretStr``/``SecretBytes``/``ApiKeyPair`` value."""
     return _mask_mapping(event_dict)
 
 
@@ -35,7 +37,7 @@ def _mask_mapping(data: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
 
 
 def _mask_value(value: Any) -> Any:
-    if isinstance(value, SecretStr | SecretBytes):
+    if isinstance(value, SecretStr | SecretBytes | ApiKeyPair):
         return MASK
     if isinstance(value, Mapping):
         return _mask_mapping(dict(value))
