@@ -102,37 +102,36 @@ uv run --directory "$REPO" python spikes/003/elicitation_probe.py < /dev/null
 | 7 | Новая сессия | перезапустить клиент и вызвать снова | не изменились ли `protocol_version` / capability |
 | 8 | Хук `Elicitation` (только Claude Code, по желанию) | см. шаг 7 раздела Claude Code | `action`/`content` от хука; был ли показан диалог |
 
-## Таблица результатов (заполняет пользователь)
+## Таблица результатов
 Строка — одна возможность одного клиента. «Доказательство» — строка лога (событие + время) или имя скриншота.
 
 | Клиент | Версия клиента | ОС | Дата проверки | Возможность | Результат | Доказательство |
 |---|---|---|---|---|---|---|
-| Claude Code | | | | `protocol_version` | | |
-| Claude Code | | | | `clientInfo` (`name`, `version`) | | |
-| Claude Code | | | | объявляет `elicitation` (сырое значение) | | |
-| Claude Code | | | | рисует форму | | |
-| Claude Code | | | | MRTR (2 раунда `tools/call`) | | |
-| Claude Code | | | | legacy push `elicitation/create` | | |
-| Claude Code | | | | accept + `confirm=true` → что пришло | | |
-| Claude Code | | | | accept без галочки → что пришло | | |
-| Claude Code | | | | decline → что пришло | | |
-| Claude Code | | | | Esc / cancel → что пришло | | |
-| Claude Code | | | | закрыть / прервать → что пришло | | |
-| Claude Code | | | | второй вызов | | |
-| Claude Code | | | | хук `Elicitation` отвечает без диалога | | |
-| Claude Desktop | | | | `protocol_version` | | |
-| Claude Desktop | | | | `clientInfo` (`name`, `version`) | | |
-| Claude Desktop | | | | объявляет `elicitation` (сырое значение) | | |
-| Claude Desktop | | | | рисует форму | | |
-| Claude Desktop | | | | MRTR (2 раунда `tools/call`) | | |
-| Claude Desktop | | | | legacy push `elicitation/create` | | |
-| Claude Desktop | | | | accept + `confirm=true` → что пришло | | |
-| Claude Desktop | | | | accept без галочки → что пришло | | |
-| Claude Desktop | | | | decline → что пришло | | |
-| Claude Desktop | | | | Esc / cancel → что пришло | | |
-| Claude Desktop | | | | закрыть / прервать → что пришло | | |
-| Claude Desktop | | | | второй вызов | | |
-| Claude Desktop | | | | force: форма без объявленной capability → что пришло | | |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | `protocol_version` | `2026-07-28` во всех вызовах | `tools_call` 06:20:14 |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | `clientInfo` (`name`, `version`) | `claude-code` / `2.1.312` | `tools_call` 06:20:14 |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | объявляет `elicitation` (сырое значение) | `{"form": {}, "url": {}}`, `supports_form: true` | `tools_call` 06:20:14 |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | рисует форму | да, в терминале: текст `message` и поле `confirm` чекбоксом. Галочка ставится пробелом, Enter отправляет, Esc отменяет. Как поставить галочку, с первого раза не очевидно (UX-риск) | слова пользователя |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | MRTR (2 раунда `tools/call`) | да: на каждый вызов два `tools_call` (`has_request_state` false → true) с `input_responses.confirm`, `channel: mrtr` | `tools_call` 06:20:14 + 06:20:58 |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | legacy push `elicitation/create` | не использовался (на 2026-07-28 сервер идёт через MRTR) | нет событий legacy в логе |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | accept + `confirm=true` → что пришло | `accept`, `{"confirm": true}` → `confirmed: true` | `elicitation_result` p-3 06:23:47 |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | accept без галочки → что пришло | `accept`, `{"confirm": false}` → `confirmed: false`; отправить без галочки можно | `elicitation_result` p-4 06:24:17 |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | decline → что пришло | `decline`, `content: null` | `elicitation_result` p-2 06:23:04 |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | Esc / cancel → что пришло | `cancel`, `content: null` (не `decline`) | `elicitation_result` p-1 06:20:58 |
+| Claude Code | | | | закрыть / прервать → что пришло | не проверено | |
+| Claude Code | 2.1.312 | Linux Mint 22.3 | 2026-10-28 | второй вызов | в той же сессии каждый вызов получил новый pending (p-1…p-4) и новую форму; `state_only_retry` не было | `pending_created` p-2..p-4 |
+| Claude Code | | | | хук `Elicitation` отвечает без диалога | не проверено (необязательно) | |
+| Claude Desktop | — | — | 2026-10-29 | все возможности | не проверено: у пользователя Linux, официального клиента Claude Desktop под Linux нет. До проверки считается клиентом без UI-канала (ADR-005) | — |
+
+## Итог (2026-10-29)
+- **Claude Code 2.1.312** на протоколе 2026-07-28 объявляет `elicitation: {"form": {}, "url": {}}`, рисует форму и ходит по MRTR (два `tools/call`, второй со `requestState`). Legacy push `elicitation/create` не нужен.
+- Исходы различимы: `accept` + `confirm=true` — подтверждение; `accept` + `confirm=false` (форму можно отправить без галочки) — отказ; `decline` и `cancel` (Esc) приходят разными `action`, `content: null`.
+- Каждый вызов получает новый pending и новую форму; ретраев «только со state» не было.
+- UX-риск: в терминальной форме галочка ставится пробелом, это не очевидно — в `message` формы нужна подсказка «Пробел — отметить, Enter — отправить».
+- Не проверено: закрытие/прерывание хода с открытой формой (при любом исходе, кроме подтверждения, действие не исполняется — путь безопасен по построению), хук `Elicitation`, Claude Desktop (нет клиента под Linux).
+- Решение для AC-1 — в PLAN, ADR-005 «Спайк 003».
+
+## Черновик для README проекта
+> **Подтверждение в клиенте.** На testnet сервер может спросить подтверждение формой прямо в клиенте (MRTR, протокол 2026-07-28). Проверено в Claude Code 2.1.312 (Linux, 2026-10-28): в форме отметьте галочку `confirm` пробелом и нажмите Enter; Esc или отправка без галочки — отказ. Клиенты, которые не объявляют `elicitation.form` или работают на протоколе старше 2026-07-28, получают подтверждение через Telegram или CLI. Claude Desktop не проверялся; из-за известного бага с фиктивным `decline` для него рекомендуется `prefer_external_channel: true`. Хук Claude Code `Elicitation` может отвечать на форму без человека, поэтому на mainnet UI клиента не доверяется (FR-42).
 
 ## Что прислать обратно
 1. Оба файла лога целиком: `/tmp/spike003-claude-code.log`, `/tmp/spike003-claude-desktop.log` (в них нет секретов: только версии клиентов, капабилити и ответы формы).
