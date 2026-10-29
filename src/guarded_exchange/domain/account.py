@@ -143,15 +143,29 @@ class ConditionalKind(StrEnum):
 
 
 class OrderOrigin(StrEnum):
-    """Who created an order (FR-2): this system, or anyone else on the account (a person, a bot)."""
+    """Who created an order (FR-2): this system, or anyone else on the account (a person, a bot).
+
+    Today ``SYSTEM`` means "the client order id has this system's prefix"; it is not yet verified
+    against our own record of sent orders (tickets 011/012).
+    """
 
     SYSTEM = "system"
     EXTERNAL = "external"
 
 
+class QtyUnit(StrEnum):
+    """What an order's ``qty`` counts. A spot market buy is usually sized in the quote currency
+    (spend 20 USDT); ``UNKNOWN`` when the exchange did not say - never guessed as base."""
+
+    BASE = "base"
+    QUOTE = "quote"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class Order:
-    """An open order. Prices in the quote currency, quantities in the base asset.
+    """An open order. Prices in the quote currency of the pair, ``qty`` in ``qty_unit``,
+    ``filled_qty`` in the base asset.
 
     ``client_order_id`` is untrusted: an external order's id is free text chosen by whoever placed
     it, and even our own prefix can be imitated (``origin`` says how it was classified).
@@ -164,6 +178,7 @@ class Order:
     order_type: OrderType
     status: OrderStatus
     qty: Decimal
+    qty_unit: QtyUnit
     filled_qty: Decimal
     price: Decimal | None
     avg_fill_price: Decimal | None
@@ -185,7 +200,12 @@ class Order:
 
 @dataclass(frozen=True, slots=True)
 class Page[T]:
-    """At most the requested number of items; ``has_more`` means the exchange holds further ones."""
+    """At most the requested number of items; ``has_more`` means the exchange holds further ones.
+
+    ``omitted``: items of this page left out because v1 does not support them (e.g. a dated
+    future whose symbol is not a plain perpetual/spot symbol); counted, never dropped silently.
+    """
 
     items: tuple[T, ...]
     has_more: bool
+    omitted: int = 0

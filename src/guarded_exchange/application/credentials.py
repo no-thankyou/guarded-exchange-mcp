@@ -47,6 +47,7 @@ from guarded_exchange.domain.errors import (
     InvalidParams,
     NotFound,
     PermissionDenied,
+    RateLimited,
 )
 from guarded_exchange.domain.users import Environment, User, validate_user_name
 
@@ -189,7 +190,7 @@ class _StoreCredential:
     ) -> tuple[KeyPermissions | None, KeyAssessment]:
         try:
             permissions = await self._reader.get_key_permissions(keys)
-        except ExchangeUnavailable:
+        except (ExchangeUnavailable, RateLimited):  # both: "cannot verify right now"
             # FR-49: cannot verify -> refuse, except the test environment with the admin's word.
             return None, unverifiable_key(self._scope.environment, attested=admin_attested)
         return permissions, assess_key(self._scope.exchange, permissions, self._clock.now())
@@ -420,7 +421,7 @@ class RequireTradingCredential:
     async def _fresh(self, credential: Credential) -> Credential:
         try:
             return await self._recheck(credential)
-        except ExchangeUnavailable as exc:
+        except (ExchangeUnavailable, RateLimited) as exc:  # both: "cannot verify right now"
             if credential.admin_attested and credential.permissions is None:
                 return credential  # never verifiable so far: the attestation is all there is
             raise ExchangeUnavailable(
@@ -519,7 +520,7 @@ class RecheckActiveCredentials:
                 if not fresh.read_only:
                     require_trading_allowed(fresh, self._clock.now())
             except DomainError as exc:
-                status = "failed" if isinstance(exc, ExchangeUnavailable) else "blocked"
+                status = "failed" if isinstance(exc, (ExchangeUnavailable, RateLimited)) else "blocked"
                 outcomes.append(RecheckOutcome(credential.id, credential.user_id, status, exc.code))
             else:
                 status = "read_only" if fresh.read_only else "ok"

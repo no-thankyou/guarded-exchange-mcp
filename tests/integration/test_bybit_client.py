@@ -193,14 +193,14 @@ async def test_rate_limit_ret_code_is_rate_limited_with_default_retry_after_and_
     assert err.value.untrusted_text == "Too many visits!"
 
 
-@pytest.mark.req("FR-28", "FR-35")
-@pytest.mark.parametrize(
-    ("reset_header", "expected"),
-    [("1793168782702", 2.5), ("1793168779000", 0.0), ("1793169999999", 600.0), ("soon", 1.0)],
-    ids=["future", "past", "far-future-capped", "garbage"],
-)
-async def test_rate_limit_retry_after_comes_from_the_reset_header(reset_header: str, expected: float) -> None:
-    body = {"retCode": 10006, "retMsg": "Too many visits!", "result": {}, "time": 1}
+_SERVER_MS = 1793168780202
+_FAST_LOCAL_MS = _SERVER_MS + 60_000  # the machine's clock runs a minute ahead
+
+
+def _rate_limited_client(reset_header: str, server_ms: int | None) -> BybitClient:
+    body: dict[str, Any] = {"retCode": 10006, "retMsg": "Too many visits!", "result": {}}
+    if server_ms is not None:
+        body["time"] = server_ms
     recorder = Recorder(
         httpx2.Response(200, json=body, headers={"X-Bapi-Limit-Reset-Timestamp": reset_header})
     )
@@ -210,12 +210,35 @@ async def test_rate_limit_retry_after_comes_from_the_reset_header(reset_header: 
         read_timeout_s=1,
         transport=httpx2.MockTransport(recorder),
     )
-    client = BybitClient(http, retry=RetryPolicy(max_attempts=3), now_ms=lambda: 1793168780202)
+    return BybitClient(http, retry=RetryPolicy(max_attempts=3), now_ms=lambda: _FAST_LOCAL_MS)
+
+
+@pytest.mark.req("FR-28", "FR-35")
+@pytest.mark.parametrize(
+    ("reset_header", "expected"),
+    [("1793168782702", 2.5), ("1793168779000", 1.0), ("1793169999999", 600.0), ("soon", 1.0)],
+    ids=["future", "past-floored", "far-future-capped", "garbage"],
+)
+async def test_rate_limit_retry_after_is_measured_on_the_exchange_clock(
+    reset_header: str, expected: float
+) -> None:
+    # The local clock is a minute fast: measured locally, "future" would be the floor (1 s).
+    client = _rate_limited_client(reset_header, _SERVER_MS)
 
     with pytest.raises(RateLimited) as err:
         await client.get_ticker("BTCUSDT", Category.LINEAR)
 
     assert err.value.retry_after_s == expected
+
+
+@pytest.mark.req("FR-28", "FR-35")
+async def test_without_a_server_time_the_local_clock_is_the_fallback() -> None:
+    client = _rate_limited_client(str(_FAST_LOCAL_MS + 3_000), None)
+
+    with pytest.raises(RateLimited) as err:
+        await client.get_ticker("BTCUSDT", Category.LINEAR)
+
+    assert err.value.retry_after_s == 3.0
 
 
 @pytest.mark.req("FR-28")

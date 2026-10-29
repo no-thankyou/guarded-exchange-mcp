@@ -53,6 +53,7 @@ DEMO_BASE_URL: Final = "https://api-demo.bybit.com"
 _HTTP_FORBIDDEN: Final = 403
 _HTTP_SERVER_ERROR: Final = 500
 _LIMIT_RESET_HEADER: Final = "X-Bapi-Limit-Reset-Timestamp"
+_MIN_RETRY_AFTER_S: Final = 1.0
 _MAX_RETRY_AFTER_S: Final = 600.0
 
 log = structlog.get_logger(__name__)
@@ -223,19 +224,26 @@ class BybitClient:
         if envelope.ret_code == RET_OK:
             return envelope
         error = error_for_ret_code(
-            envelope.ret_code, envelope.ret_msg, retry_after_s=self._retry_after(response)
+            envelope.ret_code, envelope.ret_msg, retry_after_s=self._retry_after(response, envelope.time_ms)
         )
         if envelope.ret_code in RETRYABLE_RET_CODES:
             raise _Retryable(error)
         raise error
 
-    def _retry_after(self, response: httpx2.Response) -> float | None:
-        """Seconds until ``X-Bapi-Limit-Reset-Timestamp`` (ms), within 0..``_MAX_RETRY_AFTER_S``."""
+    def _retry_after(self, response: httpx2.Response, server_ms: int | None) -> float | None:
+        """Seconds until ``X-Bapi-Limit-Reset-Timestamp`` (ms), within
+        ``_MIN_RETRY_AFTER_S``..``_MAX_RETRY_AFTER_S``.
+
+        Measured from the exchange's own response time (``time``), both stamps on the same clock,
+        so a skewed local clock does not shrink or stretch the wait; the local clock only if the
+        response carries no time. Never 0: an immediate retry would hit the same limit.
+        """
         raw = response.headers.get(_LIMIT_RESET_HEADER, "").strip()
         if not raw.isdigit():
             return None
-        seconds = (int(raw) - self._now_ms()) / 1000
-        return round(min(max(seconds, 0.0), _MAX_RETRY_AFTER_S), 3)
+        now_ms = server_ms if server_ms else self._now_ms()
+        seconds = (int(raw) - now_ms) / 1000
+        return round(min(max(seconds, _MIN_RETRY_AFTER_S), _MAX_RETRY_AFTER_S), 3)
 
 
 def _json_or_none(response: httpx2.Response) -> Any:

@@ -6,6 +6,8 @@ domain value objects, so every entrypoint gets the same ``InvalidParams``; the k
 one short read transaction and the exchange is called after it (D-10).
 """
 
+from dataclasses import replace
+
 from guarded_exchange.application.credentials import ReadCredential
 from guarded_exchange.application.ports import AccountReader
 from guarded_exchange.domain.account import AccountBalances, Order, Page, Position, account_items_limit
@@ -60,4 +62,4 @@ def _cut[T](page: Page[T], limit: int) -> Page[T]:
     """Never more than ``limit`` items, whatever the adapter returned."""
     if len(page.items) <= limit:
         return page
-    return Page(items=page.items[:limit], has_more=True)
+    return replace(page, items=page.items[:limit], has_more=True)

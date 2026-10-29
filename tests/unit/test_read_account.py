@@ -1,5 +1,6 @@
 """Account read use cases on fakes: the caller's own key only, clear refusals, FR-3 limits."""
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -274,13 +275,29 @@ async def test_never_more_than_limit_items_whatever_the_adapter_returns(world: W
 async def test_reads_open_only_read_transactions_and_call_the_exchange_after_them(world: World) -> None:
     user = world.user_with_key("alice", KEYS_A)
     world.db.transactions.clear()
+    world.account.db = world.db  # the fake notes every exchange call made inside a unit of work
 
     await world.balances()(user.id)
     await world.positions()(user.id, None, 20)
     await world.orders()(user.id, "spot", None, 20)
 
-    assert world.db.transactions == [False, False, False]  # D-10: no write lock for a read
+    assert len(world.account.calls) == 3
+    assert world.account.calls_in_transaction == 0  # D-10: no network I/O inside a transaction
+    assert world.db.transactions == [False, False, False]  # no write lock for a read
     assert world.db.locked_users == []
+
+
+def test_the_transaction_probe_of_the_fake_detects_a_call_inside_a_unit_of_work() -> None:
+    world = World()
+    world.account.db = world.db
+
+    async def call_inside() -> None:
+        async with world.db(write=False):
+            await world.account.get_balances(KEYS_A)
+
+    asyncio.run(call_inside())
+
+    assert world.account.calls_in_transaction == 1
 
 
 @pytest.mark.req("FR-35")

@@ -31,6 +31,7 @@ from guarded_exchange.domain.errors import (
     InvalidParams,
     NotFound,
     PermissionDenied,
+    RateLimited,
 )
 from guarded_exchange.domain.policy import Permission, PolicyPatch, Profile
 from guarded_exchange.domain.users import Environment, UserStatus
@@ -357,9 +358,14 @@ async def test_permissions_back_inside_the_allowlist_unblock_trading_after_a_rec
 
 
 @pytest.mark.req("FR-49", "NFR-1")
-async def test_a_stale_key_that_cannot_be_rechecked_blocks_trading(world: World) -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [ExchangeUnavailable("timeout"), RateLimited("the exchange rate limit was hit", retry_after_s=1.0)],
+    ids=["unavailable", "rate_limited"],
+)
+async def test_a_stale_key_that_cannot_be_rechecked_blocks_trading(world: World, failure: Exception) -> None:
     await world.add()("local", KEYS)
-    world.reader.fail_with = ExchangeUnavailable("timeout")
+    world.reader.fail_with = failure
     world.clock.advance(timedelta(hours=2))
 
     with pytest.raises(ExchangeUnavailable, match="could not be re-checked"):
@@ -406,6 +412,30 @@ async def test_recheck_of_all_active_keys_reports_each_outcome(world: World) -> 
     world.reader.fail_with = None
     world.reader.permissions = READ_ONLY
     assert {o.status for o in await recheck_all()} == {"read_only"}
+
+
+@pytest.mark.req("FR-49", "FR-35")
+async def test_an_exchange_rate_limit_while_adding_means_cannot_verify_now_not_rejected(world: World) -> None:
+    world.reader.fail_with = RateLimited("the exchange rate limit was hit", retry_after_s=1.0)
+
+    with pytest.raises(ExchangeCredentialsInvalid, match="cannot be checked") as err:
+        await world.add()("local", KEYS)
+
+    assert err.value.details["reason"] == "permissions_unverifiable"  # "try again later"
+    assert world.db.state.credentials == {}
+    stored = await world.add()("local", KEYS, admin_attested=True)  # the test-environment branch
+    assert stored.credential.admin_attested
+
+
+@pytest.mark.req("FR-49", "FR-35")
+async def test_an_exchange_rate_limit_during_the_recheck_is_failed_not_blocked(world: World) -> None:
+    await world.add()("local", KEYS)
+    recheck_all = RecheckActiveCredentials(world.db, world.recheck(), world.clock, **world.scope())  # type: ignore[arg-type]
+    world.reader.fail_with = RateLimited("the exchange rate limit was hit", retry_after_s=1.0)
+
+    [outcome] = await recheck_all()
+
+    assert (outcome.status, outcome.reason) == ("failed", "rate_limited")
 
 
 @pytest.mark.req("FR-31")

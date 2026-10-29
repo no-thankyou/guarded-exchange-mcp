@@ -23,11 +23,13 @@ from guarded_exchange.domain.account import (
     Page,
     Position,
     PositionSide,
+    QtyUnit,
     TimeInForce,
     UntrustedText,
 )
 from guarded_exchange.domain.credentials import KeyPermissions
 from guarded_exchange.domain.errors import (
+    ExchangeRejected,
     ExchangeUnavailable,
     InvalidParams,
     NotFound,
@@ -544,7 +546,14 @@ def balances_from_result(result: dict[str, Any], *, time_ms: int | None) -> Acco
     if observed_at is None:
         raise unavailable("wallet-balance without a server timestamp")
     if not all(_COIN_RE.fullmatch(c.coin) for c in account.coins):
-        raise unavailable("unexpected coin code in wallet-balance")  # coin codes are shown as plain text
+        # Coin codes are shown as plain text, so an unexpected one is not passed on (FR-41). The
+        # code is not quoted here either. Retrying returns the same holding: not "unavailable".
+        raise ExchangeRejected(
+            "the account holds an asset whose code this server cannot display",
+            next_step="Do not retry. Tell the user the balances could not be shown and to check them "
+            "on the exchange.",
+            details={"reason": "unsupported_coin_code"},
+        )
     try:
         return AccountBalances(
             total_equity_usd=_dec(account.total_equity),
@@ -608,13 +617,25 @@ def positions_from_result(result: dict[str, Any], *, symbol: str | None, limit: 
         raise unavailable("unexpected position/list format")
     if any(p.position_idx != _ONE_WAY for p in parsed.items):
         raise UnsupportedPositionMode()
-    if any(not _SYMBOL_RE.fullmatch(p.symbol) or (symbol and p.symbol != symbol) for p in parsed.items):
-        raise unavailable("unexpected symbol in position/list")
+    if symbol and any(p.symbol != symbol for p in parsed.items):
+        raise unavailable("position/list returned another symbol")
     try:
-        positions = tuple(_position(p) for p in parsed.items if p.side and _required_dec(p.size) != 0)
+        open_rows = [p for p in parsed.items if p.side and _required_dec(p.size) != 0]
+        supported, omitted = _split_supported(open_rows)
+        positions = tuple(_position(p) for p in supported)
     except (InvalidOperation, ValueError) as exc:
         raise unavailable("inconsistent position/list") from exc
-    return Page(items=positions[:limit], has_more=len(parsed.items) > limit)
+    return Page(items=positions[:limit], has_more=len(parsed.items) > limit, omitted=omitted)
+
+
+def _split_supported[R: (_PositionDTO, _OrderDTO)](rows: list[R]) -> tuple[list[R], int]:
+    """Rows whose symbol v1 can represent, and how many others were left out.
+
+    A symbol outside ``^[A-Z0-9]{2,30}$`` (e.g. a dated future ``BTCUSDT-26DEC25``) is out of scope
+    for v1 and its text is not shown to the agent (FR-41); it is counted instead of dropped silently.
+    """
+    supported = [row for row in rows if _SYMBOL_RE.fullmatch(row.symbol)]
+    return supported, len(rows) - len(supported)
 
 
 def _position(item: _PositionDTO) -> Position:
@@ -665,6 +686,7 @@ class _OrderDTO(BaseModel):
     take_profit: str = Field(default="", alias="takeProfit")
     stop_loss: str = Field(default="", alias="stopLoss")
     position_idx: int = Field(default=_ONE_WAY, alias="positionIdx")
+    market_unit: str = Field(default="", alias="marketUnit")
     created_time: str = Field(alias="createdTime")
     updated_time: str = Field(default="", alias="updatedTime")
 
@@ -716,18 +738,19 @@ def open_orders_from_result(
         raise unavailable("unexpected order/realtime format")
     if category is Category.LINEAR and any(o.position_idx != _ONE_WAY for o in parsed.items):
         raise UnsupportedPositionMode()
-    for item in parsed.items:
-        if not (_SYMBOL_RE.fullmatch(item.symbol) and _ORDER_ID_RE.fullmatch(item.order_id)):
-            raise unavailable("unexpected symbol or order id in order/realtime")
-        if symbol and item.symbol != symbol:
-            raise unavailable("order/realtime returned another symbol")
+    if symbol and any(o.symbol != symbol for o in parsed.items):
+        raise unavailable("order/realtime returned another symbol")
+    supported, omitted = _split_supported(parsed.items)
+    if not all(_ORDER_ID_RE.fullmatch(o.order_id) for o in supported):
+        raise unavailable("unexpected order id in order/realtime")  # assigned by the exchange
     try:
-        orders = tuple(_order(o, category) for o in parsed.items)
+        orders = tuple(_order(o, category) for o in supported)
     except (InvalidOperation, ValueError) as exc:
         raise unavailable("inconsistent order/realtime") from exc
+    rows = len(parsed.items)
     # A request at the exchange's maximum has no spare row: a full page with a cursor may continue.
-    full_last_page = limit >= OPEN_ORDERS_PAGE_MAX and len(orders) >= limit and bool(parsed.next_page_cursor)
-    return Page(items=orders[:limit], has_more=len(orders) > limit or full_last_page)
+    full_last_page = limit >= OPEN_ORDERS_PAGE_MAX and rows >= limit and bool(parsed.next_page_cursor)
+    return Page(items=orders[:limit], has_more=rows > limit or full_last_page, omitted=omitted)
 
 
 def _order(item: _OrderDTO, category: Category) -> Order:
@@ -736,7 +759,7 @@ def _order(item: _OrderDTO, category: Category) -> Order:
     if side is None or created_at is None:
         raise ValueError("order without a known side or creation time")
     stop_type = item.stop_order_type.strip()
-    link_id = item.order_link_id.strip()
+    link_id = item.order_link_id.strip()  # for display only; the origin is judged on the raw id
     conditional = (
         None if stop_type in _NOT_CONDITIONAL else _CONDITIONAL.get(stop_type, ConditionalKind.OTHER)
     )
@@ -748,6 +771,7 @@ def _order(item: _OrderDTO, category: Category) -> Order:
         order_type=_ORDER_TYPES.get(item.order_type, OrderType.UNKNOWN),
         status=_ORDER_STATUSES.get(item.order_status, OrderStatus.UNKNOWN),
         qty=_required_dec(item.qty),
+        qty_unit=_qty_unit(item, category),
         filled_qty=_dec(item.cum_exec_qty) or Decimal(0),
         price=_positive_or_none(item.price),
         avg_fill_price=_positive_or_none(item.avg_price),
@@ -759,9 +783,21 @@ def _order(item: _OrderDTO, category: Category) -> Order:
         stop_loss=_positive_or_none(item.stop_loss),
         created_at=created_at,
         updated_at=_ts(_int(item.updated_time)),
-        origin=order_origin(link_id),
+        origin=order_origin(item.order_link_id),
         client_order_id=UntrustedText(link_id[:_MAX_CLIENT_ORDER_ID]) if link_id else None,
     )
+
+
+_MARKET_UNITS: Final = {"baseCoin": QtyUnit.BASE, "quoteCoin": QtyUnit.QUOTE}
+
+
+def _qty_unit(item: _OrderDTO, category: Category) -> QtyUnit:
+    """Linear quantities and spot limit orders are in the base asset. A spot market order says its
+    unit in ``marketUnit`` (a market buy defaults to the quote coin when placed); anything else -
+    empty or a value we do not know - is ``UNKNOWN``, never assumed to be base."""
+    if category is Category.LINEAR or item.order_type == "Limit":
+        return QtyUnit.BASE
+    return _MARKET_UNITS.get(item.market_unit.strip(), QtyUnit.UNKNOWN)
 
 
 def order_origin(order_link_id: str) -> OrderOrigin:

@@ -20,6 +20,7 @@ from guarded_exchange.domain.account import (
     Page,
     Position,
     PositionSide,
+    QtyUnit,
     TimeInForce,
     UntrustedText,
 )
@@ -233,6 +234,7 @@ def make_order(
         order_type=OrderType.LIMIT,
         status=OrderStatus.NEW,
         qty=Decimal("0.001"),
+        qty_unit=QtyUnit.BASE,
         filled_qty=Decimal(0),
         price=Decimal("68797.6"),
         avg_fill_price=None,
@@ -251,13 +253,19 @@ def make_order(
 
 @dataclass
 class FakeAccount:
-    """``AccountReader`` returning configured pages; ``calls`` records ``(method, keys, *args)``."""
+    """``AccountReader`` returning configured pages; ``calls`` records ``(method, keys, *args)``.
+
+    With ``db`` set, ``calls_in_transaction`` counts calls made while a unit of work of that
+    database was open: talking to the exchange inside a transaction breaks D-10.
+    """
 
     balances: AccountBalances = field(default_factory=make_balances)
     positions: tuple[Position, ...] = ()
     orders: dict[Category, tuple[Order, ...]] = field(default_factory=dict)
     fail_with: Exception | None = None
     calls: list[tuple[object, ...]] = field(default_factory=list)
+    db: "InMemoryDatabase | None" = None
+    calls_in_transaction: int = 0
 
     async def get_balances(self, keys: ApiKeyPair) -> AccountBalances:
         self.calls.append(("get_balances", keys))
@@ -279,6 +287,8 @@ class FakeAccount:
         return Page(items=found, has_more=False)
 
     def _maybe_fail(self) -> None:
+        if self.db is not None and self.db.open_transactions:
+            self.calls_in_transaction += 1
         if self.fail_with is not None:
             raise self.fail_with
 
@@ -582,12 +592,17 @@ class InMemoryDatabase:
         self.state = _State()
         self.transactions: list[bool] = []  # write flag of every unit of work opened
         self.locked_users: list[str] = []  # every lock_user call, in order
+        self.open_transactions = 0  # > 0 while a unit of work is open (D-10: no network I/O then)
 
     @asynccontextmanager
     async def __call__(self, *, write: bool) -> AsyncIterator[InMemoryUnitOfWork]:
         self.transactions.append(write)
         working = self.state.copy()
-        yield InMemoryUnitOfWork(working, write=write, locks=self.locked_users)
+        self.open_transactions += 1
+        try:
+            yield InMemoryUnitOfWork(working, write=write, locks=self.locked_users)
+        finally:
+            self.open_transactions -= 1
         if write:
             self.state = working
 
