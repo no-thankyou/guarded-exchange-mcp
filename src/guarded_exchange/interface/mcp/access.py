@@ -29,6 +29,9 @@ TOOL_PERMISSIONS: Final[Mapping[str, Permission]] = {
     "get_candles": Permission.READ,
     "get_instrument_rules": Permission.READ,
     "get_my_policy": Permission.READ,
+    "get_balances": Permission.READ,
+    "get_positions": Permission.READ,
+    "get_open_orders": Permission.READ,
 }
 """What every registered tool needs. A tool missing here is hidden and refused (fail closed)."""
 

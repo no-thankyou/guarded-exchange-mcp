@@ -34,7 +34,9 @@ from guarded_exchange.domain.credentials import (
     assess_key,
     disallowed_permissions,
     key_replaced_or_deleted,
+    no_key,
     permissions_to_payload,
+    require_reading_allowed,
     require_trading_allowed,
     unverifiable_key,
 )
@@ -45,6 +47,7 @@ from guarded_exchange.domain.errors import (
     InvalidParams,
     NotFound,
     PermissionDenied,
+    RateLimited,
 )
 from guarded_exchange.domain.users import Environment, User, validate_user_name
 
@@ -187,7 +190,7 @@ class _StoreCredential:
     ) -> tuple[KeyPermissions | None, KeyAssessment]:
         try:
             permissions = await self._reader.get_key_permissions(keys)
-        except ExchangeUnavailable:
+        except (ExchangeUnavailable, RateLimited):  # both: "cannot verify right now"
             # FR-49: cannot verify -> refuse, except the test environment with the admin's word.
             return None, unverifiable_key(self._scope.environment, attested=admin_attested)
         return permissions, assess_key(self._scope.exchange, permissions, self._clock.now())
@@ -409,11 +412,7 @@ class RequireTradingCredential:
                 user_id, self._scope.exchange, self._scope.environment
             )
         if credential is None:
-            raise ExchangeCredentialsInvalid(
-                "no exchange key is configured for this user",
-                next_step="Tell the user to add a key with `guarded-exchange keys add`, outside the chat.",
-                details={"reason": "no_key"},
-            )
+            raise no_key()
         if credential.needs_recheck(self._clock.now()):
             credential = await self._fresh(credential)
         require_trading_allowed(credential, self._clock.now())
@@ -422,15 +421,76 @@ class RequireTradingCredential:
     async def _fresh(self, credential: Credential) -> Credential:
         try:
             return await self._recheck(credential)
-        except ExchangeUnavailable as exc:
+        except (ExchangeUnavailable, RateLimited) as exc:  # both: "cannot verify right now"
             if credential.admin_attested and credential.permissions is None:
                 return credential  # never verifiable so far: the attestation is all there is
-            raise ExchangeUnavailable(
+            message = (
                 "the exchange key's permissions could not be re-checked; state-changing actions are "
-                "blocked until they are",
+                "blocked until they are"
+            )
+            details = {"reason": "permissions_recheck_failed"}
+            if isinstance(exc, RateLimited):  # fail closed too, but the exchange is not down
+                raise RateLimited(
+                    message,
+                    next_step="Wait retry_after_s seconds, then try again; do not retry in a tight loop.",
+                    retry_after_s=exc.retry_after_s,
+                    details=details,
+                ) from exc
+            raise ExchangeUnavailable(
+                message,
                 next_step="Retry in a minute; if it keeps failing, tell the user the exchange is down.",
-                details={"reason": "permissions_recheck_failed"},
+                details=details,
             ) from exc
+
+
+class ReadCredential:
+    """The calling user's active key, decrypted for a signed account read (FR-2).
+
+    Only ``user_id`` selects the key, so a user can never read with someone else's key (FR-33); the
+    principal must exist, be active and belong to this server's environment. No permission re-check
+    (D-24 is for state-changing actions); an expired, deleted or replaced key is refused with a
+    reason the agent can relay. Database work only, in one read transaction; the caller talks to
+    the exchange afterwards (D-10).
+    """
+
+    def __init__(
+        self,
+        uow: UnitOfWorkFactory,
+        cipher: CredentialCipher,
+        clock: Clock,
+        *,
+        exchange: str,
+        environment: Environment,
+    ) -> None:
+        self._uow = uow
+        self._cipher = cipher
+        self._clock = clock
+        self._scope = _Scope(exchange, environment)
+
+    async def __call__(self, user_id: str | None) -> ApiKeyPair:
+        async with self._uow(write=False) as uow:
+            user = None if user_id is None else await uow.users.get(user_id)
+            if user is None or not user.is_active:
+                # Same answer for "nobody", "unknown" and "revoked" (FR-33), as AuthorizeAccess gives.
+                raise PermissionDenied(
+                    "access denied for this caller",
+                    next_step="Do not retry. Tell the user to check the server's access configuration.",
+                )
+            if user.environment is not self._scope.environment:
+                raise PermissionDenied(
+                    f"your account is on {user.environment.value}, but this server is connected to the "
+                    f"{self._scope.environment.value} exchange environment",
+                    next_step="Do not retry. Tell the user; the admin runs a server for their environment.",
+                    details={"reason": "environment_mismatch"},
+                )
+            credential = await uow.credentials.get_active(user.id, self._scope.exchange, user.environment)
+            if credential is None:
+                raise no_key()
+            require_reading_allowed(credential, self._clock.now())
+            sealed = await uow.credentials.get_sealed_active(credential.id)
+        if sealed is None:
+            raise key_replaced_or_deleted()
+        return self._cipher.open(sealed, credential.binding)
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,7 +531,7 @@ class RecheckActiveCredentials:
                 if not fresh.read_only:
                     require_trading_allowed(fresh, self._clock.now())
             except DomainError as exc:
-                status = "failed" if isinstance(exc, ExchangeUnavailable) else "blocked"
+                status = "failed" if isinstance(exc, (ExchangeUnavailable, RateLimited)) else "blocked"
                 outcomes.append(RecheckOutcome(credential.id, credential.user_id, status, exc.code))
             else:
                 status = "read_only" if fresh.read_only else "ok"

@@ -18,4 +18,4 @@
 - [ ] E2E: история возвращается компактно, с `untrusted_text` для свободных полей.
 
 ## Заметки
-—
+- Из 008: доменный `Order` (`domain/account.py`) и маппинг `order/realtime` (`mapper._order`, `order_origin`, `UntrustedText` для `orderLinkId`) — переиспользовать для `order/history` (там нужны терминальные статусы: расширить `OrderStatus`, сейчас всё неоткрытое → `unknown`). Ключ — `ReadCredential(user_id)`, порт — `AccountReader`. Ограничение объёма — `account_items_limit` + `limit + 1` → `has_more`; курсор не реализован (см. предложения 008).

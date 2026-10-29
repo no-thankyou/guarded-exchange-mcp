@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Protocol
 
 from guarded_exchange.domain.access_tokens import AccessToken
+from guarded_exchange.domain.account import AccountBalances, Order, Page, Position
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord
 from guarded_exchange.domain.credentials import (
     ApiKeyPair,
@@ -61,6 +62,36 @@ class ExchangeClient(Protocol):
         Raises the same exceptions as ``get_ticker``; an instrument the adapter cannot
         represent in the domain (e.g. a dated future in ``linear``) raises ``InvalidParams``.
         """
+        ...
+
+
+class AccountReader(Protocol):
+    """Signed reads of one exchange account, authenticated with the user's key (FR-2).
+
+    Every method raises:
+        ExchangeCredentialsInvalid: the exchange does not accept the key.
+        RateLimited: the exchange's rate limit refused the request (``retry_after_s`` set).
+        ExchangeUnavailable: network, timeout, 5xx or an unexpected response.
+        ExchangeRejected / InvalidParams: any other refusal by the exchange.
+    """
+
+    async def get_balances(self, keys: ApiKeyPair) -> AccountBalances:
+        """Balances of the trading account (unified account)."""
+        ...
+
+    async def get_positions(self, keys: ApiKeyPair, *, symbol: str | None, limit: int) -> Page[Position]:
+        """Open USDT perpetual positions (size > 0), at most ``limit``; all USDT ones if no ``symbol``.
+
+        Raises ``UnsupportedPositionMode`` if a returned position is in hedge mode (D-26).
+        """
+        ...
+
+    async def get_open_orders(
+        self, keys: ApiKeyPair, category: Category, *, symbol: str | None, limit: int
+    ) -> Page[Order]:
+        """Open orders (plain and conditional), newest first, at most ``limit``; for ``linear``
+        without ``symbol`` all USDT perpetual ones. ``origin`` is set by the adapter, which owns the
+        client order id format (D-26). Raises ``UnsupportedPositionMode`` for hedge-mode orders."""
         ...
 
 

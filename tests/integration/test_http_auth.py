@@ -46,7 +46,7 @@ from guarded_exchange.interface.mcp.http import (
 )
 from guarded_exchange.interface.mcp.server import create_server
 from tests.e2e.support import use_cases
-from tests.fakes import FakeExchange, InMemoryDatabase, make_ticker
+from tests.fakes import FakeCipher, FakeExchange, InMemoryDatabase, make_ticker
 from tests.integration.conftest import BUSY_TIMEOUT_MS, make_settings
 
 BASE = "http://127.0.0.1:8000"
@@ -661,7 +661,9 @@ def test_serve_http_wires_storage_tokens_and_transport_security(
 
 def test_app_server_needs_exactly_one_principal_source(tmp_path: Path) -> None:
     async def build(**kwargs: Any) -> None:
-        async with bootstrap.app_server(make_settings(tmp_path), uow=InMemoryDatabase(), **kwargs):
+        async with bootstrap.app_server(
+            make_settings(tmp_path), uow=InMemoryDatabase(), cipher=FakeCipher(), **kwargs
+        ):
             pass  # pragma: no cover - never reached
 
     with pytest.raises(ValueError, match="exactly one"):
