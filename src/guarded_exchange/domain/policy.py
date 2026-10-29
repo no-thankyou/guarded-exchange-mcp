@@ -254,7 +254,7 @@ def parse_policy_fields(names: Iterable[str]) -> frozenset[str]:
     if unknown:
         raise InvalidParams(
             f"unknown policy settings: {', '.join(unknown)}; known: {', '.join(_RULES)}",
-            details={"field": "field"},
+            details={"field": "fields"},
         )
     return frozenset(wanted)
 

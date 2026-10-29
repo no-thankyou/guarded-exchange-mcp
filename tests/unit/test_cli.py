@@ -401,6 +401,19 @@ def test_reset_overrides_shows_what_it_removes_and_asks_first() -> None:
 
 
 @pytest.mark.req("FR-12")
+def test_reset_overrides_after_the_question_resets_only_the_listed_settings() -> None:
+    spy = PolicySpy(own=OWN)
+
+    result = runner.invoke(
+        _policy_app(spy), ["admin", "policy", "reset-overrides", "--user", "bob"], input="y\n"
+    )
+
+    assert result.exit_code == 0, result.output
+    # not None ("all"): a setting the user tightens while the question is open is not removed unseen
+    assert spy.resets == [("bob", frozenset({"profile", "max_leverage"}))]
+
+
+@pytest.mark.req("FR-12")
 def test_reset_overrides_without_yes_and_without_a_terminal_refuses() -> None:
     spy = PolicySpy(own=OWN)
 

@@ -595,6 +595,8 @@ def _admin_policy_cli(policy: PolicyCommands) -> typer.Typer:
         if not yes:
             typer.echo(render_settings_to_reset(user, own, to_reset))
             _confirm_or_exit(f"Reset these settings of {user} to the admin ceiling?")
+            # Reset only what the admin saw: a setting tightened while the question was open stays.
+            fields = frozenset(to_reset)
         typer.echo(render_overrides_reset(policy.reset_overrides(env_file, user, fields)))
 
     return app

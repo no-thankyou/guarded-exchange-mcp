@@ -289,6 +289,7 @@ async def test_reset_of_all_overrides_makes_the_effective_policy_the_ceiling(
     db: InMemoryDatabase, clock: FakeClock
 ) -> None:
     user = await _tightened_trader(db, clock)
+    ceiling_before = db.state.policies[user.id].ceiling
 
     result = await ResetOverrides(_uow(db), clock)("alice")
 
@@ -298,7 +299,7 @@ async def test_reset_of_all_overrides_makes_the_effective_policy_the_ceiling(
     assert result.view.effective.profile is Profile.TRADE  # trading is back
     record = db.state.policies[user.id]
     assert record.overrides == NO_OVERRIDES
-    assert record.ceiling == result.view.ceiling  # the admin's ceiling itself is untouched
+    assert record.ceiling == ceiling_before  # the admin's ceiling itself is untouched
     assert record.updated_at == clock.now()
     assert db.transactions[-1] is True
     assert db.locked_users[-1] == user.id
