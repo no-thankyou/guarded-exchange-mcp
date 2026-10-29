@@ -1,11 +1,12 @@
-"""Policy use cases: read it, let the admin set the ceiling, let the user tighten it, and decide
-what a principal may call (SPEC FR-11, FR-12, FR-36, FR-44; PLAN D-23, ADR-012).
+"""Policy use cases: read it, let the admin set the ceiling or reset the user's own settings, let
+the user tighten it, and decide what a principal may call (SPEC FR-11, FR-12, FR-36, FR-44; PLAN
+D-23, ADR-012).
 
 ``AuthorizeAccess`` is the single place where the profile is checked (FR-11): the MCP layer asks
 it which tools to list and whether a call may proceed; it never decides by itself.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -23,12 +24,14 @@ from guarded_exchange.domain.policy import (
     UserOverrides,
     apply_patch,
     default_ceiling,
+    parse_policy_fields,
     patch_to_payload,
     permitted,
     require_permission,
     settings_to_payload,
     strictest,
     validate_override,
+    without_fields,
 )
 from guarded_exchange.domain.users import User, validate_user_name
 
@@ -210,3 +213,63 @@ class TightenPolicy:
                 now,
             )
             return after
+
+
+@dataclass(frozen=True, slots=True)
+class OverridesReset:
+    """What ``ResetOverrides`` did: the policy afterwards and the user settings it removed."""
+
+    view: PolicyView
+    reset_fields: tuple[str, ...]  # policy field order; empty: there was nothing to reset
+
+
+class ResetOverrides:
+    """Admin removes a user's own settings (CLI only, FR-12, FR-44): all of them or the named
+    fields, which then follow the ceiling again. With nothing to remove it is a no-op that writes
+    nothing to the journal.
+
+    The way back from ``policy tighten``, which the user cannot undo. It may make the effective
+    policy looser, but never looser than the ceiling the admin set.
+    """
+
+    def __init__(self, uow: UnitOfWorkFactory, clock: Clock) -> None:
+        self._uow = uow
+        self._clock = clock
+
+    async def __call__(self, user_name: str, fields: Iterable[str] | None = None) -> OverridesReset:
+        """``fields=None``: every user setting; else only these (unknown names raise ``InvalidParams``)."""
+        wanted = None if fields is None else parse_policy_fields(fields)
+        if wanted is not None and not wanted:
+            raise InvalidParams("no settings named; omit the field list to reset all of them")
+        async with self._uow(write=True) as uow:
+            user = await _user_by_name(uow, user_name)
+            await uow.lock_user(user.id)
+            before = await _view(uow, user)
+            own = patch_to_payload(before.overrides)
+            reset = tuple(name for name in own if wanted is None or name in wanted)
+            if not reset:
+                return OverridesReset(view=before, reset_fields=())
+            now = self._clock.now()
+            stored_ceiling = None if before.ceiling_is_default else before.ceiling
+            overrides = without_fields(before.overrides, frozenset(reset))
+            await uow.policies.save(
+                user.id, PolicyRecord(ceiling=stored_ceiling, overrides=overrides, updated_at=now)
+            )
+            after = await _view(uow, user)
+            effective_before = settings_to_payload(before.effective)
+            effective_after = settings_to_payload(after.effective)
+            await uow.audit.append(
+                user.id,
+                AuditEvent(
+                    AuditEventType.POLICY_OVERRIDES_RESET,
+                    ADMIN_ACTOR,
+                    {
+                        "fields": list(reset),
+                        "removed": {name: own[name] for name in reset},
+                        "effective_before": {name: effective_before[name] for name in reset},
+                        "effective_after": {name: effective_after[name] for name in reset},
+                    },
+                ),
+                now,
+            )
+            return OverridesReset(view=after, reset_fields=reset)

@@ -10,7 +10,7 @@ import typer
 
 from guarded_exchange.application.admin import IssuedToken, RevokedToken
 from guarded_exchange.application.credentials import StoredCredential
-from guarded_exchange.application.policy import PolicyView
+from guarded_exchange.application.policy import OverridesReset, PolicyView
 from guarded_exchange.domain.actions import ALL_ACTION_KINDS
 from guarded_exchange.domain.audit import canonical_decimal, canonical_time
 from guarded_exchange.domain.credentials import WARNING_NO_IP_WHITELIST, ApiKeyPair, Credential
@@ -24,6 +24,7 @@ from guarded_exchange.domain.policy import (
     parse_action_kinds,
     parse_decimal,
     parse_instrument_ref,
+    parse_policy_fields,
     patch_to_payload,
     settings_to_payload,
 )
@@ -57,6 +58,7 @@ class PolicyCommands:
     show: Callable[[Path | None, str | None], PolicyView]
     tighten: Callable[[Path | None, PolicyPatch], PolicyView]
     set_ceiling: Callable[[Path | None, str | None, PolicyPatch], PolicyView]
+    reset_overrides: Callable[[Path | None, str, frozenset[str] | None], OverridesReset]
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,4 +571,55 @@ def _admin_policy_cli(policy: PolicyCommands) -> typer.Typer:
         )
         typer.echo(render_policy(policy.set_ceiling(env_file, user, _patch(options))))
 
+    @app.command("reset-overrides")
+    def reset_overrides_command(
+        *,
+        user: Annotated[str, typer.Option(help="User whose own settings to remove.")],
+        field: Annotated[
+            list[str] | None,
+            typer.Option("--field", help="Only this setting (repeat), e.g. profile; default: all of them."),
+        ] = None,
+        yes: YesOpt = False,
+        env_file: EnvFileOpt = None,
+    ) -> None:
+        """Remove a user's own settings (from `policy tighten`): those fields follow the ceiling again."""
+        try:
+            fields = parse_policy_fields(field) if field else None
+        except InvalidParams as exc:
+            raise typer.BadParameter(exc.message, param_hint="--field") from exc
+        own = patch_to_payload(policy.show(env_file, user).overrides)
+        to_reset = [name for name in own if fields is None or name in fields]
+        if not to_reset:
+            typer.echo(f"user {user} has no own settings to reset; nothing changed")
+            return
+        if not yes:
+            typer.echo(render_settings_to_reset(user, own, to_reset))
+            _confirm_or_exit(f"Reset these settings of {user} to the admin ceiling?")
+            # Reset only what the admin saw: a setting tightened while the question was open stays.
+            fields = frozenset(to_reset)
+        typer.echo(render_overrides_reset(policy.reset_overrides(env_file, user, fields)))
+
     return app
+
+
+def render_settings_to_reset(user: str, own: Mapping[str, object], names: Sequence[str]) -> str:
+    lines = [f"user setting of {user} to remove: {name} = {_cell(own[name])}" for name in names]
+    return "\n".join(lines)
+
+
+def render_overrides_reset(result: OverridesReset) -> str:
+    if not result.reset_fields:
+        return f"user {result.view.user.name} has no own settings to reset; nothing changed"
+    names = ", ".join(result.reset_fields)
+    return "\n".join([f"reset to the ceiling: {names}", "", render_policy(result.view)])
+
+
+def _confirm_or_exit(question: str) -> None:
+    """Ask; no answer (no terminal, end of input) or 'no' changes nothing and exits with code 1."""
+    try:
+        confirmed = typer.confirm(question, default=False)
+    except typer.Abort:
+        confirmed = False
+    if not confirmed:
+        typer.echo("not confirmed: nothing changed (pass --yes to skip the question)", err=True)
+        raise typer.Exit(1)
