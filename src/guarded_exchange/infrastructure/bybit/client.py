@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import json
 import random
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -19,15 +20,18 @@ from urllib.parse import urlencode
 import httpx2
 import structlog
 
-from guarded_exchange.domain.account import AccountBalances, Order, Page, Position
+from guarded_exchange.domain.account import AccountBalances, Order, Page, Position, SymbolPosition
 from guarded_exchange.domain.credentials import ApiKeyPair, KeyPermissions
-from guarded_exchange.domain.errors import DomainError
+from guarded_exchange.domain.errors import DomainError, ExchangeUnavailable, NotFound
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
+from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
 from guarded_exchange.infrastructure.bybit.errors import (
     RET_OK,
     RETRYABLE_RET_CODES,
+    error_for_create,
     error_for_ret_code,
+    outcome_unknown,
     unavailable,
 )
 from guarded_exchange.infrastructure.bybit.mapper import (
@@ -38,12 +42,18 @@ from guarded_exchange.infrastructure.bybit.mapper import (
     Envelope,
     balances_from_result,
     candles_from_result,
+    client_order_id_for,
     key_permissions_from_result,
     open_orders_from_result,
+    order_create_body,
+    order_fill_from_result,
     orderbook_from_result,
     parse_envelope,
+    placed_order_from_result,
     positions_from_result,
+    price_band_from_result,
     rules_from_result,
+    symbol_position_from_result,
     ticker_from_result,
 )
 from guarded_exchange.infrastructure.bybit.signing import signed_headers
@@ -55,6 +65,16 @@ _HTTP_SERVER_ERROR: Final = 500
 _LIMIT_RESET_HEADER: Final = "X-Bapi-Limit-Reset-Timestamp"
 _MIN_RETRY_AFTER_S: Final = 1.0
 _MAX_RETRY_AFTER_S: Final = 600.0
+_DELIVERING: Final = "Delivering"
+_NOT_SENT: Final = (
+    httpx2.ConnectError,
+    httpx2.ConnectTimeout,
+    httpx2.PoolTimeout,
+    httpx2.ProxyError,
+    httpx2.UnsupportedProtocol,
+    httpx2.InvalidURL,
+)
+"""Failures before the request can have reached the exchange: definitely not sent."""
 
 log = structlog.get_logger(__name__)
 
@@ -88,8 +108,8 @@ class _Retryable(Exception):
 
 
 class BybitClient:
-    """Public market data and signed private reads (``query-api``, account balances, positions,
-    open orders); trading arrives in later tickets.
+    """Public market data, signed private reads (``query-api``, account balances, positions, open
+    orders) and placing orders (``TradingExchange``); amend, cancel and position actions arrive later.
 
     Signed requests: the query string is built here once and both signed and sent verbatim, so
     the signature always covers exactly what goes on the wire. Signed headers and response bodies
@@ -165,11 +185,86 @@ class BybitClient:
         envelope = await self._get("/v5/market/kline", params)
         return candles_from_result(envelope.result, symbol=symbol, category=category, interval=interval)
 
-    async def get_instrument_rules(self, symbol: str, category: Category) -> InstrumentRules:
-        envelope = await self._get(
-            "/v5/market/instruments-info", {"category": category.value, "symbol": symbol}
-        )
+    async def get_instrument_rules(
+        self, symbol: str, category: Category, *, any_status: bool = False
+    ) -> InstrumentRules:
+        """Without ``status`` Bybit lists only ``Trading`` and ``PendingOpen`` instruments (docs, checked
+        2026-10-29). ``any_status`` asks once more with ``status=Delivering`` for a linear instrument
+        being delisted, so a position on it can still be reduced (ticket 011)."""
+        params = {"category": category.value, "symbol": symbol}
+        try:
+            envelope = await self._get("/v5/market/instruments-info", params)
+            return rules_from_result(envelope.result, symbol=symbol, category=category)
+        except NotFound:
+            if not any_status or category is not Category.LINEAR:
+                raise
+        envelope = await self._get("/v5/market/instruments-info", {**params, "status": _DELIVERING})
         return rules_from_result(envelope.result, symbol=symbol, category=category)
+
+    # --- trading (ticket 011): ``TradingExchange`` port -------------------------------------
+
+    def client_order_id(self, action_id: str) -> str:
+        return client_order_id_for(action_id)
+
+    async def get_price_band(self, symbol: str, category: Category) -> PriceBand:
+        """``GET /v5/market/price-limit``: the corridor Bybit moves (perp) or rejects (spot) prices to."""
+        envelope = await self._get("/v5/market/price-limit", {"category": category.value, "symbol": symbol})
+        return price_band_from_result(envelope.result, symbol=symbol)
+
+    async def get_symbol_position(self, keys: ApiKeyPair, symbol: str) -> SymbolPosition:
+        params = {"category": Category.LINEAR.value, "symbol": symbol}
+        envelope = await self._get("/v5/position/list", params, keys=keys)
+        return symbol_position_from_result(envelope.result, symbol=symbol)
+
+    async def place_order(self, keys: ApiKeyPair, order: OrderRequest) -> PlacedOrder:
+        """``POST /v5/order/create``, once: never retried (ADR-002, FR-27)."""
+        envelope = await self._post("/v5/order/create", order_create_body(order), keys=keys)
+        return placed_order_from_result(envelope.result, client_order_id=order.client_order_id)
+
+    async def get_order(
+        self, keys: ApiKeyPair, category: Category, symbol: str, client_order_id: str
+    ) -> OrderFill | None:
+        params = {"category": category.value, "symbol": symbol, "orderLinkId": client_order_id}
+        envelope = await self._get("/v5/order/realtime", params, keys=keys)
+        return order_fill_from_result(envelope.result, symbol=symbol, client_order_id=client_order_id)
+
+    async def _post(self, path: str, body: Mapping[str, object], *, keys: ApiKeyPair) -> Envelope:
+        """One signed POST. The body is serialised once and both signed and sent verbatim.
+
+        Failures before the request can have left (no connection) are ``ExchangeUnavailable``;
+        anything after that (timeout while waiting, broken connection, 5xx, an unreadable answer)
+        is ``OutcomeUnknown``: the exchange may have acted on it.
+        """
+        payload = json.dumps(body, separators=(",", ":"))
+        headers = {
+            **signed_headers(keys, timestamp_ms=self._now_ms(), payload=payload),
+            "Content-Type": "application/json",
+        }
+        try:
+            response = await self._http.post(path, content=payload.encode(), headers=headers)
+        except _NOT_SENT as exc:
+            raise unavailable(f"could not connect ({type(exc).__name__})") from exc
+        except (httpx2.HTTPError, httpx2.StreamError) as exc:
+            raise outcome_unknown(type(exc).__name__) from exc
+
+        if response.status_code >= _HTTP_SERVER_ERROR:
+            raise outcome_unknown(f"HTTP {response.status_code}")
+        if response.status_code == _HTTP_FORBIDDEN:
+            raise unavailable("HTTP 403 (IP rate limit or access denied)")  # refused at the gateway
+        if not response.is_success:
+            raise unavailable(f"HTTP {response.status_code}")
+        payload_json = _json_or_none(response)
+        if payload_json is None:
+            raise outcome_unknown("response is not JSON")
+        try:
+            envelope = parse_envelope(payload_json)
+        except ExchangeUnavailable:
+            raise outcome_unknown("unexpected response format") from None
+        if envelope.ret_code == RET_OK:
+            return envelope
+        raise error_for_create(
+            envelope.ret_code, envelope.ret_msg, retry_after_s=self._retry_after(response, envelope.time_ms)
+        )
 
     async def _get(self, path: str, params: Mapping[str, str], *, keys: ApiKeyPair | None = None) -> Envelope:
         attempts = max(1, self._retry.max_attempts)

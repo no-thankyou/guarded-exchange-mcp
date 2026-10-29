@@ -1,7 +1,7 @@
 """In-memory fakes of application ports (no mocks of everything, ENGINEERING.md)."""
 
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -21,6 +21,7 @@ from guarded_exchange.domain.account import (
     Position,
     PositionSide,
     QtyUnit,
+    SymbolPosition,
     TimeInForce,
     UntrustedText,
 )
@@ -38,6 +39,7 @@ from guarded_exchange.domain.credentials import (
 from guarded_exchange.domain.errors import NotFound
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
 from guarded_exchange.domain.market import Candle, CandleInterval, Candles, Orderbook, OrderbookLevel, Ticker
+from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
 from guarded_exchange.domain.policy import PolicyRecord
 from guarded_exchange.domain.users import Environment, User, UserNameTaken, UserStatus
 
@@ -128,6 +130,9 @@ def make_candles(
     )
 
 
+LISTED_BY_DEFAULT = frozenset({InstrumentStatus.TRADING, InstrumentStatus.PENDING_OPEN})
+
+
 @dataclass
 class FakeExchange:
     """``ExchangeClient`` with configurable market data and an optional forced failure.
@@ -142,6 +147,8 @@ class FakeExchange:
     rules: dict[tuple[str, Category], InstrumentRules] = field(default_factory=dict)
     fail_with: Exception | None = None
     calls: list[tuple[object, ...]] = field(default_factory=list)
+    listed_statuses: frozenset[InstrumentStatus] = frozenset(InstrumentStatus)
+    """Statuses found without ``any_status``; Bybit lists only ``LISTED_BY_DEFAULT`` that way."""
 
     async def get_ticker(self, symbol: str, category: Category) -> Ticker:
         self.calls.append((symbol, category))
@@ -157,9 +164,16 @@ class FakeExchange:
         self.calls.append(("get_candles", symbol, category, interval, limit))
         return self._lookup(self.candles, symbol, category)
 
-    async def get_instrument_rules(self, symbol: str, category: Category) -> InstrumentRules:
-        self.calls.append(("get_instrument_rules", symbol, category))
-        return self._lookup(self.rules, symbol, category)
+    async def get_instrument_rules(
+        self, symbol: str, category: Category, *, any_status: bool = False
+    ) -> InstrumentRules:
+        self.calls.append(
+            ("get_instrument_rules", symbol, category, *(("any_status",) if any_status else ()))
+        )
+        rules = self._lookup(self.rules, symbol, category)
+        if not any_status and rules.status not in self.listed_statuses:
+            raise NotFound(f"no {category.value} instrument {symbol}")  # like Bybit without `status`
+        return rules
 
     def _lookup[T](self, table: dict[tuple[str, Category], T], symbol: str, category: Category) -> T:
         if self.fail_with is not None:
@@ -655,3 +669,66 @@ class InMemoryDatabase:
         )
         self.state.credentials[credential.id] = (credential, cipher.seal(keys, credential.binding))
         return credential
+
+
+# --- trading ---------------------------------------------------------------------------------
+
+BAND = PriceBand(buy_max=Decimal("81747.70"), sell_min=Decimal("80128.90"))
+
+
+@dataclass
+class FakeTrading:
+    """``TradingExchange``: records orders; ``fills`` answers ``get_order`` by client order id.
+
+    ``place_error`` makes ``place_order`` raise (after recording the request). With ``db`` set,
+    ``calls_in_transaction`` counts calls made while a unit of work was open (D-10), and
+    ``audit_at_send`` keeps the journal event types committed when each order was sent.
+    """
+
+    bands: dict[tuple[str, Category], PriceBand] = field(default_factory=dict)
+    positions: dict[str, SymbolPosition] = field(default_factory=dict)
+    fills: dict[str, OrderFill] = field(default_factory=dict)
+    place_error: Exception | None = None
+    read_error: Exception | None = None
+    sent: list[OrderRequest] = field(default_factory=list)
+    calls: list[tuple[object, ...]] = field(default_factory=list)
+    db: "InMemoryDatabase | None" = None
+    calls_in_transaction: int = 0
+    audit_at_send: list[list[str]] = field(default_factory=list)
+    before_band: Callable[[], None] | None = None
+    """Runs inside ``get_price_band``: something that happens between the checks and the decision."""
+
+    def client_order_id(self, action_id: str) -> str:
+        return f"gx-{action_id}"
+
+    async def get_price_band(self, symbol: str, category: Category) -> PriceBand:
+        self._call("get_price_band", symbol, category)
+        if self.before_band is not None:
+            self.before_band()
+        return self.bands.get((symbol, category), BAND)
+
+    async def get_symbol_position(self, keys: ApiKeyPair, symbol: str) -> SymbolPosition:
+        self._call("get_symbol_position", symbol)
+        return self.positions.get(symbol, SymbolPosition(symbol=symbol, position=None, leverage=Decimal(10)))
+
+    async def place_order(self, keys: ApiKeyPair, order: OrderRequest) -> PlacedOrder:
+        self._call("place_order", order.client_order_id)
+        self.sent.append(order)
+        if self.db is not None:
+            self.audit_at_send.append([r.event_type for r in self.db.all_audit()])
+        if self.place_error is not None:
+            raise self.place_error
+        return PlacedOrder(order_id=f"order-{len(self.sent)}")
+
+    async def get_order(
+        self, keys: ApiKeyPair, category: Category, symbol: str, client_order_id: str
+    ) -> OrderFill | None:
+        self._call("get_order", category, symbol, client_order_id)
+        if self.read_error is not None:
+            raise self.read_error
+        return self.fills.get(client_order_id)
+
+    def _call(self, *call: object) -> None:
+        self.calls.append(call)
+        if self.db is not None and self.db.open_transactions:
+            self.calls_in_transaction += 1

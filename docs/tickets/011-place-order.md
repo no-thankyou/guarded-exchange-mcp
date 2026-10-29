@@ -1,5 +1,5 @@
 # 011: place_order насквозь (testnet, без HITL)
-Статус: TODO
+Статус: IN_REVIEW
 Зависит от: 006, 008, 009
 Требования: FR-4, FR-10, FR-13, FR-14, FR-15, FR-17, FR-25 (заглушка), FR-36 (часть), FR-43 (PlaceOrder), FR-48 (граница цены), ADR-010
 
@@ -19,16 +19,28 @@
 - Идемпотентность и неизвестный исход (012), другие действия (013, 014), kill switch (015).
 
 ## Acceptance criteria
-- [ ] Unit (именованные edge cases): лимит проходит до округления и не проходит после (и наоборот); limit-цена не по tick → ошибка с ближайшими значениями.
-- [ ] Unit: market notional считается по худшей цене; slippage > жёсткого максимума 3% отклоняется.
-- [ ] Unit: инструмент вне allowlist → отказ; reduce-only по такому инструменту при наличии позиции → разрешён (FR-15).
-- [ ] Unit: reduce-only больше позиции урезается до позиции (FR-43).
-- [ ] Unit: политика требует подтверждения → `confirmation_channel_unavailable`, на биржу ничего не ушло.
-- [ ] Integration: отправляется `Limit IOC` с ценой границы и `orderLinkId=gx-…`; `filled: unknown`, если исполнение ещё не видно.
-- [ ] Integration: отказ и попытка/исход в журнале в правильных транзакциях.
-- [ ] E2E: `inputSchema` `place_order` описывает `qty`/`price` как строки с pattern; JSON-число вместо строки → `invalid_params`.
+- [x] Unit (именованные edge cases): лимит проходит до округления и не проходит после (и наоборот); limit-цена не по tick → ошибка с ближайшими значениями. — `tests/unit/test_order_domain.py`: `test_edge_limit_fails_before_rounding_but_passes_after`, `test_edge_min_order_value_passes_before_rounding_but_fails_after`, `test_edge_limit_price_off_tick_is_an_error_with_the_nearest_prices`.
+- [x] Unit: market notional считается по худшей цене; slippage > жёсткого максимума 3% отклоняется. — `test_market_notional_is_computed_at_the_worst_price`, `test_worst_price_rounds_to_the_safe_side`, `test_slippage_above_the_hard_maximum_is_refused`, `test_market_bound_stays_inside_the_price_band`.
+- [x] Unit: инструмент вне allowlist → отказ; reduce-only по такому инструменту при наличии позиции → разрешён (FR-15). — `test_instrument_outside_the_allowlist_is_refused`, `test_reduce_only_outside_the_allowlist_with_a_position_is_allowed`; через use case — `tests/unit/test_submit_action.py::test_reduce_only_on_a_delisting_perpetual_outside_the_allowlist_closes_up_to_the_position`.
+- [x] Unit: reduce-only больше позиции урезается до позиции (FR-43). — `test_edge_reduce_only_larger_than_the_position_is_cut_to_the_position`.
+- [x] Unit: политика требует подтверждения → `confirmation_channel_unavailable`, на биржу ничего не ушло. — `tests/unit/test_submit_action.py`: `test_policy_requiring_confirmation_refuses_and_nothing_reaches_the_exchange`, `test_an_order_at_the_confirmation_threshold_is_refused_too`, `test_the_default_policy_of_a_trading_user_confirms_everything`.
+- [x] Integration: отправляется `Limit IOC` с ценой границы и `orderLinkId=gx-…`; `filled: unknown`, если исполнение ещё не видно. — `tests/integration/test_bybit_trading.py::test_market_order_goes_out_as_limit_ioc_at_the_bound_and_filled_is_unknown` (use case + `BybitClient` + реальная SQLite); адаптер — `test_place_order_signs_and_sends_exactly_one_limit_ioc_body`, `test_an_order_not_listed_yet_reads_as_none`.
+- [x] Integration: отказ и попытка/исход в журнале в правильных транзакциях. — `test_market_order_goes_out_as_limit_ioc_at_the_bound_and_filled_is_unknown` (в момент POST другое соединение SQLite видит только закоммиченную `order_attempt`, `order_outcome` — после), `test_a_refusal_is_committed_in_the_deciding_transaction_and_nothing_is_posted`, `test_a_timeout_after_sending_is_recorded_as_unknown`; на фейках (D-8, D-10) — `test_a_market_order_is_sent_as_ioc_at_the_bound_with_attempt_before_and_outcome_after`, `test_a_key_replaced_after_the_key_check_is_caught_in_the_decision`, `test_a_policy_tightened_while_reading_the_market_applies_to_the_decision`.
+- [x] E2E: `inputSchema` `place_order` описывает `qty`/`price` как строки с pattern; JSON-число вместо строки → `invalid_params`. — `tests/e2e/test_mcp_place_order.py`: `test_input_schema_declares_qty_and_price_as_strings_with_a_pattern`, `test_a_json_number_instead_of_a_string_is_invalid_params`; сборка через `app_server` — `test_the_wired_server_places_a_limit_order_through_the_bybit_adapter`.
 
 ## Заметки
 - Из 008: префикс `orderLinkId` системы — одна константа `CLIENT_ORDER_ID_PREFIX = "gx-"` в `infrastructure/bybit/mapper.py`, по ней `order_origin` помечает ордера `system/external`; формат `client_order_id` (D-19, ≤ 36 символов Bybit) строить от неё. Сверка `system` с журналом отправленных ордеров (FR-2: префикс — только быстрый фильтр) — в 011/012, когда такие записи появятся.
 - Из спайка 004 (2026-10-28, demo): на perp (по умолчанию, `lpaPerp=false`) биржа **молча сдвигает цену любого limit-ордера**, выходящего за коридор `GET /v5/market/price-limit`, к границе коридора (`linear_create_over_buy_limit_default*`); на spot — отказ `170193`, в режиме reject на perp — `110121`. Решить в тикете: (1) обычный limit вне коридора — ошибка до отправки (как SPEC GP-1, «цена — ошибка») или сдвиг с явным сообщением агенту; (2) для market (Limit IOC, ADR-010) — ограничение коридором на стороне сервера. В любом случае цена, показанная в FR-21 и записанная в журнал, должна совпадать с ценой ордера на бирже (читать `price` из ордера после отправки).
 - Из 007: перед любым изменяющим действием вызывать `application.credentials.RequireTradingCredential(user_id)` — он перепроверяет права ключа, если последняя проверка старше 1 ч (D-24), отказывает `credentials_permissions_changed` / `exchange_credentials_invalid` / `permission_denied` (read-only ключ), при невозможности перепроверить устаревший ключ — `exchange_unavailable`, а если перепроверку отбил rate limit биржи — `rate_limited` с `retry_after_s` (оба fail closed, `details.reason=permissions_recheck_failed`), и возвращает расшифрованный `ApiKeyPair` для адаптера. Подписанные запросы — `infrastructure/bybit/signing.signed_headers`; для POST подписывать ровно отправляемое тело (`json.dumps(..., separators=(",", ":"))`), вектор POST уже есть в `tests/fixtures/bybit/signature_vectors.json`. Хук не закрывает гонку целиком: между ним и отправкой ордера `keys replace/delete` может успеть — финальная сверка (ключ всё ещё `active`, тот же `credential_id`) под `lock_user` в той же write-транзакции, где пишется `attempt` (D-8, D-10: без сетевого I/O внутри); ключ с `status != active` хук уже не отдаёт (`key_replaced_or_deleted`).
+
+### Итоги реализации (2026-10-29)
+- По заметке спайка 004: (1) обычный limit вне коридора `price-limit` — `instrument_rule_violation` до отправки (`details.rule=price_band`, граница в `max_price`/`min_price`), сдвига нет; (2) market — `Limit IOC` по `worst`, ограниченной коридором на стороне сервера (только улучшает цену); цена в ответе и в `order_outcome` — из ордера на бирже (`price_source: exchange`), пока ордер не виден — отправленная (`request`). Остальные решения (FR-14 через текущее плечо символа, reduce-only без min notional, `status=Delivering` для снижающих риск, коды ответов POST) — PLAN, ADR-010, «Тикет 011».
+- Нетрадуемые инструменты: для reduce-only правила ищутся с `any_status` (адаптер повторяет `instruments-info` с `status=Delivering`, только linear); разрешены статусы `trading` и `settling`, новые увеличивающие риск ордера — только `trading`. `Closed` по-прежнему `not_found` (торговать на нём нельзя).
+- Ошибки ввода (правила инструмента, `position_not_found`) отвечаются до решения и не журналируются; решение политики (`order_refused` | `order_attempt`) — в одной write-транзакции под `lock_user` с повторной проверкой пользователя, ключа (тот же `credential_id`, `active`), профиля и лимитов на свежей политике.
+- Тесты, где был заглушечный `place_order` (`tests/e2e/test_mcp_policy.py`, `tests/integration/test_http_auth.py`), переименованы на `stub_trade`: имя теперь занято настоящим инструментом.
+
+### Предложения (вне scope)
+- 012: сверка `origin=system` с журналом (`order_attempt.client_order_id`) и разведка `outcome_unknown` по `orderLinkId`; повторное чтение исполнения с короткой паузой, если первое чтение не увидело ордер (сейчас одно чтение → `filled_qty: unknown`).
+- FR-13 для market sell считается по худшей (низшей) цене, как в SPEC; фактическая сумма продажи может быть до `qty × best bid`, консервативнее брать большую из цен. Нужна правка SPEC — решение пользователя.
+- Необязательный аргумент `slippage_pct` у `place_order` (только ужесточение политики): «купи по рынку, но не дороже 0.5%».
+- Чтения биржи перед решением (правила, коридор, тикер, позиция) идут последовательно; можно распараллелить (`anyio` task group) ради NFR-4.

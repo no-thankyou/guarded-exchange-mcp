@@ -24,6 +24,12 @@ DEFAULT_NEXT_STEP: Final[dict[str, str]] = {
     "exchange_credentials_invalid": "Do not retry. Tell the user to check or replace the exchange key "
     "outside the chat; never ask for keys in the chat.",
     "rate_limited": "Wait retry_after_s seconds before calling again.",
+    "instrument_rule_violation": "Fix qty or price according to get_instrument_rules and the details, "
+    "then call again.",
+    "limit_exceeded": "Do not retry or work around it; tell the user which limit was hit.",
+    "confirmation_channel_unavailable": "Do not retry; tell the user the action needs their confirmation.",
+    "position_not_found": "Check get_positions before a reduce-only order.",
+    "outcome_unknown": "Do not repeat the action; check the open orders first.",
 }
 _FALLBACK_NEXT_STEP: Final = "Report this error to the user."
 

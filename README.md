@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents guarded access to a crypto exchange (Bybit V5): least-privilege permissions, risk limits, human confirmation of risky actions in a channel the model does not control, tenant isolation and a tamper-evident audit log.
 
-> Status: early skeleton. Read-only tools work end to end: market data (`get_ticker`, `get_orderbook`, `get_candles`, `get_instrument_rules`), the user's account (`get_balances`, `get_positions`, `get_open_orders`) and `get_my_policy`; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`; the policy (admin ceiling, user tightening) and exchange API keys (encrypted, permission-checked) are managed from the CLI; a remote multi-user mode serves the same tools over Streamable HTTP with per-user bearer tokens. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
+> Status: early skeleton. Read-only tools work end to end: market data (`get_ticker`, `get_orderbook`, `get_candles`, `get_instrument_rules`), the user's account (`get_balances`, `get_positions`, `get_open_orders`) and `get_my_policy`; the first trading tool, `place_order`, works on the test environment with risk limits and a journal, but without human confirmation yet (an order whose policy requires confirmation is refused); local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`; the policy (admin ceiling, user tightening) and exchange API keys (encrypted, permission-checked) are managed from the CLI; a remote multi-user mode serves the same tools over Streamable HTTP with per-user bearer tokens. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
 
 ## How to run the skeleton
 
@@ -77,6 +77,18 @@ uv run guarded-exchange admin policy reset-overrides --user local --field profil
 ```
 
 `admin policy set-ceiling` (optionally `--user NAME`) may raise or lower the ceiling within hard bounds (slippage <= 3%, confirmation lifetime <= 600 s); `policy tighten` refuses any value looser than the current effective one and names the fields. The user cannot undo their own tightening (raising the ceiling does not lift a stricter user setting either); the admin can: `admin policy reset-overrides --user NAME` removes all of the user's own settings, or only those named with `--field` (repeatable), so those fields follow the ceiling again. It lists what it will remove, asks for confirmation and then removes only the listed settings; with no answer on input (closed stdin) it refuses unless `--yes` is given. A piped `y` counts as an answer. A user without matching settings is left as is and nothing is journaled. If the admin lowers the ceiling below a user's setting, the ceiling applies. All three write to the user's journal (`policy_ceiling_set`, `policy_tightened`, `policy_overrides_reset` with the removed values and the effective values before and after). `tools/list` shows a user only the tools their profile allows (the result is `cacheScope: private`), and every `tools/call` is checked again, so a hidden tool called directly gets `permission_denied`.
+
+### Trading: `place_order` (test environment only)
+
+`place_order {symbol, category, side, order_type, qty, price?, reduce_only?}` places a market or limit order on spot or USDT perpetuals. `qty` and `price` are JSON **strings** (`"0.001"`, `"68797.6"`); a JSON number gets `invalid_params`, so an amount never passes through a binary float. Before anything is sent:
+
+- the instrument's rules apply: `qty` is rounded **down** to the quantity step (the answer shows `requested_qty`, `qty` and `qty_adjustment`), a limit price off the tick is `instrument_rule_violation` with the two nearest valid prices, below the minimum quantity or order value is refused, and a limit price outside the exchange's current price band (`GET /v5/market/price-limit`) is refused too, because Bybit would silently move a perpetual order to the band edge;
+- a **market** order is sent as `Limit IOC` at the worst acceptable price: best ask (buy) or bid (sell) +/- the policy's `slippage_pct` (hard maximum 3%), rounded to the tick on the safe side and kept inside the price band; what cannot execute within that bound is cancelled by the exchange;
+- risk-increasing orders must be on the allowlist, within `max_order_notional_usdt` (qty after rounding x the limit or worst price) and, on perpetuals, the symbol's current leverage must not exceed `max_leverage`; a refusal names the limit and the allowed value (`limit_exceeded`);
+- `reduce_only` (perpetuals) can only shrink a position: it needs an opposite open position (`position_not_found` otherwise), is cut to the position size, and is not limited by order size or allowlist, so a position on an instrument removed from the allowlist (or being delisted) stays closable;
+- if the policy requires confirming the order (`confirm_actions` contains `place_order`, the default, or the order is at least `confirm_above_notional_usdt`), the call is refused with `confirmation_channel_unavailable` and nothing is sent: human confirmation arrives with the next tickets. To trade without confirmation the admin must say so: `uv run guarded-exchange admin policy set-ceiling --profile trade --allow linear:BTCUSDT --confirm none`.
+
+Each order gets a fresh client order id `gx-<action id>` (Bybit `orderLinkId`, at most 36 characters). The journal records the refusal (`order_refused`) or the attempt (`order_attempt`, committed before the request leaves) and the exchange's answer (`order_outcome`), with the client's self-description (`clientInfo`, not verified). The order is read back right after placing: the answer's `price` is the order's price on the exchange and `filled_qty` its execution; if the exchange does not show the order yet, `filled_qty` is `"unknown"` (never 0) with a hint to check `get_open_orders`. Placing is never retried automatically: a timeout or broken connection after sending is `outcome_unknown` with the client order id to look for (finding out the real outcome automatically, idempotency keys and the duplicate window are the next ticket). Mainnet trading is not available in this version.
 
 ### Exchange API keys
 
@@ -160,7 +172,8 @@ src/guarded_exchange/
                    CreateUser / IssueAccessToken / RevokeAccessToken, AuthenticateBearerToken -> Authenticator,
                    Add/Replace/DeleteCredential, RecheckCredential, RequireTradingCredential
                    -> KeyPermissionsReader, CredentialCipher, CredentialRepository,
-                   GetBalances / GetPositions / GetOpenOrders -> ReadCredential, AccountReader
+                   GetBalances / GetPositions / GetOpenOrders -> ReadCredential, AccountReader,
+                   SubmitPlaceOrder -> RequireTradingCredential, InstrumentRulesCache, TradingExchange
   infrastructure/  adapters: bybit/ (httpx2 client, request signing, known hosts, DTO mapper, retCode
                    mapping), db/ (SQLAlchemy Core repositories, unit of work, Alembic migrations),
                    crypto (HKDF keyring, AES-256-GCM), master key file, clock, logging

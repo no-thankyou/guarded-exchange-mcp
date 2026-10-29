@@ -33,6 +33,38 @@ class AuditEventType(StrEnum):
     CREDENTIAL_DELETED = "credential_deleted"
     CREDENTIAL_REJECTED = "credential_rejected"
     CREDENTIAL_PERMISSIONS_CHANGED = "credential_permissions_changed"
+    ORDER_REFUSED = "order_refused"
+    """The policy refused a trading action before anything was sent (FR-17, FR-25)."""
+    ORDER_ATTEMPT = "order_attempt"
+    """Written and committed before the request leaves for the exchange (ADR-008)."""
+    ORDER_OUTCOME = "order_outcome"
+    """What the exchange answered: accepted, rejected or unknown (FR-27)."""
+
+
+_CLIENT_TEXT_MAX: Final = 64
+
+
+@dataclass(frozen=True, slots=True)
+class ClientDescription:
+    """What the AI client said about itself (MCP ``clientInfo``): recorded, never verified (FR-36).
+
+    Free text from outside: only printable ASCII is kept and it is cut short; it goes to the
+    journal, never into a message or a decision.
+    """
+
+    name: str
+    version: str
+
+    @classmethod
+    def sanitized(cls, name: str, version: str) -> "ClientDescription":
+        return cls(_printable(name), _printable(version))
+
+    def to_payload(self) -> dict[str, JsonValue]:
+        return {"name": self.name, "version": self.version}
+
+
+def _printable(raw: str) -> str:
+    return "".join(ch if " " <= ch <= "~" else "?" for ch in raw[:_CLIENT_TEXT_MAX])
 
 
 @dataclass(frozen=True, slots=True)

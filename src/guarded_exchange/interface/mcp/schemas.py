@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, WithJsonSchema
 
+from guarded_exchange.application.submit_action import OrderResult
 from guarded_exchange.domain.account import MAX_BALANCE_COINS, AccountBalances, Order, Page, Position
 from guarded_exchange.domain.instruments import InstrumentRules
 from guarded_exchange.domain.market import Candles, Orderbook, Ticker
@@ -473,6 +474,95 @@ class OpenOrdersOut(BaseModel):
             orders=[OrderOut.from_domain(o) for o in page.items],
             has_more=page.has_more,
             omitted=page.omitted or None,
+        )
+
+
+_FILL_UNKNOWN_NEXT_STEP = (
+    "The order was accepted but its execution is not visible yet: do not place it again; check "
+    "get_open_orders (category and symbol of this order) in a few seconds."
+)
+
+
+class PlaceOrderOut(BaseModel):
+    """An order the exchange accepted: exactly what was sent and what is known about its execution."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: Literal["accepted"] = Field(description="The exchange accepted the order request.")
+    order_id: str = Field(description="Exchange order id; use it to refer to this order.")
+    client_order_id: str = Field(description="This server's id of the order on the exchange (gx-...).")
+    symbol: str = Field(description="Exchange symbol, e.g. BTCUSDT.")
+    category: Literal["spot", "linear"]
+    side: Literal["buy", "sell"]
+    order_type: Literal["market", "limit"] = Field(description="What was asked for.")
+    time_in_force: Literal["gtc", "ioc"] = Field(
+        description="gtc: a limit order rests on the book. ioc: a market order was sent as a limit order "
+        "at the worst acceptable price, executing immediately what it can; the rest is cancelled."
+    )
+    reduce_only: bool = Field(description="True: can only reduce the position, never open or grow one.")
+    requested_qty: DecimalStr = Field(description="Quantity asked for, base asset.")
+    qty: DecimalStr = Field(
+        description="Quantity sent, base asset: rounded down to the instrument's step; for reduce-only at "
+        "most the current position."
+    )
+    qty_adjustment: Literal["rounded_down_to_step", "clamped_to_position"] | None = Field(
+        default=None, description="Why qty differs from requested_qty; absent if it does not."
+    )
+    price: DecimalStr = Field(
+        description="Limit price of the order, USDT (for market: the worst price it may execute at), as "
+        "the exchange shows it; see price_source."
+    )
+    price_source: Literal["exchange", "request"] = Field(
+        description="exchange: read from the order on the exchange; request: the order is not visible "
+        "yet, this is the price sent."
+    )
+    best_price: DecimalStr | None = Field(
+        default=None, description="Market only: best opposite price when the order was prepared, USDT."
+    )
+    worst_price: DecimalStr | None = Field(
+        default=None,
+        description="Market only: best_price +/- the policy's slippage, on the tick; price is never worse.",
+    )
+    slippage_pct: DecimalStr | None = Field(default=None, description="Market only: slippage tolerance, %.")
+    notional_usdt: DecimalStr = Field(description="qty x price, USDT: what the risk limits were checked on.")
+    order_status: Literal["open", "partially_filled", "filled", "cancelled", "rejected", "unknown"] = Field(
+        description="State right after placing. cancelled after a partial fill: an IOC remainder that "
+        "could not execute within the price bound. unknown: not visible yet."
+    )
+    filled_qty: DecimalStr | Literal["unknown"] = Field(
+        description="Executed quantity, base asset; 'unknown' if the execution is not visible yet "
+        "(never read it as 0)."
+    )
+    avg_fill_price: DecimalStr | None = Field(default=None, description="Average execution price, USDT.")
+    next_step: str | None = Field(default=None, description="What to do next, if anything.")
+
+    @classmethod
+    def from_domain(cls, result: OrderResult) -> "PlaceOrderOut":
+        plan, fill = result.plan, result.fill
+        action = plan.action
+        return cls(
+            status="accepted",
+            order_id=result.order_id,
+            client_order_id=result.client_order_id,
+            symbol=action.symbol,
+            category=action.category.value,
+            side=action.side.value,
+            order_type=action.order_type.value,
+            time_in_force=plan.time_in_force.value,
+            reduce_only=action.reduce_only,
+            requested_qty=action.qty,
+            qty=plan.qty,
+            qty_adjustment=None if plan.qty_adjustment is None else plan.qty_adjustment.value,
+            price=result.price,
+            price_source="exchange" if fill is not None and fill.price is not None else "request",
+            best_price=plan.best_price,
+            worst_price=plan.worst_price,
+            slippage_pct=plan.slippage_pct,
+            notional_usdt=plan.notional,
+            order_status="unknown" if fill is None else fill.status.value,
+            filled_qty="unknown" if fill is None else fill.filled_qty,
+            avg_fill_price=None if fill is None else fill.avg_fill_price,
+            next_step=_FILL_UNKNOWN_NEXT_STEP if fill is None else None,
         )
 
 

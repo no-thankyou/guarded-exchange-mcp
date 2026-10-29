@@ -37,6 +37,7 @@ from guarded_exchange.application.credentials import (
     RecheckActiveCredentials,
     RecheckCredential,
     ReplaceCredential,
+    RequireTradingCredential,
     StoredCredential,
 )
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
@@ -52,6 +53,7 @@ from guarded_exchange.application.policy import (
 from guarded_exchange.application.ports import Authenticator, CredentialCipher, UnitOfWorkFactory
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
+from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.config import ConfigError, Settings, load_settings
 from guarded_exchange.domain.credentials import EXCHANGE_BYBIT, ApiKeyPair, Credential
 from guarded_exchange.domain.errors import DomainError
@@ -116,8 +118,15 @@ def build_use_cases(
 ) -> UseCases:
     exchange, clock = _bybit_client(settings, http), SystemClock()
     rules = InstrumentRulesCache(exchange, clock, ttl=timedelta(seconds=settings.instrument_rules_ttl_s))
-    read_key = ReadCredential(
-        uow, cipher, clock, exchange=EXCHANGE_BYBIT, environment=settings.bybit_environment
+    environment = settings.bybit_environment
+    read_key = ReadCredential(uow, cipher, clock, exchange=EXCHANGE_BYBIT, environment=environment)
+    trade_key = RequireTradingCredential(
+        uow,
+        cipher,
+        RecheckCredential(uow, cipher, exchange, clock),
+        clock,
+        exchange=EXCHANGE_BYBIT,
+        environment=environment,
     )
     return UseCases(
         get_ticker=GetTicker(exchange),
@@ -129,6 +138,17 @@ def build_use_cases(
         get_open_orders=GetOpenOrders(read_key, exchange),
         read_policy=ReadPolicy(uow),
         authorize=AuthorizeAccess(uow),
+        place_order=SubmitPlaceOrder(
+            uow,
+            trade_key,
+            rules,
+            market=exchange,
+            trading=exchange,
+            clock=clock,
+            ids=UuidGenerator(),
+            exchange=EXCHANGE_BYBIT,
+            environment=environment,
+        ),
     )
 
 

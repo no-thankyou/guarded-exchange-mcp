@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Protocol
 
 from guarded_exchange.domain.access_tokens import AccessToken
-from guarded_exchange.domain.account import AccountBalances, Order, Page, Position
+from guarded_exchange.domain.account import AccountBalances, Order, Page, Position, SymbolPosition
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord
 from guarded_exchange.domain.credentials import (
     ApiKeyPair,
@@ -22,6 +22,7 @@ from guarded_exchange.domain.credentials import (
 )
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
+from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
 from guarded_exchange.domain.policy import PolicyRecord
 from guarded_exchange.domain.users import Environment, User
 
@@ -56,11 +57,64 @@ class ExchangeClient(Protocol):
         """
         ...
 
-    async def get_instrument_rules(self, symbol: str, category: Category) -> InstrumentRules:
+    async def get_instrument_rules(
+        self, symbol: str, category: Category, *, any_status: bool = False
+    ) -> InstrumentRules:
         """Return the trading rules of one instrument, whatever its quote currency.
+
+        By default only instruments open for trading (or about to open) are found; ``any_status``
+        also finds one being delisted or closed, so a risk-reducing order on it gets its real
+        status instead of ``NotFound`` (ticket 011).
 
         Raises the same exceptions as ``get_ticker``; an instrument the adapter cannot
         represent in the domain (e.g. a dated future in ``linear``) raises ``InvalidParams``.
+        """
+        ...
+
+
+class TradingExchange(Protocol):
+    """Placing orders on one exchange account (FR-4, ADR-010, D-26). Signed calls take the key as an
+    argument, like ``AccountReader``.
+
+    The adapter owns the client order id format; the application only passes its ``action_id``.
+    Placing is never retried automatically (ADR-002): a possibly-sent request is ``OutcomeUnknown``.
+    """
+
+    def client_order_id(self, action_id: str) -> str:
+        """The exchange-side client id of the order for ``action_id`` (deterministic, D-19)."""
+        ...
+
+    async def get_price_band(self, symbol: str, category: Category) -> PriceBand:
+        """Public: the price corridor the exchange accepts new orders in right now.
+
+        Raises the same exceptions as ``ExchangeClient.get_ticker``.
+        """
+        ...
+
+    async def get_symbol_position(self, keys: ApiKeyPair, symbol: str) -> SymbolPosition:
+        """The USDT perpetual position on ``symbol`` (``position=None`` if flat) and its leverage.
+
+        Raises what ``AccountReader`` methods raise, including ``UnsupportedPositionMode``.
+        """
+        ...
+
+    async def place_order(self, keys: ApiKeyPair, order: OrderRequest) -> PlacedOrder:
+        """Send one limit order (GTC, or IOC for a market order).
+
+        Raises:
+            OutcomeUnknown: the request may have reached the exchange (timeout after sending, broken
+                connection, an exchange-side internal error, a duplicate client id); never retried.
+            ExchangeRejected / InvalidParams / ExchangeCredentialsInvalid / RateLimited /
+                ExchangeUnavailable: the exchange did not create the order.
+        """
+        ...
+
+    async def get_order(
+        self, keys: ApiKeyPair, category: Category, symbol: str, client_order_id: str
+    ) -> OrderFill | None:
+        """The order with this client id as the exchange shows it now; ``None`` if not visible yet.
+
+        Raises what ``AccountReader`` methods raise.
         """
         ...
 
