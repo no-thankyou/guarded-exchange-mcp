@@ -41,6 +41,20 @@
 
 ### Предложения (вне scope)
 - 012: сверка `origin=system` с журналом (`order_attempt.client_order_id`) и разведка `outcome_unknown` по `orderLinkId`; повторное чтение исполнения с короткой паузой, если первое чтение не увидело ордер (сейчас одно чтение → `filled_qty: unknown`).
-- FR-13 для market sell считается по худшей (низшей) цене, как в SPEC; фактическая сумма продажи может быть до `qty × best bid`, консервативнее брать большую из цен. Нужна правка SPEC — решение пользователя.
+- ~~FR-13 для market sell по низшей цене~~ — исправлено в ревью, раунд 1 (ниже).
 - Необязательный аргумент `slippage_pct` у `place_order` (только ужесточение политики): «купи по рынку, но не дороже 0.5%».
 - Чтения биржи перед решением (правила, коридор, тикер, позиция) идут последовательно; можно распараллелить (`anyio` task group) ради NFR-4.
+
+### Ревью, раунд 1 (CHANGES_REQUESTED, исправлено 2026-10-29)
+Каждый новый тест проверен временным внесением мутации (все мутации пойманы):
+1. **FR-13 для market sell.** В `OrderPlan` две суммы: `notional = qty × notional_price` (buy и limit — цена ордера, market sell — `max(best_bid, price)`) для лимита и порога подтверждения, `order_value = qty × price` для минимальной суммы ордера биржи. `notional_price` выводится в сообщении `limit_exceeded`, в журнале (`order.notional_price`, `order.order_value_usdt`) и в `PlaceOrderOut`. Толкование и ограничение (marketable limit sell) записаны в PLAN ADR-010 «Тикет 011» (2), SPEC не менялся. Тесты: `test_order_domain_review1.py` (`test_market_sell_risk_sum_uses_the_best_bid_not_its_lower_bound`, `test_market_sell_within_the_limit_at_its_bound_but_above_at_the_bid_is_refused`, `test_market_sell_confirmation_threshold_uses_the_risk_sum`, `test_minimum_order_value_of_a_sell_is_checked_at_the_order_price`), через use case — `test_a_market_sell_needs_confirmation_by_its_risk_sum_not_its_order_value`.
+2. **Перепроверки D-8.** Тесты `test_a_key_replaced_by_a_new_one_after_the_key_check_is_refused`, `test_access_revoked_after_the_first_check_is_refused_in_the_decision`, `test_a_profile_lowered_to_read_only_after_the_first_check_is_refused_in_the_decision`. Фейковый UoW записывает при каждом `audit.append`, взят ли `lock_user` в этой же транзакции (`InMemoryDatabase.audit_appends`), проверка — `assert_decided_under_lock`.
+3. **`reduceOnly=true` на проводе:** `test_a_reduce_only_order_carries_the_flag_on_the_wire`, в use case — `test_a_reduce_only_order_travels_with_the_flag`.
+4. **Цена из ордера на бирже** отличается от отправленной: `test_a_visible_fill_is_reported_with_the_exchange_price` (e2e: `price`, `price_source`, `order_attempt.order.price`, `order_outcome.fill.price`) и счастливый путь в `test_submit_action.py`.
+5. Граничные: `test_an_order_exactly_at_the_limit_passes_and_one_step_more_is_refused`, `test_leverage_exactly_at_the_maximum_passes_and_above_is_refused`.
+6. Shield: `test_a_cancelled_call_still_records_the_outcome_of_a_sent_order` (транзакции фейка — точки отмены, `InMemoryDatabase.checkpoint`).
+7. `test_reduce_only_remainder_below_the_minimum_order_value_is_still_planned`.
+8. `money.py`: pattern `[0-9]`, не больше 28 значащих цифр, арифметика шагов в собственном `localcontext` (prec 80) с инвариантом `round_down` ≤ значения; тесты на арабские/полноширинные цифры, на 29 значащих цифр и на грубый контекст вызывающего.
+9. Сбой после принятого ордера (чтение или запись `order_outcome`) → «accepted, filled unknown», ошибка в логе (`order_outcome_not_recorded`): `test_a_journal_failure_after_an_accepted_order_still_answers_accepted`. `ExchangeUnavailable` до отправки → `order_outcome.status = not_sent`: `test_a_connection_failure_before_sending_is_journaled_as_not_sent`.
+10. Пустой `cumExecQty` → `filled_qty = None` («unknown»), кроме `Rejected` (0): `test_an_empty_executed_quantity_is_unknown_not_zero`.
+- Решения оркестратора: ранние отказы известного principal журналируются (`order_refused`, `stage: pre_check`) — `test_a_read_only_user_is_refused_and_the_attempt_is_journaled`, `test_an_environment_mismatch_is_journaled`, `test_a_refusal_of_the_key_check_is_journaled`; ошибки ввода и неизвестный principal — нет (`test_invalid_input_and_an_unknown_caller_are_not_journaled`). Marketable limit sell — известное ограничение в PLAN. Повтор после сбоя записи outcome — заметка в тикете 012.

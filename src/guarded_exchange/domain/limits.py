@@ -53,16 +53,16 @@ def check_limits(plan: OrderPlan, policy: EffectivePolicy, *, leverage: Decimal 
     maximum = policy.max_order_notional_usdt
     if plan.notional > maximum:
         raise LimitExceeded(
-            f"order value {canonical_decimal(plan.notional)} USDT (qty x "
-            f"{'worst ' if plan.worst_price else ''}price {canonical_decimal(plan.price)}) exceeds your "
-            f"limit of {canonical_decimal(maximum)} USDT per order",
+            f"order value {canonical_decimal(plan.notional)} USDT (qty x {_price_basis(plan)} "
+            f"{canonical_decimal(plan.notional_price)}) exceeds your limit of {canonical_decimal(maximum)} "
+            "USDT per order",
             next_step="Reduce qty so that the order value stays within the limit; do not split one order "
             "into several to get around it.",
             details={
                 "limit": "max_order_notional_usdt",
                 "allowed": canonical_decimal(maximum),
                 "notional": canonical_decimal(plan.notional),
-                "price": canonical_decimal(plan.price),
+                "price": canonical_decimal(plan.notional_price),
             },
         )
     if action.category is Category.LINEAR:
@@ -84,6 +84,14 @@ def check_limits(plan: OrderPlan, policy: EffectivePolicy, *, leverage: Decimal 
                     "leverage": canonical_decimal(leverage),
                 },
             )
+
+
+def _price_basis(plan: OrderPlan) -> str:
+    if plan.worst_price is None:
+        return "limit price"
+    if plan.notional_price != plan.price:
+        return "best bid"  # a market sell: it can fill up to the bid
+    return "worst price"
 
 
 def requires_confirmation(policy: EffectivePolicy, kind: ActionKind, notional: Decimal) -> bool:

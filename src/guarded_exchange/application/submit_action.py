@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Final
 
 import anyio
+import structlog
 
 from guarded_exchange.application.credentials import RequireTradingCredential
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
@@ -39,7 +40,7 @@ from guarded_exchange.domain.account import SymbolPosition
 from guarded_exchange.domain.actions import OrderKind, PlaceOrder, parse_place_order
 from guarded_exchange.domain.audit import AuditEvent, AuditEventType, ClientDescription, JsonValue
 from guarded_exchange.domain.credentials import ApiKeyPair, key_replaced_or_deleted
-from guarded_exchange.domain.errors import DomainError, OutcomeUnknown, PermissionDenied
+from guarded_exchange.domain.errors import DomainError, ExchangeUnavailable, OutcomeUnknown, PermissionDenied
 from guarded_exchange.domain.instruments import Category, InstrumentRules, require_supported_quote
 from guarded_exchange.domain.limits import (
     check_limits,
@@ -58,6 +59,8 @@ from guarded_exchange.domain.orders import (
 from guarded_exchange.domain.policy import EffectivePolicy, Permission, require_permission
 from guarded_exchange.domain.risk import RiskDirection, classify
 from guarded_exchange.domain.users import Environment, User
+
+log = structlog.get_logger(__name__)
 
 AGENT_ACTOR: Final = "mcp:agent"
 """The journal's actor for actions an AI agent asked for (the user is the chain)."""
@@ -154,8 +157,13 @@ class SubmitPlaceOrder:
             price=request.price,
             reduce_only=request.reduce_only,
         )
-        user, policy = await self._authorize(user_id)
-        cleared = await self._credentials(user.id)  # D-24 re-check if stale; may talk to the exchange
+        user = await self._principal(user_id)  # unknown or revoked: nothing to journal it under
+        try:
+            policy = await self._authorize(user)
+            cleared = await self._credentials(user.id)  # D-24 re-check if stale; may talk to the exchange
+        except DomainError as refusal:  # FR-36: every attempt of a known user, refused ones too
+            await self._journal_early_refusal(user, action, refusal, client)
+            raise
         market = await self._read_market(action, cleared.keys)
         # Early plan: rule violations (tick, minimums, status) are input errors, answered before
         # anything is decided or journaled. The decision below plans again with the fresh policy.
@@ -176,15 +184,36 @@ class SubmitPlaceOrder:
 
     # --- before the decision ------------------------------------------------------------------
 
-    async def _authorize(self, user_id: str | None) -> tuple[User, EffectivePolicy]:
+    async def _principal(self, user_id: str | None) -> User:
         async with self._uow(write=False) as uow:
             user = await active_principal(uow, user_id)
-            if user is None:
-                raise no_access()
-            self._require_environment(user)
+        if user is None:
+            raise no_access()
+        return user
+
+    async def _authorize(self, user: User) -> EffectivePolicy:
+        self._require_environment(user)
+        async with self._uow(write=False) as uow:
             view = await load_policy_view(uow, user)
         require_permission(view.effective, Permission.TRADE)
-        return user, view.effective
+        return view.effective
+
+    async def _journal_early_refusal(
+        self, user: User, action: PlaceOrder, refusal: DomainError, client: ClientDescription | None
+    ) -> None:
+        payload: dict[str, JsonValue] = {
+            "tool": action.kind.value,
+            "stage": "pre_check",
+            "environment": user.environment.value,
+            "client": None if client is None else client.to_payload(),
+            "request": _action_payload(action),
+            "code": refusal.code,
+            "details": dict(refusal.details),
+        }
+        async with self._uow(write=True) as uow:
+            await uow.audit.append(
+                user.id, AuditEvent(AuditEventType.ORDER_REFUSED, self._actor, payload), self._clock.now()
+            )
 
     def _require_environment(self, user: User) -> None:
         if user.environment is not self._environment:
@@ -274,14 +303,28 @@ class SubmitPlaceOrder:
             except OutcomeUnknown as exc:
                 await self._journal_outcome(attempt, _failure("unknown", exc))
                 raise self._unknown(attempt, exc) from exc
+            except ExchangeUnavailable as exc:  # the adapter raises it only before anything was sent
+                await self._journal_outcome(attempt, _failure("not_sent", exc))
+                raise
             except DomainError as exc:
                 await self._journal_outcome(attempt, _failure("rejected", exc))
                 raise
             except BaseException as exc:  # a bug or cancellation: the order may have been sent
                 await self._journal_outcome(attempt, {"status": "unknown", "error_type": type(exc).__name__})
                 raise
-            fill = await self._read_fill(keys, plan, attempt.client_order_id)
-            await self._journal_outcome(attempt, _accepted(placed.order_id, fill))
+            # The exchange accepted the order: from here on nothing may turn into an error the agent
+            # could read as "failed" and retry (a second order). Worst case: accepted, fill unknown.
+            try:
+                fill = await self._read_fill(keys, plan, attempt.client_order_id)
+                await self._journal_outcome(attempt, _accepted(placed.order_id, fill))
+            except Exception:
+                log.exception(
+                    "order_outcome_not_recorded",
+                    action_id=attempt.action_id,
+                    client_order_id=attempt.client_order_id,
+                    order_id=placed.order_id,
+                )
+                fill = None
         return OrderResult(attempt.action_id, attempt.client_order_id, placed.order_id, plan, fill)
 
     async def _read_fill(self, keys: ApiKeyPair, plan: OrderPlan, client_order_id: str) -> OrderFill | None:
@@ -362,6 +405,8 @@ def _plan_payload(plan: OrderPlan) -> dict[str, JsonValue]:
         "price": plan.price,
         "time_in_force": plan.time_in_force.value,
         "notional_usdt": plan.notional,
+        "notional_price": plan.notional_price,
+        "order_value_usdt": plan.order_value,
         "best_price": plan.best_price,
         "worst_price": plan.worst_price,
         "slippage_pct": plan.slippage_pct,

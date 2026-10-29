@@ -524,7 +524,14 @@ class PlaceOrderOut(BaseModel):
         description="Market only: best_price +/- the policy's slippage, on the tick; price is never worse.",
     )
     slippage_pct: DecimalStr | None = Field(default=None, description="Market only: slippage tolerance, %.")
-    notional_usdt: DecimalStr = Field(description="qty x price, USDT: what the risk limits were checked on.")
+    notional_usdt: DecimalStr = Field(
+        description="qty x notional_price, USDT: the most the order can be worth, what the risk limits "
+        "and the confirmation threshold were checked on."
+    )
+    notional_price: DecimalStr = Field(
+        description="Price behind notional_usdt: the order price, or for a market sell the best bid "
+        "(a sell can fill up to it, never above), USDT."
+    )
     order_status: Literal["open", "partially_filled", "filled", "cancelled", "rejected", "unknown"] = Field(
         description="State right after placing. cancelled after a partial fill: an IOC remainder that "
         "could not execute within the price bound. unknown: not visible yet."
@@ -559,8 +566,9 @@ class PlaceOrderOut(BaseModel):
             worst_price=plan.worst_price,
             slippage_pct=plan.slippage_pct,
             notional_usdt=plan.notional,
+            notional_price=plan.notional_price,
             order_status="unknown" if fill is None else fill.status.value,
-            filled_qty="unknown" if fill is None else fill.filled_qty,
+            filled_qty="unknown" if fill is None or fill.filled_qty is None else fill.filled_qty,
             avg_fill_price=None if fill is None else fill.avg_fill_price,
             next_step=_FILL_UNKNOWN_NEXT_STEP if fill is None else None,
         )

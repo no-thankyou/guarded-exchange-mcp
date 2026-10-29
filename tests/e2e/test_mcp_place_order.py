@@ -21,6 +21,7 @@ from guarded_exchange.config import Settings
 from guarded_exchange.domain.actions import ActionKind
 from guarded_exchange.domain.credentials import ApiKeyPair, KeyPermissions
 from guarded_exchange.domain.instruments import Category
+from guarded_exchange.domain.money import AMOUNT_PATTERN
 from guarded_exchange.domain.orders import FillStatus, OrderFill
 from guarded_exchange.domain.policy import InstrumentRef, PolicyPatch, Profile
 from guarded_exchange.infrastructure.crypto import AesGcmCredentialCipher, Keyring
@@ -100,7 +101,7 @@ async def test_input_schema_declares_qty_and_price_as_strings_with_a_pattern() -
 
     properties = tool.input_schema["properties"]
     assert properties["qty"]["type"] == "string"
-    assert properties["qty"]["pattern"] == r"^\d{1,20}(\.\d{1,18})?$"
+    assert properties["qty"]["pattern"] == AMOUNT_PATTERN == r"^[0-9]{1,20}(\.[0-9]{1,18})?$"
     price_types = {branch.get("type") for branch in properties["price"]["anyOf"]}
     assert price_types == {"string", "null"}
     assert all("pattern" in b for b in properties["price"]["anyOf"] if b.get("type") == "string")
@@ -162,7 +163,7 @@ async def test_a_visible_fill_is_reported_with_the_exchange_price() -> None:
         order_id="order-1",
         status=FillStatus.FILLED,
         qty=Decimal("0.001"),
-        price=Decimal("81747.7"),
+        price=Decimal("81700.0"),  # not the price sent (81747.7)
         filled_qty=Decimal("0.001"),
         avg_fill_price=Decimal("80571.2"),
     )
@@ -171,8 +172,12 @@ async def test_a_visible_fill_is_reported_with_the_exchange_price() -> None:
 
     out = _structured(result)
     assert (out["order_status"], out["filled_qty"], out["avg_fill_price"]) == ("filled", "0.001", "80571.2")
-    assert out["price_source"] == "exchange"
+    assert (out["price"], out["price_source"]) == ("81700", "exchange")
+    assert (out["notional_usdt"], out["notional_price"]) == ("81.7477", "81747.7")
     assert "next_step" not in out
+    journal = {r.event_type: r.payload for r in setup.db.all_audit()}
+    assert journal["order_attempt"]["order"]["price"] == "81747.7"  # what was sent
+    assert journal["order_outcome"]["fill"]["price"] == "81700"  # what the exchange shows
 
 
 @pytest.mark.req("FR-25", "FR-19")

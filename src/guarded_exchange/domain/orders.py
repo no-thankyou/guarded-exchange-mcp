@@ -12,7 +12,14 @@ best prices (market orders) and the position (reduce-only) and returns an ``Orde
   the order's price.
 - A market order becomes Limit IOC at the worst acceptable price: best opposite price x (1 +/-
   slippage), rounded to the tick on the safe side (buy down, sell up), then kept inside the price
-  band (which can only make it better). Its notional uses that price (ADR-010).
+  band (which can only make it better).
+- Two sums (ticket 011, review 1). ``order_value = qty x price`` is what the exchange's minimum
+  order value is checked on. ``notional`` is the **risk** sum of FR-13/FR-19, the most the order
+  can be worth: a buy fills at ``price`` or better (lower), so ``qty x price``; a market sell fills
+  at the best bid or lower, never above it, so ``qty x max(best bid, price)`` - its own bound is the
+  lowest price and would understate it. A limit sell is ``qty x price`` (SPEC: "for limit - the
+  order price"); a limit sell below the market may still fill up to the bid: a known v1 limit,
+  bounded by the price band (PLAN ADR-010, "Ticket 011").
 """
 
 from dataclasses import dataclass, replace
@@ -78,8 +85,10 @@ class OrderPlan:
     """Exactly what will be sent, and why.
 
     ``qty`` is final (rounded, clamped), ``price`` is the limit price sent (for a market order the
-    IOC bound), ``notional`` = ``qty x price`` in USDT. ``best_price`` and ``worst_price`` are set for
-    market orders only; ``worst_price`` is before the price band, ``price`` after it.
+    IOC bound). ``notional`` = ``qty x notional_price`` is the risk sum the limits and the confirmation
+    threshold see; ``order_value`` = ``qty x price`` (see the module doc). ``best_price`` and
+    ``worst_price`` are set for market orders only; ``worst_price`` is before the price band, ``price``
+    after it.
     """
 
     action: PlaceOrder
@@ -89,6 +98,8 @@ class OrderPlan:
     price: Decimal
     time_in_force: OrderTimeInForce
     notional: Decimal
+    notional_price: Decimal
+    order_value: Decimal
     best_price: Decimal | None = None
     worst_price: Decimal | None = None
     slippage_pct: Decimal | None = None
@@ -130,19 +141,33 @@ def plan_order(
     qty, adjustment = _size(action, rules, position)
     if action.price is not None:  # a limit order (PlaceOrder: limit <=> price)
         price = _limit_price(action.side, action.price, rules, band)
-        plan = OrderPlan(action, risk, qty, adjustment, price, OrderTimeInForce.GTC, qty * price)
+        plan = OrderPlan(
+            action=action,
+            risk=risk,
+            qty=qty,
+            qty_adjustment=adjustment,
+            price=price,
+            time_in_force=OrderTimeInForce.GTC,
+            notional=qty * price,
+            notional_price=price,
+            order_value=qty * price,
+        )
     else:
         best_price = _best(action, best)
         worst = worst_price(best_price, action.side, slippage_pct, rules.tick_size)
         price = _inside_band(action.side, worst, band, rules.tick_size)
+        # A sell can fill up to the best bid (best_price for a sell), never above it.
+        notional_price = price if action.side is OrderSide.BUY else max(best_price, price)
         plan = OrderPlan(
-            action,
-            risk,
-            qty,
-            adjustment,
-            price,
-            OrderTimeInForce.IOC,
-            qty * price,
+            action=action,
+            risk=risk,
+            qty=qty,
+            qty_adjustment=adjustment,
+            price=price,
+            time_in_force=OrderTimeInForce.IOC,
+            notional=qty * notional_price,
+            notional_price=notional_price,
+            order_value=qty * price,
             best_price=best_price,
             worst_price=worst,
             slippage_pct=slippage_pct,
@@ -246,16 +271,16 @@ def _inside_band(side: OrderSide, worst: Decimal, band: PriceBand, tick: Decimal
 
 def _require_min_notional(plan: OrderPlan, rules: InstrumentRules) -> None:
     minimum = rules.min_notional
-    if minimum is not None and plan.notional < minimum:
+    if minimum is not None and plan.order_value < minimum:
         raise InstrumentRuleViolation(
-            f"order value {_s(plan.notional)} {rules.instrument.quote} is below the instrument's minimum "
+            f"order value {_s(plan.order_value)} {rules.instrument.quote} is below the instrument's minimum "
             f"{_s(minimum)}",
             next_step=f"Increase qty so that qty x price is at least {_s(minimum)} {rules.instrument.quote}.",
             details={
                 "rule": "min_notional",
                 "field": "qty",
                 "min_notional": _s(minimum),
-                "notional": _s(plan.notional),
+                "notional": _s(plan.order_value),
             },
         )
 
@@ -315,5 +340,6 @@ class OrderFill:
     status: FillStatus
     qty: Decimal
     price: Decimal | None
-    filled_qty: Decimal
+    filled_qty: Decimal | None
+    """``None``: the exchange did not report it (D-15: unknown, not 0)."""
     avg_fill_price: Decimal | None

@@ -278,6 +278,33 @@ async def test_an_order_not_listed_yet_reads_as_none() -> None:
     assert await client(stub).get_order(KEYS, Category.LINEAR, "BTCUSDT", CLIENT_ID) is None
 
 
+@pytest.mark.req("FR-48")
+@pytest.mark.parametrize(
+    ("status", "filled"), [("New", None), ("SomethingNew", None), ("Filled", None), ("Rejected", "0")]
+)
+async def test_an_empty_executed_quantity_is_unknown_not_zero(status: str, filled: str | None) -> None:
+    """D-15: an empty ``cumExecQty`` says nothing about the execution, except for a rejected order."""
+    body = load_fixture("bybit/spike004/linear_order_ioc_first_read.json")
+    body["result"]["list"][0].update(orderStatus=status, cumExecQty="")
+    stub = Stub(override={"/v5/order/realtime": body})
+
+    fill = await client(stub).get_order(KEYS, Category.LINEAR, "BTCUSDT", CLIENT_ID)
+
+    assert fill is not None
+    assert fill.filled_qty == (None if filled is None else Decimal(filled))
+
+
+@pytest.mark.req("FR-43")
+async def test_a_reduce_only_order_carries_the_flag_on_the_wire() -> None:
+    stub = Stub(override={"/v5/order/create": load_fixture("bybit/spike004/linear_close_ioc_reduce.json")})
+
+    await client(stub).place_order(KEYS, ioc_buy(side=OrderSide.SELL, reduce_only=True))
+
+    body = json.loads(stub.requests[0].content)
+    assert body["reduceOnly"] is True
+    assert body["side"] == "Sell"
+
+
 async def test_price_band_and_symbol_position_map_from_demo_records() -> None:
     stub = Stub()
     bybit = client(stub)

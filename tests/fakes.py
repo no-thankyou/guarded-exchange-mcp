@@ -7,6 +7,9 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import anyio
+import anyio.lowlevel
+
 from guarded_exchange.application.ports import CredentialCipher
 from guarded_exchange.domain.access_tokens import TOKEN_PREFIX, AccessToken
 from guarded_exchange.domain.account import (
@@ -474,13 +477,24 @@ class InMemoryAccessTokenRepository:
 
 
 class InMemoryAuditLogRepository:
-    def __init__(self, state: _State, *, writable: bool) -> None:
+    def __init__(
+        self,
+        state: _State,
+        *,
+        writable: bool,
+        held: set[str] | None = None,
+        appends: "list[tuple[str, str, bool]] | None" = None,
+    ) -> None:
         self._state = state
         self._writable = writable
+        self._held = held if held is not None else set()
+        self._appends = appends if appends is not None else []
 
     async def append(self, chain_id: str, event: AuditEvent, at: datetime) -> AuditRecord:
         if not self._writable:
             raise ReadOnlyViolation("audit.append needs a write unit of work")
+        # (chain, event type, was lock_user(chain) taken earlier in this same transaction)
+        self._appends.append((chain_id, str(event.event_type), chain_id in self._held))
         chain = self._state.audit.setdefault(chain_id, [])
         record = AuditRecord(
             chain_id=chain_id,
@@ -586,9 +600,17 @@ class InMemoryCredentialRepository:
 
 
 class InMemoryUnitOfWork:
-    def __init__(self, state: _State, *, write: bool, locks: list[str]) -> None:
+    def __init__(
+        self,
+        state: _State,
+        *,
+        write: bool,
+        locks: list[str],
+        appends: "list[tuple[str, str, bool]] | None" = None,
+    ) -> None:
+        self._held: set[str] = set()  # users locked in this transaction
         self.users = InMemoryUserRepository(state, writable=write)
-        self.audit = InMemoryAuditLogRepository(state, writable=write)
+        self.audit = InMemoryAuditLogRepository(state, writable=write, held=self._held, appends=appends)
         self.policies = InMemoryPolicyRepository(state, writable=write)
         self.access_tokens = InMemoryAccessTokenRepository(state, writable=write)
         self.credentials = InMemoryCredentialRepository(state, writable=write)
@@ -599,6 +621,7 @@ class InMemoryUnitOfWork:
         if not self._write:
             raise ReadOnlyViolation(f"lock_user({user_id!r}) needs a write unit of work")
         self._locks.append(user_id)
+        self._held.add(user_id)
 
 
 class InMemoryDatabase:
@@ -609,14 +632,26 @@ class InMemoryDatabase:
         self.transactions: list[bool] = []  # write flag of every unit of work opened
         self.locked_users: list[str] = []  # every lock_user call, in order
         self.open_transactions = 0  # > 0 while a unit of work is open (D-10: no network I/O then)
+        self.audit_appends: list[tuple[str, str, bool]] = []
+        """Every journal append: (chain, event type, lock_user(chain) held in that transaction)."""
+        self.fail_writes: Exception | None = None
+        """If set, opening a write unit of work raises it (e.g. ``database is locked``)."""
+        self.checkpoint = False
+        """Yield to the event loop on opening a transaction, as a real driver does (cancellation point)."""
 
     @asynccontextmanager
     async def __call__(self, *, write: bool) -> AsyncIterator[InMemoryUnitOfWork]:
+        if self.checkpoint:
+            await anyio.lowlevel.checkpoint()
+        if write and self.fail_writes is not None:
+            raise self.fail_writes
         self.transactions.append(write)
         working = self.state.copy()
         self.open_transactions += 1
         try:
-            yield InMemoryUnitOfWork(working, write=write, locks=self.locked_users)
+            yield InMemoryUnitOfWork(
+                working, write=write, locks=self.locked_users, appends=self.audit_appends
+            )
         finally:
             self.open_transactions -= 1
         if write:
@@ -695,6 +730,12 @@ class FakeTrading:
     db: "InMemoryDatabase | None" = None
     calls_in_transaction: int = 0
     audit_at_send: list[list[str]] = field(default_factory=list)
+    hold_place: "anyio.Event | None" = None
+    """If set, ``place_order`` waits for it (after recording the request): a slow exchange."""
+    placing: "anyio.Event" = field(default_factory=anyio.Event)
+    """Set when ``place_order`` has been entered."""
+    after_place: Callable[[], None] | None = None
+    """Runs after an accepted ``place_order``: something that breaks right after the exchange said yes."""
     before_band: Callable[[], None] | None = None
     """Runs inside ``get_price_band``: something that happens between the checks and the decision."""
 
@@ -716,8 +757,13 @@ class FakeTrading:
         self.sent.append(order)
         if self.db is not None:
             self.audit_at_send.append([r.event_type for r in self.db.all_audit()])
+        self.placing.set()
+        if self.hold_place is not None:
+            await self.hold_place.wait()
         if self.place_error is not None:
             raise self.place_error
+        if self.after_place is not None:
+            self.after_place()
         return PlacedOrder(order_id=f"order-{len(self.sent)}")
 
     async def get_order(

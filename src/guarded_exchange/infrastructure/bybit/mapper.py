@@ -964,13 +964,17 @@ def order_fill_from_result(result: dict[str, Any], *, symbol: str, client_order_
         or not _ORDER_ID_RE.fullmatch(item.order_id)
     ):
         raise unavailable("order/realtime returned another order")
+    status = _FILL_STATUSES.get(item.order_status, FillStatus.UNKNOWN)
     try:
+        filled = _dec(item.cum_exec_qty)
+        if filled is None and status is FillStatus.REJECTED:
+            filled = Decimal(0)  # a rejected order executed nothing
         return OrderFill(
             order_id=item.order_id,
-            status=_FILL_STATUSES.get(item.order_status, FillStatus.UNKNOWN),
+            status=status,
             qty=_required_dec(item.qty),
             price=_positive_or_none(item.price),
-            filled_qty=_dec(item.cum_exec_qty) or Decimal(0),
+            filled_qty=filled,  # empty otherwise: not known (D-15), never read as 0
             avg_fill_price=_positive_or_none(item.avg_price),
         )
     except (InvalidOperation, ValueError) as exc:

@@ -132,6 +132,13 @@ def types(records: Sequence[AuditRecord]) -> list[str]:
 ORDER_EVENTS = ("order_refused", "order_attempt", "order_outcome")
 
 
+def assert_decided_under_lock(world: World) -> None:
+    """The decision record was appended in a transaction that had taken ``lock_user`` (D-8)."""
+    decisions = [a for a in world.db.audit_appends if a[1] in {"order_attempt", "order_refused"}]
+    assert decisions, "no decision was journaled"
+    assert decisions[-1][2] is True, decisions
+
+
 # --- confirmation stub (FR-19, FR-25) ------------------------------------------------------------
 
 
@@ -185,7 +192,7 @@ async def test_a_market_order_is_sent_as_ioc_at_the_bound_with_attempt_before_an
         order_id="order-1",
         status=FillStatus.FILLED,
         qty=Decimal("0.001"),
-        price=Decimal("81747.7"),
+        price=Decimal("81700.0"),  # the exchange shows another price than was sent
         filled_qty=Decimal("0.001"),
         avg_fill_price=Decimal("80571.2"),
     )
@@ -199,7 +206,7 @@ async def test_a_market_order_is_sent_as_ioc_at_the_bound_with_attempt_before_an
     assert sent.client_order_id == result.client_order_id == "gx-act-0001"
     assert result.fill is not None
     assert result.fill.filled_qty == Decimal("0.001")
-    assert result.price == Decimal("81747.7")
+    assert result.price == Decimal("81700.0")  # the order's price on the exchange
     # the attempt was committed before the request left; the outcome came after (ADR-008)
     assert world.trading.audit_at_send[0][-1] == "order_attempt"
     assert types(world.journal(*ORDER_EVENTS)) == ["order_attempt", "order_outcome"]
@@ -211,6 +218,10 @@ async def test_a_market_order_is_sent_as_ioc_at_the_bound_with_attempt_before_an
     assert payload(attempt)["decision"] == "allowed_without_confirmation"
     assert payload(outcome)["status"] == "accepted"
     assert payload(outcome)["fill"]["status"] == "filled"
+    assert payload(attempt)["order"]["price"] == "81747.7"  # sent
+    assert payload(outcome)["fill"]["price"] == "81700"  # on the exchange
+    assert payload(attempt)["order"]["notional_price"] == "81747.7"
+    assert_decided_under_lock(world)
     assert attempt.actor == "mcp:agent"
 
 
@@ -321,7 +332,7 @@ async def test_a_key_replaced_after_the_key_check_is_caught_in_the_decision() ->
 
     assert error.value.details == {"reason": "key_replaced_or_deleted"}
     assert world.trading.sent == []
-    assert world.db.locked_users[-1] == world.user.id  # decided under lock_user
+    assert_decided_under_lock(world)
     assert payload(world.journal("order_refused")[0])["code"] == "exchange_credentials_invalid"
 
 
