@@ -164,7 +164,10 @@ def _cli() -> CliRunner:
 
 def _app() -> typer.Typer:
     commands = PolicyCommands(
-        show=bootstrap.show_policy, tighten=bootstrap.tighten_policy, set_ceiling=bootstrap.set_ceiling
+        show=bootstrap.show_policy,
+        tighten=bootstrap.tighten_policy,
+        set_ceiling=bootstrap.set_ceiling,
+        reset_overrides=bootstrap.reset_overrides,
     )
     admin = AdminCommands(
         create_user=bootstrap.create_user,
@@ -240,6 +243,62 @@ def test_cli_reports_bad_values_and_unknown_users_without_a_traceback(env_file: 
     assert nothing.exit_code == 1
     assert "nothing to change" in nothing.stderr
     for result in (bad_value, out_of_bounds, unknown, nothing):
+        assert "Traceback" not in result.output
+
+
+@pytest.mark.req("FR-12", "FR-36", "FR-44")
+def test_cli_admin_reset_overrides_restores_trading_and_journals_it(env_file: Path, tmp_path: Path) -> None:
+    app = _app()
+    env = ["--env-file", str(env_file)]
+    _cli().invoke(
+        app, ["admin", "policy", "set-ceiling", "--profile", "trade", "--allow", "linear:BTCUSDT", *env]
+    )
+    locked_out = _cli().invoke(
+        app, ["policy", "tighten", "--profile", "read_only", "--max-leverage", "2", *env]
+    )
+    assert locked_out.exit_code == 0, locked_out.output
+
+    not_confirmed = _cli().invoke(app, ["admin", "policy", "reset-overrides", "--user", "local", *env])
+    unknown_field = _cli().invoke(
+        app, ["admin", "policy", "reset-overrides", "--user", "local", "--field", "nope", "--yes", *env]
+    )
+    unknown_user = _cli().invoke(
+        app, ["admin", "policy", "reset-overrides", "--user", "ghost", "--yes", *env]
+    )
+    events_before = _audit_rows(make_settings(tmp_path).db_path, _local_user_id(tmp_path))
+    reset = _cli().invoke(
+        app, ["admin", "policy", "reset-overrides", "--user", "local", "--field", "profile", "--yes", *env]
+    )
+    again = _cli().invoke(
+        app, ["admin", "policy", "reset-overrides", "--user", "local", "--field", "profile", "--yes", *env]
+    )
+
+    assert not_confirmed.exit_code == 1  # no terminal, no --yes: refused
+    assert "pass --yes" in not_confirmed.stderr
+    assert unknown_field.exit_code == 2
+    assert "unknown policy settings: nope" in unknown_field.stderr
+    assert unknown_user.exit_code == 1
+    assert "'ghost' does not exist" in unknown_user.stderr
+    assert [row[1] for row in events_before][-2:] == ["policy_ceiling_set", "policy_tightened"]  # nothing yet
+    assert reset.exit_code == 0, reset.output
+    assert "reset to the ceiling: profile" in reset.stdout
+    profile_row = next(line for line in reset.stdout.splitlines() if line.startswith("profile"))
+    assert profile_row.split() == ["profile", "trade", "-", "trade"]
+    leverage_row = next(line for line in reset.stdout.splitlines() if line.startswith("max_leverage"))
+    assert leverage_row.split() == ["max_leverage", "10", "2", "2"]  # the other setting stays
+    assert again.exit_code == 0
+    assert "nothing changed" in again.stdout
+    rows = _audit_rows(make_settings(tmp_path).db_path, _local_user_id(tmp_path))
+    assert len(rows) == len(events_before) + 1  # the repeated reset wrote nothing
+    _, event, actor, payload = rows[-1]
+    assert (event, actor) == ("policy_overrides_reset", "cli:admin")
+    assert payload == {
+        "fields": ["profile"],
+        "removed": {"profile": "read_only"},
+        "effective_before": {"profile": "read_only"},
+        "effective_after": {"profile": "trade"},
+    }
+    for result in (not_confirmed, unknown_field, unknown_user, reset, again):
         assert "Traceback" not in result.output
 
 

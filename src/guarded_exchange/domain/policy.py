@@ -19,7 +19,7 @@ decides both the effective value and whether a user's change is a weakening:
 | every other number          | min                                        |
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -245,6 +245,23 @@ def validate_override(current: PolicySettings, change: PolicyPatch) -> None:
 def apply_patch[S: PolicySettings | PolicyPatch](target: S, change: PolicyPatch) -> S:
     """``target`` with the fields of ``change`` replaced (no strictness check here)."""
     return replace(target, **change.changes())
+
+
+def parse_policy_fields(names: Iterable[str]) -> frozenset[str]:
+    """Policy field names from text (CLI); an unknown name raises ``InvalidParams`` listing the valid ones."""
+    wanted = {name.strip().lower().replace("-", "_") for name in names}
+    unknown = sorted(wanted - _RULES.keys())
+    if unknown:
+        raise InvalidParams(
+            f"unknown policy settings: {', '.join(unknown)}; known: {', '.join(_RULES)}",
+            details={"field": "fields"},
+        )
+    return frozenset(wanted)
+
+
+def without_fields(overrides: UserOverrides, names: frozenset[str]) -> UserOverrides:
+    """``overrides`` with ``names`` unset, so the ceiling applies to them again (no check here)."""
+    return replace(overrides, **dict.fromkeys(names, UNSET))
 
 
 # --- permissions (FR-11) ------------------------------------------------------------------

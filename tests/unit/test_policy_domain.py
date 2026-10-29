@@ -27,6 +27,7 @@ from guarded_exchange.domain.policy import (
     parse_action_kinds,
     parse_decimal,
     parse_instrument_ref,
+    parse_policy_fields,
     patch_from_payload,
     patch_to_payload,
     permitted,
@@ -35,6 +36,7 @@ from guarded_exchange.domain.policy import (
     strictest,
     validate_override,
     weakened_fields,
+    without_fields,
 )
 from guarded_exchange.domain.users import Environment
 
@@ -398,3 +400,27 @@ def test_action_kinds_and_decimals_parse_from_text() -> None:
     for bad in ("abc", "inf", "NaN"):
         with pytest.raises(InvalidParams):
             parse_decimal("max_leverage", bad)
+
+
+def test_policy_field_names_parse_from_text_and_unknown_ones_are_listed() -> None:
+    assert parse_policy_fields([" Max-Leverage", "profile"]) == {"max_leverage", "profile"}
+    assert parse_policy_fields(POLICY_FIELDS) == set(POLICY_FIELDS)
+    with pytest.raises(InvalidParams) as caught:
+        parse_policy_fields(["profile", "withdraw_limit", "api_key"])
+    assert caught.value.message.startswith(
+        "unknown policy settings: api_key, withdraw_limit; known: profile,"
+    )
+
+
+@pytest.mark.req("FR-12")
+def test_without_fields_unsets_only_the_named_overrides() -> None:
+    overrides = PolicyPatch(
+        profile=Profile.READ_ONLY, max_leverage=Decimal(2), confirm_above_notional_usdt=None
+    )
+
+    remaining = without_fields(
+        overrides, frozenset({"profile", "confirm_above_notional_usdt", "max_pending"})
+    )
+
+    assert remaining == PolicyPatch(max_leverage=Decimal(2))
+    assert without_fields(overrides, frozenset(POLICY_FIELDS)) == NO_OVERRIDES

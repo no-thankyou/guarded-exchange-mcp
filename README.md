@@ -61,9 +61,10 @@ uv run guarded-exchange policy show                                   # ceiling,
 uv run guarded-exchange admin policy set-ceiling --profile trade --allow linear:BTCUSDT --allow spot:ETHUSDT
 uv run guarded-exchange policy tighten --max-leverage 3 --confirm-above-notional-usdt 100
 uv run guarded-exchange policy tighten --max-leverage 20              # refused: would weaken max_leverage
+uv run guarded-exchange admin policy reset-overrides --user local --field profile   # asks, then undoes it
 ```
 
-`admin policy set-ceiling` (optionally `--user NAME`) may raise or lower the ceiling within hard bounds (slippage <= 3%, confirmation lifetime <= 600 s); `policy tighten` refuses any value looser than the current effective one and names the fields. **Tightening is one-way:** there is no command to undo it, not even for the admin (raising the ceiling does not lift a stricter user setting); today the only way back is editing the `policies` table directly with SQL, so tighten deliberately. If the admin lowers the ceiling below a user's setting, the ceiling applies. Both write to the user's journal. `tools/list` shows a user only the tools their profile allows (the result is `cacheScope: private`), and every `tools/call` is checked again, so a hidden tool called directly gets `permission_denied`.
+`admin policy set-ceiling` (optionally `--user NAME`) may raise or lower the ceiling within hard bounds (slippage <= 3%, confirmation lifetime <= 600 s); `policy tighten` refuses any value looser than the current effective one and names the fields. The user cannot undo their own tightening (raising the ceiling does not lift a stricter user setting either); the admin can: `admin policy reset-overrides --user NAME` removes all of the user's own settings, or only those named with `--field` (repeatable), so those fields follow the ceiling again. It lists what it will remove, asks for confirmation and then removes only the listed settings; with no answer on input (closed stdin) it refuses unless `--yes` is given. A piped `y` counts as an answer. A user without matching settings is left as is and nothing is journaled. If the admin lowers the ceiling below a user's setting, the ceiling applies. All three write to the user's journal (`policy_ceiling_set`, `policy_tightened`, `policy_overrides_reset` with the removed values and the effective values before and after). `tools/list` shows a user only the tools their profile allows (the result is `cacheScope: private`), and every `tools/call` is checked again, so a hidden tool called directly gets `permission_denied`.
 
 ### Exchange API keys
 
@@ -143,7 +144,7 @@ src/guarded_exchange/
   domain/          pure Python: value objects (Decimal money), rules, domain exceptions with error codes
   application/     use cases + ports (typing.Protocol), e.g. GetTicker -> ExchangeClient, InstrumentRulesCache,
                    InitializeInstallation -> UnitOfWorkFactory, Clock, IdGenerator, MasterKeyStore,
-                   ReadPolicy / SetCeiling / TightenPolicy / AuthorizeAccess (who may call what),
+                   ReadPolicy / SetCeiling / TightenPolicy / ResetOverrides / AuthorizeAccess (who may call what),
                    CreateUser / IssueAccessToken / RevokeAccessToken, AuthenticateBearerToken -> Authenticator,
                    Add/Replace/DeleteCredential, RecheckCredential, RequireTradingCredential
                    -> KeyPermissionsReader, CredentialCipher, CredentialRepository

@@ -1,5 +1,6 @@
 """Policy use cases on in-memory fakes: read, admin ceiling, user tightening, access decisions."""
 
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 
@@ -10,6 +11,7 @@ from guarded_exchange.application.policy import (
     USER_ACTOR,
     AuthorizeAccess,
     ReadPolicy,
+    ResetOverrides,
     SetCeiling,
     TightenPolicy,
 )
@@ -23,8 +25,9 @@ from guarded_exchange.domain.policy import (
     PolicyPatch,
     Profile,
     default_ceiling,
+    settings_to_payload,
 )
-from guarded_exchange.domain.users import Environment, UserStatus
+from guarded_exchange.domain.users import Environment, User, UserStatus
 from tests.fakes import FakeClock, InMemoryDatabase
 
 BTC = InstrumentRef(Category.LINEAR, "BTCUSDT")
@@ -254,3 +257,160 @@ async def test_access_follows_the_profile_and_policy_changes_apply_on_the_next_c
 
     await TightenPolicy(_uow(db), clock)("alice", PolicyPatch(profile=Profile.READ_ONLY))
     assert await access.visible(user.id, TOOLS) == {"get_ticker", "get_my_policy"}
+
+    await ResetOverrides(_uow(db), clock)("alice", ["profile"])
+    assert await access.visible(user.id, TOOLS) == set(TOOLS)
+
+
+# --- admin resets the user's own settings (ticket 034) --------------------------------------
+
+STRICT_SETTINGS = PolicyPatch(
+    profile=Profile.READ_ONLY,
+    max_leverage=Decimal(2),
+    allowlist=frozenset({BTC}),
+    trust_client_ui=False,
+)
+
+
+async def _tightened_trader(db: InMemoryDatabase, clock: FakeClock) -> User:
+    user = db.add_user("alice")
+    await SetCeiling(_uow(db), clock)("alice", GRANT_TRADING)
+    await TightenPolicy(_uow(db), clock)("alice", STRICT_SETTINGS)
+    clock.advance(timedelta(minutes=1))
+    return user
+
+
+def _snapshot(db: InMemoryDatabase) -> tuple[object, ...]:
+    return dict(db.state.policies), db.all_audit()
+
+
+@pytest.mark.req("FR-12", "FR-44")
+async def test_reset_of_all_overrides_makes_the_effective_policy_the_ceiling(
+    db: InMemoryDatabase, clock: FakeClock
+) -> None:
+    user = await _tightened_trader(db, clock)
+    ceiling_before = db.state.policies[user.id].ceiling
+
+    result = await ResetOverrides(_uow(db), clock)("alice")
+
+    assert result.reset_fields == ("profile", "allowlist", "max_leverage", "trust_client_ui")
+    assert result.view.overrides == NO_OVERRIDES
+    assert settings_to_payload(result.view.effective) == settings_to_payload(result.view.ceiling)
+    assert result.view.effective.profile is Profile.TRADE  # trading is back
+    record = db.state.policies[user.id]
+    assert record.overrides == NO_OVERRIDES
+    assert record.ceiling == ceiling_before  # the admin's ceiling itself is untouched
+    assert record.updated_at == clock.now()
+    assert db.transactions[-1] is True
+    assert db.locked_users[-1] == user.id
+
+
+@pytest.mark.req("FR-12", "FR-36")
+async def test_reset_of_one_field_keeps_the_other_user_settings(
+    db: InMemoryDatabase, clock: FakeClock
+) -> None:
+    user = await _tightened_trader(db, clock)
+
+    result = await ResetOverrides(_uow(db), clock)("alice", ["profile"])
+
+    assert result.reset_fields == ("profile",)
+    assert result.view.overrides == PolicyPatch(
+        max_leverage=Decimal(2), allowlist=frozenset({BTC}), trust_client_ui=False
+    )
+    assert result.view.effective.profile is Profile.TRADE
+    assert result.view.effective.max_leverage == Decimal(2)
+    assert result.view.effective.allowlist == {BTC}
+    assert result.view.effective.trust_client_ui is False
+    entry = db.state.audit[user.id][-1]
+    assert (entry.event_type, entry.actor, entry.ts) == ("policy_overrides_reset", ADMIN_ACTOR, clock.now())
+    assert entry.payload == {
+        "fields": ["profile"],
+        "removed": {"profile": "read_only"},
+        "effective_before": {"profile": "read_only"},
+        "effective_after": {"profile": "trade"},
+    }
+
+
+@pytest.mark.req("FR-12")
+async def test_reset_keeps_a_default_ceiling_default(db: InMemoryDatabase, clock: FakeClock) -> None:
+    user = db.add_user("alice")
+    await TightenPolicy(_uow(db), clock)("alice", PolicyPatch(max_pending=2))
+
+    result = await ResetOverrides(_uow(db), clock)("alice", ["max-pending"])  # the CLI spelling works too
+
+    assert result.reset_fields == ("max_pending",)
+    assert result.view.ceiling_is_default
+    assert db.state.policies[user.id].ceiling is None  # still the code default, not a frozen copy
+    assert result.view.effective.max_pending == default_ceiling(Environment.TESTNET).max_pending
+
+
+@pytest.mark.req("FR-12")
+@pytest.mark.parametrize("fields", [None, ["max_pending"]], ids=["all", "field-not-set"])
+async def test_reset_without_matching_user_settings_is_a_no_op_without_a_journal_entry(
+    db: InMemoryDatabase, clock: FakeClock, fields: list[str] | None
+) -> None:
+    db.add_user("alice")
+    await SetCeiling(_uow(db), clock)("alice", GRANT_TRADING)
+    if fields is not None:  # the user has settings, just not the named one
+        await TightenPolicy(_uow(db), clock)("alice", PolicyPatch(max_leverage=Decimal(2)))
+    before = _snapshot(db)
+
+    result = await ResetOverrides(_uow(db), clock)("alice", fields)
+
+    assert result.reset_fields == ()
+    assert _snapshot(db) == before
+
+
+async def test_reset_for_a_user_without_a_policy_row_is_a_no_op(
+    db: InMemoryDatabase, clock: FakeClock
+) -> None:
+    db.add_user("alice")
+
+    result = await ResetOverrides(_uow(db), clock)("alice")
+
+    assert result.reset_fields == ()
+    assert result.view.ceiling_is_default
+    assert db.state.policies == {}
+    assert db.all_audit() == []
+
+
+@pytest.mark.req("FR-12")
+@pytest.mark.parametrize(
+    ("user", "fields", "error", "text"),
+    [
+        (
+            "alice",
+            ["max_leverage", "withdraw_limit"],
+            InvalidParams,
+            "unknown policy settings: withdraw_limit",
+        ),
+        ("alice", [], InvalidParams, "no settings named"),
+        ("ghost", None, NotFound, "'ghost' does not exist"),
+        ("ghost", ["profile"], NotFound, "'ghost' does not exist"),
+    ],
+)
+async def test_reset_with_an_unknown_field_or_user_fails_clearly_and_changes_nothing(
+    *,
+    db: InMemoryDatabase,
+    clock: FakeClock,
+    user: str,
+    fields: list[str] | None,
+    error: type[Exception],
+    text: str,
+) -> None:
+    await _tightened_trader(db, clock)
+    before = _snapshot(db)
+
+    with pytest.raises(error, match=text):
+        await ResetOverrides(_uow(db), clock)(user, fields)
+
+    assert _snapshot(db) == before
+
+
+async def test_admin_may_reset_a_revoked_users_settings(db: InMemoryDatabase, clock: FakeClock) -> None:
+    user = await _tightened_trader(db, clock)
+    db.state.users[user.id] = replace(user, status=UserStatus.REVOKED)
+
+    result = await ResetOverrides(_uow(db), clock)("alice", ["max_leverage"])
+
+    assert result.reset_fields == ("max_leverage",)

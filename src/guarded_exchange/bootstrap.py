@@ -41,8 +41,10 @@ from guarded_exchange.application.credentials import (
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.policy import (
     AuthorizeAccess,
+    OverridesReset,
     PolicyView,
     ReadPolicy,
+    ResetOverrides,
     SetCeiling,
     TightenPolicy,
 )
@@ -417,6 +419,10 @@ def set_ceiling(env_file: Path | None, user: str | None, change: PolicyPatch) ->
     )
 
 
+def reset_overrides(env_file: Path | None, user: str, fields: frozenset[str] | None) -> OverridesReset:
+    return _with_storage(env_file, lambda uow, s: ResetOverrides(uow, SystemClock())(user, fields))
+
+
 # --- users and access tokens (remote mode) ------------------------------------------------
 
 
@@ -500,7 +506,12 @@ def cli() -> None:
     build_cli(
         serve,
         init,
-        PolicyCommands(show=show_policy, tighten=tighten_policy, set_ceiling=set_ceiling),
+        PolicyCommands(
+            show=show_policy,
+            tighten=tighten_policy,
+            set_ceiling=set_ceiling,
+            reset_overrides=reset_overrides,
+        ),
         AdminCommands(
             create_user=create_user, list_users=list_users, issue_token=issue_token, revoke_token=revoke_token
         ),
