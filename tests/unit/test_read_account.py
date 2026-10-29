@@ -271,6 +271,20 @@ async def test_never_more_than_limit_items_whatever_the_adapter_returns(world: W
     assert world.account.calls == [("get_open_orders", KEYS_A, Category.LINEAR, None, 2)]
 
 
+@pytest.mark.req("FR-3")
+async def test_cutting_to_limit_keeps_the_count_of_omitted_items(world: World) -> None:
+    user = world.user_with_key("alice", KEYS_A)
+    world.account.omitted = 3
+    world.account.orders = {Category.LINEAR: tuple(make_order(f"order-{i}") for i in range(5))}
+    world.account.positions = tuple(make_position(f"SYM{i}USDT") for i in range(5))
+
+    orders = await world.orders()(user.id, "linear", None, 2)
+    positions = await world.positions()(user.id, None, 2)
+
+    assert (len(orders.items), orders.has_more, orders.omitted) == (2, True, 3)
+    assert (len(positions.items), positions.has_more, positions.omitted) == (2, True, 3)
+
+
 @pytest.mark.req("FR-2")
 async def test_reads_open_only_read_transactions_and_call_the_exchange_after_them(world: World) -> None:
     user = world.user_with_key("alice", KEYS_A)

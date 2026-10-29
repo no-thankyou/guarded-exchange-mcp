@@ -244,6 +244,32 @@ async def test_positions_out_of_v1_scope_are_left_out_and_counted(symbol: str) -
     assert page.omitted == 1
 
 
+@pytest.mark.req("FR-3")
+async def test_an_unsupported_position_past_the_page_means_more_not_omitted() -> None:
+    body = copy.deepcopy(POSITIONS_OPEN)  # two open rows; limit=1 asks for 2
+    body["result"]["list"][1]["symbol"] = "BTCUSDT-26DEC25"
+    client, _ = _client(body)
+
+    page = await client.get_positions(KEYS, symbol=None, limit=1)
+
+    assert [p.symbol for p in page.items] == ["BTCUSDT"]
+    assert page.has_more is True
+    assert page.omitted == 0  # the extra row is not on this page
+
+
+@pytest.mark.req("FR-3")
+async def test_an_unsupported_position_on_the_page_still_leaves_more() -> None:
+    body = copy.deepcopy(POSITIONS_OPEN)
+    body["result"]["list"][0]["symbol"] = "BTCUSDT-26DEC25"
+    client, _ = _client(body)
+
+    page = await client.get_positions(KEYS, symbol=None, limit=1)
+
+    assert page.items == ()  # the supported row is past the page
+    assert page.omitted == 1
+    assert page.has_more is True
+
+
 async def test_positions_of_another_symbol_than_requested_are_refused() -> None:
     client, _ = _client(POSITIONS_OPEN)
 
@@ -386,6 +412,34 @@ async def test_orders_out_of_v1_scope_are_left_out_and_counted() -> None:
     assert [o.order_id for o in page.items] == ["0e1d2c3b-4a59-4687-b6a5-c4d3e2f1a0b9"]
     assert page.omitted == 2
     assert page.has_more is False
+
+
+@pytest.mark.req("FR-3")
+async def test_an_unsupported_order_past_the_page_means_more_not_omitted() -> None:
+    body = copy.deepcopy(ORDERS_LINEAR)
+    body["result"]["list"] = body["result"]["list"][:2]  # limit=1 asks for 2
+    body["result"]["list"][1]["symbol"] = "BTCUSDT-26DEC25"
+    client, _ = _client(body)
+
+    page = await client.get_open_orders(KEYS, Category.LINEAR, symbol=None, limit=1)
+
+    assert [o.order_id for o in page.items] == ["5c1e0b9a-7d2f-4e3a-9b8c-1d2e3f4a5b6c"]
+    assert page.has_more is True
+    assert page.omitted == 0  # the extra row is not on this page
+
+
+@pytest.mark.req("FR-3")
+async def test_an_unsupported_order_on_the_page_still_leaves_more() -> None:
+    body = copy.deepcopy(ORDERS_LINEAR)
+    body["result"]["list"] = body["result"]["list"][:2]
+    body["result"]["list"][0]["symbol"] = "BTCUSDT-26DEC25"
+    client, _ = _client(body)
+
+    page = await client.get_open_orders(KEYS, Category.LINEAR, symbol=None, limit=1)
+
+    assert page.items == ()  # the supported row is past the page
+    assert page.omitted == 1
+    assert page.has_more is True
 
 
 async def test_orders_of_another_symbol_than_requested_are_refused() -> None:

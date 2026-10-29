@@ -621,21 +621,23 @@ def positions_from_result(result: dict[str, Any], *, symbol: str | None, limit: 
         raise unavailable("position/list returned another symbol")
     try:
         open_rows = [p for p in parsed.items if p.side and _required_dec(p.size) != 0]
-        supported, omitted = _split_supported(open_rows)
+        supported, omitted = _split_supported(open_rows, limit)
         positions = tuple(_position(p) for p in supported)
     except (InvalidOperation, ValueError) as exc:
         raise unavailable("inconsistent position/list") from exc
-    return Page(items=positions[:limit], has_more=len(parsed.items) > limit, omitted=omitted)
+    return Page(items=positions, has_more=len(parsed.items) > limit, omitted=omitted)
 
 
-def _split_supported[R: (_PositionDTO, _OrderDTO)](rows: list[R]) -> tuple[list[R], int]:
-    """Rows whose symbol v1 can represent, and how many others were left out.
+def _split_supported[R: (_PositionDTO, _OrderDTO)](rows: list[R], limit: int) -> tuple[list[R], int]:
+    """The page (the first ``limit`` rows): rows whose symbol v1 can represent, and how many of the
+    page's rows were left out. Rows past the page only feed ``has_more``, never ``omitted``.
 
     A symbol outside ``^[A-Z0-9]{2,30}$`` (e.g. a dated future ``BTCUSDT-26DEC25``) is out of scope
     for v1 and its text is not shown to the agent (FR-41); it is counted instead of dropped silently.
     """
-    supported = [row for row in rows if _SYMBOL_RE.fullmatch(row.symbol)]
-    return supported, len(rows) - len(supported)
+    page = rows[:limit]
+    supported = [row for row in page if _SYMBOL_RE.fullmatch(row.symbol)]
+    return supported, len(page) - len(supported)
 
 
 def _position(item: _PositionDTO) -> Position:
@@ -740,7 +742,7 @@ def open_orders_from_result(
         raise UnsupportedPositionMode()
     if symbol and any(o.symbol != symbol for o in parsed.items):
         raise unavailable("order/realtime returned another symbol")
-    supported, omitted = _split_supported(parsed.items)
+    supported, omitted = _split_supported(parsed.items, limit)
     if not all(_ORDER_ID_RE.fullmatch(o.order_id) for o in supported):
         raise unavailable("unexpected order id in order/realtime")  # assigned by the exchange
     try:
@@ -750,7 +752,7 @@ def open_orders_from_result(
     rows = len(parsed.items)
     # A request at the exchange's maximum has no spare row: a full page with a cursor may continue.
     full_last_page = limit >= OPEN_ORDERS_PAGE_MAX and rows >= limit and bool(parsed.next_page_cursor)
-    return Page(items=orders[:limit], has_more=rows > limit or full_last_page, omitted=omitted)
+    return Page(items=orders, has_more=rows > limit or full_last_page, omitted=omitted)
 
 
 def _order(item: _OrderDTO, category: Category) -> Order:

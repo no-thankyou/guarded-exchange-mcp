@@ -424,11 +424,22 @@ class RequireTradingCredential:
         except (ExchangeUnavailable, RateLimited) as exc:  # both: "cannot verify right now"
             if credential.admin_attested and credential.permissions is None:
                 return credential  # never verifiable so far: the attestation is all there is
-            raise ExchangeUnavailable(
+            message = (
                 "the exchange key's permissions could not be re-checked; state-changing actions are "
-                "blocked until they are",
+                "blocked until they are"
+            )
+            details = {"reason": "permissions_recheck_failed"}
+            if isinstance(exc, RateLimited):  # fail closed too, but the exchange is not down
+                raise RateLimited(
+                    message,
+                    next_step="Wait retry_after_s seconds, then try again; do not retry in a tight loop.",
+                    retry_after_s=exc.retry_after_s,
+                    details=details,
+                ) from exc
+            raise ExchangeUnavailable(
+                message,
                 next_step="Retry in a minute; if it keeps failing, tell the user the exchange is down.",
-                details={"reason": "permissions_recheck_failed"},
+                details=details,
             ) from exc
 
 

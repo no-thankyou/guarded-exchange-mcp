@@ -256,6 +256,30 @@ async def test_limit_is_passed_on_and_the_answer_says_when_there_is_more(setup: 
     assert setup.stub.requests[0].url.params["limit"] == "2"
 
 
+@pytest.mark.req("FR-3", "FR-41")
+async def test_rows_out_of_v1_scope_are_counted_in_omitted_and_absent_when_none(setup: Setup) -> None:
+    setup.give_key()
+    positions_body = copy.deepcopy(load_fixture(_ROUTES["/v5/position/list"]))
+    positions_body["result"]["list"][1]["symbol"] = "ETHUSDT-26DEC25"  # a dated future
+    orders_body = copy.deepcopy(load_fixture(_ROUTES[("/v5/order/realtime", "linear")]))
+    for row in orders_body["result"]["list"][:2]:
+        row["symbol"] = "BTCUSDT-26DEC25"
+
+    plain_positions = _ok(*await _call(setup.server, "get_positions", {}))
+    plain_orders = _ok(*await _call(setup.server, "get_open_orders", {"category": "linear"}))
+    setup.stub.override = {"/v5/position/list": positions_body, "/v5/order/realtime": orders_body}
+    positions = _ok(*await _call(setup.server, "get_positions", {}))
+    orders = _ok(*await _call(setup.server, "get_open_orders", {"category": "linear"}))
+
+    assert "omitted" not in plain_positions
+    assert "omitted" not in plain_orders
+    assert [p["symbol"] for p in positions["positions"]] == ["BTCUSDT"]
+    assert positions["omitted"] == 1
+    assert len(orders["orders"]) == 1
+    assert orders["omitted"] == 2
+    assert "26DEC25" not in json.dumps([positions, orders])  # FR-41: the unsupported text is not shown
+
+
 def _only(body: dict[str, Any], symbol: str) -> dict[str, Any]:
     filtered = copy.deepcopy(body)
     filtered["result"]["list"] = [o for o in filtered["result"]["list"] if o["symbol"] == symbol]

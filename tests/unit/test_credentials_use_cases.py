@@ -358,18 +358,30 @@ async def test_permissions_back_inside_the_allowlist_unblock_trading_after_a_rec
 
 
 @pytest.mark.req("FR-49", "NFR-1")
-@pytest.mark.parametrize(
-    "failure",
-    [ExchangeUnavailable("timeout"), RateLimited("the exchange rate limit was hit", retry_after_s=1.0)],
-    ids=["unavailable", "rate_limited"],
-)
-async def test_a_stale_key_that_cannot_be_rechecked_blocks_trading(world: World, failure: Exception) -> None:
+async def test_a_stale_key_that_cannot_be_rechecked_blocks_trading(world: World) -> None:
     await world.add()("local", KEYS)
-    world.reader.fail_with = failure
+    world.reader.fail_with = ExchangeUnavailable("timeout")
     world.clock.advance(timedelta(hours=2))
 
-    with pytest.raises(ExchangeUnavailable, match="could not be re-checked"):
+    with pytest.raises(ExchangeUnavailable, match="could not be re-checked") as caught:
         await world.require()("user-local")
+    assert caught.value.details == {"reason": "permissions_recheck_failed"}
+
+
+@pytest.mark.req("FR-49", "NFR-1")
+async def test_a_rate_limited_recheck_blocks_trading_without_calling_the_exchange_down(world: World) -> None:
+    await world.add()("local", KEYS)
+    world.reader.fail_with = RateLimited("the exchange rate limit was hit", retry_after_s=7.0)
+    world.clock.advance(timedelta(hours=2))
+
+    with pytest.raises(RateLimited, match="could not be re-checked") as caught:  # fail closed
+        await world.require()("user-local")
+    assert caught.value.code == "rate_limited"
+    assert caught.value.retry_after_s == 7.0
+    assert caught.value.details == {"reason": "permissions_recheck_failed"}
+    assert caught.value.next_step is not None
+    assert "retry_after_s" in caught.value.next_step
+    assert "down" not in caught.value.next_step
 
 
 @pytest.mark.req("FR-49")

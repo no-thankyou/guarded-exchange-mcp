@@ -262,6 +262,8 @@ class FakeAccount:
     balances: AccountBalances = field(default_factory=make_balances)
     positions: tuple[Position, ...] = ()
     orders: dict[Category, tuple[Order, ...]] = field(default_factory=dict)
+    omitted: int = 0
+    """Reported as ``Page.omitted`` of positions and orders, as the adapter does for unsupported rows."""
     fail_with: Exception | None = None
     calls: list[tuple[object, ...]] = field(default_factory=list)
     db: "InMemoryDatabase | None" = None
@@ -276,7 +278,7 @@ class FakeAccount:
         self.calls.append(("get_positions", keys, symbol, limit))
         self._maybe_fail()
         found = tuple(p for p in self.positions if symbol is None or p.symbol == symbol)
-        return Page(items=found, has_more=False)  # deliberately not cut: the use case must cut
+        return Page(items=found, has_more=False, omitted=self.omitted)  # not cut: the use case must cut
 
     async def get_open_orders(
         self, keys: ApiKeyPair, category: Category, *, symbol: str | None, limit: int
@@ -284,7 +286,7 @@ class FakeAccount:
         self.calls.append(("get_open_orders", keys, category, symbol, limit))
         self._maybe_fail()
         found = tuple(o for o in self.orders.get(category, ()) if symbol is None or o.symbol == symbol)
-        return Page(items=found, has_more=False)
+        return Page(items=found, has_more=False, omitted=self.omitted)
 
     def _maybe_fail(self) -> None:
         if self.db is not None and self.db.open_transactions:
