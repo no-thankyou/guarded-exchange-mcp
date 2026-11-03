@@ -241,6 +241,9 @@ def test_cancel_all_lists_the_plain_open_orders_and_marks_external_ones() -> Non
             plain_order("ours"),
             plain_order("manual", origin=OrderOrigin.EXTERNAL),
             plain_order("stop", conditional=ConditionalKind.STOP_LOSS, status=OrderStatus.UNTRIGGERED),
+            plain_order(
+                "tp-limit", conditional=ConditionalKind.TAKE_PROFIT
+            ),  # listed as New: still not plain
             plain_order("done", status=OrderStatus.FILLED),
             replace(plain_order("eth"), symbol="ETHUSDT"),
         ),
