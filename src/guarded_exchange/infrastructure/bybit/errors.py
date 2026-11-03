@@ -202,10 +202,13 @@ ORDER_NOT_OPEN_RET_CODES: Final = frozenset(
         110008,  # The order has been completed or cancelled
         110010,  # The order has been cancelled
         170142,  # Order has been cancelled (spot)
+        170143,  # Cannot be found on order book (spot)
         170213,  # Order does not exist. (spot)
     }
 )
-"""The order is not open any more (or never was): this request changed nothing."""
+"""The order is not open any more (or never was): this request changed nothing. ``170144`` "Order has
+been locked" is not here: the order is open but cannot be changed now - a definite refusal of this
+request (nothing changed), answered as ``exchange_rejected`` by its family (review 1 of ticket 013)."""
 
 
 def error_for_order_change(  # noqa: PLR0911 - one return per class of answer

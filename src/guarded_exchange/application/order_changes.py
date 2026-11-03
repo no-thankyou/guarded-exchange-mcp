@@ -19,8 +19,9 @@ Each is an ``ActionPath``: the same auth, idempotency, decision under ``lock_use
   absolute values, so a keyless repeat is a new call; an idempotency key works as for orders.
 """
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final
 
@@ -46,6 +47,7 @@ from guarded_exchange.application.ports import (
     IdGenerator,
     OrderChanges,
     TradingExchange,
+    UnitOfWork,
     UnitOfWorkFactory,
 )
 from guarded_exchange.application.submit_action import (
@@ -70,19 +72,21 @@ from guarded_exchange.domain.actions import (
     parse_cancel_all_orders,
     parse_cancel_order,
 )
-from guarded_exchange.domain.audit import ClientDescription, JsonValue
+from guarded_exchange.domain.audit import AuditRecord, ClientDescription, JsonValue
 from guarded_exchange.domain.credentials import ApiKeyPair
 from guarded_exchange.domain.errors import (
     DomainError,
     ExchangeUnavailable,
     NotFound,
     OutcomeUnknown,
+    RateLimited,
 )
 from guarded_exchange.domain.idempotency import IdempotencyRecord, Outcome, is_stale
 from guarded_exchange.domain.instruments import Category, require_supported_quote
 from guarded_exchange.domain.limits import check_amend_limits, no_confirmation_channel, requires_confirmation
 from guarded_exchange.domain.order_changes import (
     CANCEL_ALL_MAX,
+    OPEN_STATUSES,
     AmendPlan,
     CancelAllPlan,
     CancelPlan,
@@ -143,6 +147,19 @@ class CancelAllOrdersInput:
 class _AmendRead:
     plan: AmendPlan
     leverage: Decimal | None
+    read_at: datetime
+    """When this call started reading the order: changes recorded after it are not in the plan."""
+
+
+CHANGE_SETTLE_WINDOW: Final = timedelta(seconds=60)
+"""How far back an amend looks for other changes of the same order that may not be visible in its own
+read yet (D-8, review 1 of ticket 013). Longer than the exchange takes to show an accepted change
+(spike 004: at once) and than one call's send deadline."""
+CHANGE_IN_PROGRESS_RETRY_S: Final = 5.0
+_CHANGE_TOOLS: Final = frozenset({"amend_order", "cancel_order", "cancel_all_orders"})
+_JOURNAL_TYPES: Final = frozenset({"order_attempt", "order_outcome"})
+_UNSETTLED_STATES: Final = frozenset({"amend_requested", "cancel_requested", "unknown"})
+_NOTHING_CHANGED: Final = frozenset({"rejected", "not_sent"})
 
 
 class _OrderChangePath[A: TradingAction, M, P, R: ChangeResult](ActionPath[A, M, P, R]):
@@ -425,6 +442,7 @@ class SubmitAmendOrder(_OrderChangePath[AmendOrder, _AmendRead, AmendPlan, Amend
         return market.plan.risk
 
     async def _read(self, action: AmendOrder, keys: ApiKeyPair, policy: EffectivePolicy) -> _AmendRead:
+        read_at = self._clock.now()
         order = await self._changes.get_order_by_id(keys, action.category, action.symbol, action.order_id)
         require_changeable(order, symbol=action.symbol, category=action.category, order_id=action.order_id)
         # Any status: a reducing amend must still work on an instrument being delisted (FR-15).
@@ -438,7 +456,27 @@ class SubmitAmendOrder(_OrderChangePath[AmendOrder, _AmendRead, AmendPlan, Amend
             state = await self._trading.get_symbol_position(keys, action.symbol)
             position, leverage = state.position, state.leverage
         plan = plan_amend(action, order, rules, band=band, position=position)
-        return _AmendRead(plan, leverage)
+        return _AmendRead(plan, leverage, read_at)
+
+    async def _guard_locked(
+        self, uow: UnitOfWork, attempt: Attempt, action: AmendOrder, market: _AmendRead
+    ) -> None:
+        """D-8 for amends: the plan (risk direction, order value) was computed from the order as read.
+        Another change of the same order that is still in flight, unconfirmed, or confirmed only after
+        that read makes the read stale: an earlier amend accepted but not yet visible would let this one
+        pass the order value limit or the kill switch against values that are no longer true."""
+        since = self._clock.now() - CHANGE_SETTLE_WINDOW
+        records = await uow.audit.since(attempt.user_id, since, _JOURNAL_TYPES)
+        other = unsettled_change(records, action.order_id, market.read_at, own_action_id=attempt.action_id)
+        if other is not None:
+            raise RateLimited(
+                "another change of this order is not settled yet, so the order as read may be out of date; "
+                "nothing was sent",
+                next_step="Read the order again with get_open_orders in a few seconds and call again with "
+                "values based on what it shows now.",
+                retry_after_s=CHANGE_IN_PROGRESS_RETRY_S,
+                details={"reason": "order_change_in_progress", "order_id": action.order_id},
+            )
 
     def _check(self, action: AmendOrder, market: _AmendRead, policy: EffectivePolicy) -> AmendPlan:
         plan = market.plan
@@ -469,8 +507,11 @@ class SubmitAmendOrder(_OrderChangePath[AmendOrder, _AmendRead, AmendPlan, Amend
             return AmendResult(attempt.action_id, plan, ChangeState.AMENDED, TouchedOrder.of(found), source)
 
         def requested(found: Order | None) -> AmendResult:
-            after = None if found is None else TouchedOrder.of(found)
-            return AmendResult(attempt.action_id, plan, ChangeState.AMEND_REQUESTED, after)
+            if found is None:
+                return AmendResult(attempt.action_id, plan, ChangeState.AMEND_REQUESTED, None)
+            # Closed without the new values: it filled or was cancelled first; nothing was changed.
+            state = ChangeState.AMEND_REQUESTED if found.status in OPEN_STATUSES else ChangeState.ORDER_CLOSED
+            return AmendResult(attempt.action_id, plan, state, TouchedOrder.of(found))
 
         return await self._change_one(
             attempt,
@@ -547,14 +588,19 @@ class SubmitCancelAllOrders(_OrderChangePath[CancelAllOrders, CancelAllPlan, Can
                     item, stop = await self._cancel_one(keys, order, deadline - anyio.current_time())
                     items.append(item)
                 items = await self._verify(keys, plan, items)
+            except Exception as exc:  # a bug: some cancels may have been sent; never "failed"
+                log.exception("cancel_all_failed", action_id=attempt.action_id)
+                broken = _cancel_all_unknown(plan, items)
+                await self._try_record_outcome(
+                    attempt, {"status": "unknown", "error_type": type(exc).__name__}, Outcome.UNKNOWN, broken
+                )
+                raise broken from exc
             except BaseException as exc:  # not an error (the interpreter exits): record, re-raise
-                done = [*items, *(CancelAllItem(o, ItemState.UNKNOWN) for o in plan.orders[len(items) :])]
-                interrupted = CancelAllResult(attempt.action_id, plan, tuple(done), stopped_by="interrupted")
                 await self._try_record_outcome(
                     attempt,
                     {"status": "unknown", "error_type": type(exc).__name__},
                     Outcome.UNKNOWN,
-                    interrupted,
+                    _cancel_all_unknown(plan, items),
                 )
                 raise
             result = CancelAllResult(
@@ -579,7 +625,12 @@ class SubmitCancelAllOrders(_OrderChangePath[CancelAllOrders, CancelAllPlan, Can
         """One cancel; the second value stops the rest (an unknown outcome or a transient failure:
         sending on would only add unknowns or hit the same wall)."""
         if remaining_s <= 0:
-            late = OutcomeUnknown("the overall deadline passed", details={"reason": "send_deadline"})
+            # Nothing of this one was sent: not "unknown", a transient stop (retrying may work).
+            late = ExchangeUnavailable(
+                "the overall send deadline of this call passed before this cancel was sent",
+                next_step="Call cancel_all_orders again for the rest; check get_open_orders first.",
+                details={"reason": "send_deadline"},
+            )
             return CancelAllItem(order, ItemState.NOT_SENT, late.code), late
         try:
             await self._send_within_deadline(
@@ -675,6 +726,62 @@ def _cancel_all_outcome(result: CancelAllResult) -> dict[str, JsonValue]:
             for item in result.items
         ],
     }
+
+
+def unsettled_change(
+    records: Sequence[AuditRecord], order_id: str, read_at: datetime, *, own_action_id: str
+) -> str | None:
+    """The action id of a journaled change of ``order_id`` that the order as read at ``read_at`` may not
+    reflect: no outcome yet (in flight), an outcome that is unknown or only "requested", or any change
+    recorded after the read. A change the exchange definitely refused (or that was never sent) changed
+    nothing and does not count."""
+    attempts = {
+        str(r.payload["action_id"]): r
+        for r in records
+        if r.event_type == "order_attempt"
+        and r.payload.get("tool") in _CHANGE_TOOLS
+        and order_id in _touched_ids(r.payload)
+    }
+    outcomes = {str(r.payload["action_id"]): r for r in records if r.event_type == "order_outcome"}
+    for action_id in attempts:
+        if action_id == own_action_id:
+            continue
+        outcome = outcomes.get(action_id)
+        if outcome is None:
+            return action_id
+        status = outcome.payload.get("status")
+        if status in _NOTHING_CHANGED:
+            continue
+        if outcome.ts >= read_at or status == "unknown" or _unsettled_state(outcome.payload, order_id):
+            return action_id
+    return None
+
+
+def _touched_ids(attempt: Mapping[str, Any]) -> set[str]:
+    single = attempt.get("order")
+    ids = {str(single["order_id"])} if isinstance(single, Mapping) else set()
+    ids.update(str(o["order_id"]) for o in attempt.get("orders") or ())
+    return ids
+
+
+def _unsettled_state(outcome: Mapping[str, Any], order_id: str) -> bool:
+    if outcome.get("state") in _UNSETTLED_STATES:
+        return True
+    return any(
+        str(item.get("order_id")) == order_id and item.get("state") in _UNSETTLED_STATES
+        for item in outcome.get("items") or ()
+    )
+
+
+def _cancel_all_unknown(plan: CancelAllPlan, items: list[CancelAllItem]) -> OutcomeUnknown:
+    sent = [item.order.order_id for item in items if item.state is not ItemState.NOT_SENT]
+    return OutcomeUnknown(
+        f"cancel_all_orders on {plan.action.symbol} stopped on an internal error after {len(items)} of "
+        f"{len(plan.orders)} orders; some cancels may have been applied",
+        next_step=f"Check get_open_orders for {plan.action.symbol} ({plan.action.category.value}) in a few "
+        "seconds and tell the user what is still open; calling cancel_all_orders again is safe.",
+        details={"reason": "internal_error", "attempted": ",".join(sent)},
+    )
 
 
 def _nothing_happened(result: CancelAllResult) -> bool:

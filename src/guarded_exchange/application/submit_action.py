@@ -304,6 +304,11 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
     def _in_progress(self, held: IdempotencyRecord) -> OutcomeUnknown:
         """The answer to a repeat while the first call has not answered yet."""
 
+    async def _guard_locked(self, uow: UnitOfWork, attempt: Attempt, action: A, market: M) -> None:
+        """Under ``lock_user``: refuse if what was read before the decision may be stale because of
+        another change in flight (D-8). Default: nothing to check."""
+        return
+
     def _client_order_id(self, action_id: str) -> str | None:
         """The client order id of an action that creates an order; ``None`` for the others."""
         return None
@@ -603,6 +608,7 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
         require_permission(policy, Permission.TRADE)
         # FR-16, as of now (D-8): the switch may have been turned on since the early check.
         require_allowed(policy.kill_switch, self._risk(action, market), action.kind)
+        await self._guard_locked(uow, attempt, action, market)
         return self._check(action, market, policy)
 
     # --- sending and the outcome ----------------------------------------------------------------

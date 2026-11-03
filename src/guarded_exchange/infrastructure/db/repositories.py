@@ -3,6 +3,7 @@
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import ColumnElement, Row, and_, case, delete, literal, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -156,6 +157,18 @@ class SqlAuditLogRepository(_Repository):
             payload=json.loads(payload),
         )
 
+    async def since(self, chain_id: str, at: datetime, event_types: frozenset[str]) -> Sequence[AuditRecord]:
+        query = (
+            select(audit_log)
+            .where(
+                audit_log.c.chain_id == chain_id,
+                audit_log.c.ts >= at,
+                audit_log.c.event_type.in_(sorted(event_types)),
+            )
+            .order_by(audit_log.c.seq)
+        )
+        return [_audit_record(row) for row in await self._conn.execute(query)]
+
     async def list(self, chain_id: str, *, after_seq: int = 0, limit: int = 100) -> Sequence[AuditRecord]:
         query = (
             select(audit_log)
@@ -163,17 +176,18 @@ class SqlAuditLogRepository(_Repository):
             .order_by(audit_log.c.seq)
             .limit(limit)
         )
-        return [
-            AuditRecord(
-                chain_id=row.chain_id,
-                seq=row.seq,
-                ts=row.ts,
-                event_type=row.event_type,
-                actor=row.actor,
-                payload=json.loads(row.payload),
-            )
-            for row in await self._conn.execute(query)
-        ]
+        return [_audit_record(row) for row in await self._conn.execute(query)]
+
+
+def _audit_record(row: Any) -> AuditRecord:
+    return AuditRecord(
+        chain_id=row.chain_id,
+        seq=row.seq,
+        ts=row.ts,
+        event_type=row.event_type,
+        actor=row.actor,
+        payload=json.loads(row.payload),
+    )
 
 
 class SqlPolicyRepository(_Repository):

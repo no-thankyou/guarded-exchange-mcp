@@ -37,6 +37,8 @@ _NEXT: Final = {
     "failed.",
     ChangeState.AMEND_REQUESTED: "The exchange accepted the change but the order does not show it yet "
     "(applied asynchronously): check get_open_orders in a few seconds; do not treat it as failed.",
+    ChangeState.ORDER_CLOSED: "The order is closed (filled or cancelled) and does not show the change: it "
+    "was not applied. Check get_order_history and get_positions; do not amend it again.",
     ChangeState.FILLED: "The order filled completely before the cancel could take effect: there was "
     "nothing left to cancel. Check get_positions.",
 }
@@ -116,8 +118,9 @@ class AmendOrderOut(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    status: Literal["amended", "amend_requested"] = Field(
-        description="amended: the order shows the new values. amend_requested: accepted, not visible yet."
+    status: Literal["amended", "amend_requested", "order_closed"] = Field(
+        description="amended: the order shows the new values. amend_requested: accepted, not visible yet. "
+        "order_closed: the order filled or was cancelled before the change applied; it was not changed."
     )
     result_source: Literal["sent", "reconnaissance", "replay"] = Field(description=_SOURCE_DESCRIPTION)
     risk: Literal["increases", "reduces"] = Field(
@@ -188,11 +191,16 @@ class CancelAllOut(BaseModel):
         steps = []
         if result.count(ItemState.UNKNOWN):
             steps.append(
-                "Some cancels have no reliable answer (unknown): check get_open_orders in a few seconds; "
-                "calling cancel_all_orders again is safe."
+                "Some cancels have no reliable answer (unknown): check get_open_orders in a few seconds. "
+                "Calling cancel_all_orders again cannot add risk, but it takes a NEW snapshot and also "
+                "cancels orders placed after this call, external ones included."
             )
         if result.count(ItemState.NOT_SENT) or result.count(ItemState.CANCEL_REQUESTED) or plan.has_more:
-            steps.append("Call cancel_all_orders again (a new idempotency_key, or none) for what is left.")
+            steps.append(
+                "Call cancel_all_orders again (a new idempotency_key, or none) for what is left: a repeat "
+                "takes a NEW snapshot, so it also cancels orders placed after this call, external ones "
+                "included; check get_open_orders first if that matters to the user."
+            )
         if result.source is ResultSource.REPLAY:
             steps.append(_REPLAY)
         return cls(

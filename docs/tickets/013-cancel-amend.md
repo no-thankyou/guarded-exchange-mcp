@@ -36,9 +36,36 @@
 8. **Проверка мутациями** (каждая мутация — откат одного решения, прогон затронутых тестов; скрипт вне репозитория): убиты все 20 — игнор худшей цены в классификации; reduce-only не особый; условные не отфильтрованы (сначала выжила: в тесте стоп был `Untriggered` и отсекался по статусу — добавлен условный `New`); внешние не помечены; снимок без `orderFilter`; нет разведки после неизвестной отмены; нет сверки cancel-all; `170310`/`110079`/`170191` как определённые; «не открыт» как неизвестные; нет ранней и нет повторной под lock проверки kill switch; пропуск лимитов amend; игнор подтверждения отмены; cancel-all не останавливается на неизвестном; переходящий отказ cancel-all проглочен; нет чтения после принятия; ответ про чужой ордер принят; hedge mode при чтении по id.
 9. **Проверки:** `uv run pytest -q` — зелёный, `ruff check`, `ruff format --check`, `mypy` (strict), `lint-imports` — зелёные. `docs/traceability.md` перегенерирован.
 
+### Ревью, раунд 1 (2026-11-03)
+Вердикт CHANGES_REQUESTED: рефакторинг `ActionPath` и решение №1 (снимок + отмена по id) приняты; выжили 16 мутаций ревьюера на новой логике. Исправлено в той же ветке:
+1. **Тесты на выжившие мутации** — `tests/unit/test_order_changes_review1.py` (стиль `test_submit_action_review1/2.py`, `..._reconnaissance.py`), домен — `tests/unit/test_order_changes_domain.py`, коды — `tests/integration/test_bybit_order_changes.py`. Повторный прогон 16 мутаций ревьюера (скрипт вне репозитория), все кроме одной убиты:
+   - R1 shield в `_change_one` — `test_a_caller_cancelled_during_the_post_still_records_the_outcome_and_keeps_the_key[cancel|amend]`;
+   - R2 ветка бага адаптера — `test_a_bug_in_the_adapter_is_an_unknown_outcome_journaled_as_such`;
+   - R3 `_send_within_deadline` — `test_a_cancel_that_never_answers_hits_the_deadline_and_is_looked_up` (`call_with_watchdog`);
+   - R4 shield cancel-all — `test_a_caller_cancelled_during_the_post_..._keeps_the_key[cancel_all]`;
+   - R5 `_nothing_happened` (a=`cancel_requested`, b=`rate_limited`) — `test_an_accepted_cancel_then_a_rate_limit_is_a_result_and_the_key_is_kept`;
+   - R6 сбой чтения сверки — `test_a_failed_verification_read_never_turns_a_state_into_closed`;
+   - R7 неизвестный, исчезнувший из списка → `closed` — `test_an_unknown_cancel_whose_order_left_the_list_is_closed`;
+   - R8 `has_more` при сверке — `test_a_list_with_more_pages_settles_nothing`;
+   - R9 исчерпанный общий дедлайн — `test_an_exhausted_overall_deadline_sends_nothing_more`;
+   - R10 баг в одной отмене останавливает остальные — `test_a_bug_in_one_cancel_stops_the_rest`;
+   - R11 Outcome UNKNOWN/ACCEPTED — `test_the_stored_outcome_is_unknown_exactly_when_an_order_is_unknown`;
+   - R12 порог подтверждения amend — `test_an_amend_at_the_confirmation_threshold_needs_confirmation`;
+   - R13 `170190`, R14 `40004` в `_UNKNOWN_CODES` — R13 убита; **R14 эквивалентна**: `40004` вне документированных семейств, поэтому «неизвестно» и без явного списка (запись в списке — документация; поведение покрыто тестом);
+   - R15 сторона позиции при росте reduce-only — `test_a_reduce_only_buy_against_a_long_cannot_grow`;
+   - R16 reduce-only без min notional — `test_only_a_reduce_only_order_is_exempt_from_the_minimum_order_value`.
+2. **Коды:** `170143` → `not_found`, `170144` → определённый отказ (обоснование — PLAN «Тикет 013», п. 6); тесты `test_definite_answers_to_a_change[170143|170144]`; `170190`, `40004` добавлены в `_UNKNOWN_CODES`.
+3. **TOCTOU amend (D-8)** — проверка под `lock_user` по журналу за 60 с (PLAN «Тикет 013», п. 7): `test_an_amend_after_an_accepted_but_invisible_one_is_refused` (сценарий 1, обход FR-13), `test_a_reducing_looking_amend_cannot_slip_past_the_kill_switch_on_a_stale_read` (сценарий 2, обход kill switch), `test_a_change_confirmed_after_this_calls_read_makes_the_read_stale`, `test_a_change_still_in_flight_blocks_an_amend_of_the_same_order`, `test_a_definitely_refused_earlier_change_does_not_block`; SQL — `test_recent_journal_records_of_some_types_are_read_back_from_sqlite`.
+4. **cancel-all `except`** разделён: `Exception` → `outcome_unknown` (`internal_error`) с подсказкой `get_open_orders` — `test_a_bug_after_the_sends_is_an_unknown_outcome_with_a_hint`; прочие `BaseException` — запись и проброс — `test_a_non_error_interruption_is_recorded_and_re_raised`.
+5. **Amend: закрытый ордер при чтении** → `order_closed` — `test_an_amend_whose_order_closed_before_it_applied_says_so`.
+6. PLAN: отсутствие fingerprint-окна для amend записано как уточнение D-20; `next_step` cancel-all говорит, что повтор берёт НОВЫЙ снимок и отменит и новые (в т.ч. внешние) ордера; `cancel-batch` поднят в предложениях.
+7. **Мутации на новые исправления** (тот же скрипт), все убиты: `170143` не в «не открыт»; хук guard удалён; guard игнорирует поздний исход / состояние `*_requested` / изменение в полёте / не пропускает определённо отказанные; `order_closed` → `amend_requested`; баг cancel-all пробрасывается как есть; `since` без фильтра по времени / по типу. Две из них (`*_requested`, в полёте) сначала выжили: в тестах исход совпадал по времени с чтением и ловился правилом «записан после чтения» — тесты разведены по времени, добавлен тест «в полёте».
+8. Проверки: `uv run pytest -q`, `ruff check`, `ruff format --check`, `mypy`, `lint-imports` — зелёные; `docs/traceability.md` перегенерирован.
+
 ### Предложения (вне scope)
+- **Пакетная отмена `POST /v5/order/cancel-batch`** (до 20 id за запрос) вместо N запросов `order/cancel`: сейчас cancel-all на 20 ордеров тратит 20 единиц лимита биржи (linear `order/cancel` — 10/с на UID) и ~5 с последовательных запросов; при нескольких клиентах пользователя это быстро упирается в `rate_limited` посреди отмены (остаток `not_sent`). Batch — одна единица на пакет и та же «отмена ровно увиденных id»; нужен спайк по поэлементным кодам в `retExtInfo.list` и их классификации (неизвестно/определённо).
 - Сверять `origin=system` с журналом (`order_attempt.client_order_id`) вместо префикса `gx-`: сейчас внешний бот с префиксом `gx-` будет помечен как «наш». Важно для FR-21 в 016 (показ человеку внешних ордеров); нужен индекс client order id → action в БД.
 - В 016 pending для cancel-all должен фиксировать список id снимка в digest, а исполнитель — отменять только их (сейчас это свойство уже есть у пути, но digest считается от аргументов).
 - Отмена условных ордеров (не TP/SL позиции) — отдельное действие с классификацией: снятие стопа увеличивает риск, снятие условного входа — снижает.
-- Пакетная отмена `POST /v5/order/cancel-batch` (≤ 20 id за запрос) вместо N запросов — меньше лимита биржи; нужен спайк по поэлементным кодам ответа.
+- Индекс `audit_log(chain_id, ts)` или отдельная таблица «изменения ордера в полёте», если журнал пользователя станет большим (проверка D-8 amend читает хвост цепочки по времени).
 - FR-46 (v2) не должен считать отмены и снижающие amend.

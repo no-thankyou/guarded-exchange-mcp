@@ -272,3 +272,30 @@ def test_a_cancel_targets_exactly_the_order_read_and_reduces_risk() -> None:
     assert (plan.order.order_id, plan.order.external, plan.risk) == ("o-1", True, RED)
     with pytest.raises(NotFound):
         plan_cancel(CancelOrder("BTCUSDT", LINEAR, "o-2"), plain_order("o-1"))
+
+
+def test_a_reduce_only_buy_against_a_long_cannot_grow() -> None:
+    """A reduce-only buy reduces a short only; against a long there is nothing it may grow into."""
+    order = plain_order("o-1", side=OrderSide.BUY, qty="0.002", reduce_only=True)
+    long = make_position(side=PositionSide.LONG)
+
+    with pytest.raises(PositionNotFound):
+        plan_amend(amend(qty="0.004"), order, make_rules(), band=BAND, position=long)
+    short = make_position(side=PositionSide.SHORT)
+    assert plan_amend(amend(qty="0.004"), order, make_rules(), band=BAND, position=short).qty == Decimal(
+        "0.004"
+    )
+
+
+@pytest.mark.req("FR-10")
+def test_only_a_reduce_only_order_is_exempt_from_the_minimum_order_value() -> None:
+    rules = replace(make_rules(), min_notional=Decimal(1000))
+    reduce_only = plain_order("o-1", side=OrderSide.SELL, price="81000", qty="0.004", reduce_only=True)
+    plain = plain_order("o-2", side=OrderSide.SELL, price="81000", qty="0.004")
+
+    assert plan_amend(amend("o-1", qty="0.003"), reduce_only, rules, band=BAND, position=None).qty == Decimal(
+        "0.003"
+    )
+    with pytest.raises(InstrumentRuleViolation) as error:
+        plan_amend(amend("o-2", qty="0.003"), plain, rules, band=BAND, position=None)
+    assert error.value.details["rule"] == "min_notional"

@@ -41,6 +41,9 @@ class ChangeState(StrEnum):
     """Read back: the order carries the new qty and price."""
     AMEND_REQUESTED = "amend_requested"
     """The exchange accepted the amend; the order did not show it yet (asynchronous)."""
+    ORDER_CLOSED = "order_closed"
+    """The exchange accepted the amend, but the order read back is closed (filled or cancelled) without
+    the new values: the change was not applied (review 1 of ticket 013)."""
 
 
 @dataclass(frozen=True, slots=True)

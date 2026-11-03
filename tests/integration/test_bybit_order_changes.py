@@ -5,6 +5,7 @@ import copy
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -25,6 +26,7 @@ from guarded_exchange.application.order_changes import (
 from guarded_exchange.application.order_results import ResultSource
 from guarded_exchange.application.policy import SetCeiling
 from guarded_exchange.domain.account import OrderOrigin, OrderStatus
+from guarded_exchange.domain.audit import AuditEvent, AuditEventType
 from guarded_exchange.domain.credentials import EXCHANGE_BYBIT
 from guarded_exchange.domain.errors import (
     ExchangeRejected,
@@ -40,6 +42,7 @@ from guarded_exchange.domain.policy import InstrumentRef, PolicyPatch, Profile
 from guarded_exchange.domain.users import Environment
 from guarded_exchange.infrastructure.bybit.client import BybitClient, RetryPolicy
 from guarded_exchange.infrastructure.bybit.http import make_http_client
+from guarded_exchange.infrastructure.db.uow import SqlUnitOfWorkFactory
 from tests.conftest import load_fixture
 from tests.fakes import FakeCipher, FakeClock, FakeKeyReader, InMemoryDatabase, SequentialIds
 from tests.integration.test_bybit_trading import EMPTY_ORDERS, KEYS, NOW_MS, TRADING_KEY
@@ -171,6 +174,8 @@ _UNKNOWN_CODES = [
     (170310, "Order modification timeout"),
     (170311, "Order modification failed"),
     (110079, "The order is processing and can not be operated, please try again later"),
+    (170190, "Cancel order has been finished"),
+    (40004, "the order is modified during the process of replacing , please check the order status again"),
     (10016, "Server error"),
     (4242424, "something new"),
 ]
@@ -208,6 +213,8 @@ async def test_codes_after_which_the_change_may_have_happened_are_unknown_and_ne
         (110010, NotFound),
         (170142, NotFound),
         (170213, NotFound),
+        (170143, NotFound),  # Cannot be found on order book (review 1)
+        (170144, ExchangeRejected),  # Order has been locked: open, not changed now (review 1)
         (10001, InvalidParams),
         (110022, ExchangeRejected),
         (10006, RateLimited),
@@ -381,3 +388,20 @@ async def test_an_amend_the_exchange_did_not_confirm_is_settled_by_the_orders_st
         result = await world.amend(world.user_id, request)
         assert (result.state, result.source) == (state, ResultSource.RECONNAISSANCE)
     assert [path for path, _ in world.stub.posts()] == ["/v5/order/amend"]
+
+
+@pytest.mark.req("FR-36")
+async def test_recent_journal_records_of_some_types_are_read_back_from_sqlite(
+    uow: SqlUnitOfWorkFactory,
+) -> None:
+    """``AuditLogRepository.since`` (the amend guard, D-8) on real SQLite: by chain, time and type."""
+    early, late = datetime(2026, 11, 3, 12, 0, tzinfo=UTC), datetime(2026, 11, 3, 12, 1, tzinfo=UTC)
+    async with uow(write=True) as tx:
+        await tx.audit.append("u-1", AuditEvent(AuditEventType.ORDER_ATTEMPT, "a", {"action_id": "1"}), early)
+        await tx.audit.append("u-1", AuditEvent(AuditEventType.ORDER_ATTEMPT, "a", {"action_id": "2"}), late)
+        await tx.audit.append("u-1", AuditEvent(AuditEventType.ORDER_REPEAT, "a", {"action_id": "3"}), late)
+        await tx.audit.append("u-2", AuditEvent(AuditEventType.ORDER_OUTCOME, "a", {"action_id": "4"}), late)
+    async with uow(write=False) as tx:
+        found = await tx.audit.since("u-1", late, frozenset({"order_attempt", "order_outcome"}))
+
+    assert [(r.payload["action_id"], r.ts) for r in found] == [("2", late)]

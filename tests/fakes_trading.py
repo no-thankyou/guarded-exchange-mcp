@@ -79,6 +79,8 @@ class FakeOrderChanges:
     hold_send: anyio.Event | None = None
     on_send: Callable[[], None] | None = None
     sent: bool = False
+    sending: anyio.Event = field(default_factory=anyio.Event)
+    """Set when a cancel or amend has been entered."""
 
     def add(self, *orders: Order) -> None:
         for order in orders:
@@ -145,6 +147,7 @@ class FakeOrderChanges:
     def _sending(self, *call: object) -> None:
         self._call(*call)
         self.sent = True
+        self.sending.set()
         if self.db is not None:
             self.audit_at_send.append([r.event_type for r in self.db.all_audit()])
         if self.on_send is not None:

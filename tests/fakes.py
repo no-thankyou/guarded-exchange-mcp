@@ -519,6 +519,9 @@ class InMemoryAuditLogRepository:
     async def list(self, chain_id: str, *, after_seq: int = 0, limit: int = 100) -> Sequence[AuditRecord]:
         return [r for r in self._state.audit.get(chain_id, []) if r.seq > after_seq][:limit]
 
+    async def since(self, chain_id: str, at: datetime, event_types: frozenset[str]) -> Sequence[AuditRecord]:
+        return [r for r in self._state.audit.get(chain_id, []) if r.ts >= at and r.event_type in event_types]
+
 
 class InMemoryPolicyRepository:
     def __init__(self, state: _State, *, writable: bool) -> None:

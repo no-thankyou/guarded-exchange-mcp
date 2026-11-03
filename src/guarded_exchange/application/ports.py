@@ -338,6 +338,11 @@ class AuditLogRepository(Protocol):
         """Records of one chain with ``seq > after_seq`` in ``seq`` order, at most ``limit``."""
         ...
 
+    async def since(self, chain_id: str, at: datetime, event_types: frozenset[str]) -> Sequence[AuditRecord]:
+        """Records of one chain of these types with ``ts >= at``, in ``seq`` order (ticket 013: recent
+        changes of an order, D-8)."""
+        ...
+
 
 class PolicyRepository(Protocol):
     """One policy record per user (FR-12). No record = default ceiling, no overrides."""
