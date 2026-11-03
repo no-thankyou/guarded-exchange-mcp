@@ -27,11 +27,13 @@ from guarded_exchange.domain.errors import DomainError, ExchangeUnavailable, Not
 from guarded_exchange.domain.history import HistoryPage, HistoryPeriod, Trade
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
+from guarded_exchange.domain.order_changes import OrderAmendment
 from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
 from guarded_exchange.infrastructure.bybit.errors import (
     RET_OK,
     RETRYABLE_RET_CODES,
     error_for_create,
+    error_for_order_change,
     error_for_ret_code,
     outcome_unknown,
     unavailable,
@@ -40,6 +42,7 @@ from guarded_exchange.infrastructure.bybit.mapper import (
     KLINE_INTERVALS,
     OPEN_ORDERS_PAGE_MAX,
     ORDER_HISTORY_PAGE_MAX,
+    PLAIN_ORDERS_FILTER,
     UNIFIED_ACCOUNT,
     USDT_SETTLE,
     Envelope,
@@ -48,6 +51,9 @@ from guarded_exchange.infrastructure.bybit.mapper import (
     client_order_id_for,
     key_permissions_from_result,
     open_orders_from_result,
+    order_amend_body,
+    order_by_id_from_result,
+    order_cancel_body,
     order_create_body,
     order_fill_from_result,
     order_history_from_result,
@@ -56,6 +62,7 @@ from guarded_exchange.infrastructure.bybit.mapper import (
     placed_order_from_result,
     positions_from_result,
     price_band_from_result,
+    require_changed_order,
     rules_from_result,
     symbol_position_from_result,
     ticker_from_result,
@@ -282,7 +289,68 @@ class BybitClient:
             envelope.result, symbol=symbol, client_order_id=client_order_id, endpoint="order/history"
         )
 
-    async def _post(self, path: str, body: Mapping[str, object], *, keys: ApiKeyPair) -> Envelope:
+    # --- cancel and amend (ticket 013): ``OrderChanges`` port --------------------------------
+
+    async def get_order_by_id(
+        self, keys: ApiKeyPair, category: Category, symbol: str, order_id: str
+    ) -> Order | None:
+        """``order/realtime?orderId=`` (open and recent closed orders: ``openOnly`` is ignored for an id
+        query), then ``order/history?orderId=``. Both GETs: safe to repeat (D-21 reconnaissance)."""
+        params = {"category": category.value, "symbol": symbol, "orderId": order_id}
+        for path, endpoint in (
+            ("/v5/order/realtime", "order/realtime"),
+            ("/v5/order/history", "order/history"),
+        ):
+            envelope = await self._get(path, params, keys=keys)
+            found = order_by_id_from_result(
+                envelope.result, category=category, symbol=symbol, order_id=order_id, endpoint=endpoint
+            )
+            if found is not None:
+                return found
+        return None
+
+    async def list_cancellable_orders(
+        self, keys: ApiKeyPair, category: Category, symbol: str, limit: int
+    ) -> Page[Order]:
+        """``order/realtime`` with an explicit ``orderFilter=Order``: plain open orders only, so neither
+        conditional orders nor a position's TP/SL can ever be on the list ``cancel_all_orders`` works
+        through (Bybit returns all kinds when the filter is omitted; docs checked 2026-11-03)."""
+        params = {
+            "category": category.value,
+            "symbol": symbol,
+            "openOnly": "0",
+            "orderFilter": PLAIN_ORDERS_FILTER,
+            "limit": str(min(limit + 1, OPEN_ORDERS_PAGE_MAX)),
+        }
+        envelope = await self._get("/v5/order/realtime", params, keys=keys)
+        return open_orders_from_result(envelope.result, category=category, symbol=symbol, limit=limit)
+
+    async def cancel_order(self, keys: ApiKeyPair, category: Category, symbol: str, order_id: str) -> None:
+        """``POST /v5/order/cancel`` by order id, once: never retried. Asynchronous at Bybit: success means
+        "accepted", the use case reads the order back (D-21)."""
+        envelope = await self._post(
+            "/v5/order/cancel",
+            order_cancel_body(category, symbol, order_id),
+            keys=keys,
+            errors=error_for_order_change,
+        )
+        require_changed_order(envelope.result, order_id=order_id)
+
+    async def amend_order(self, keys: ApiKeyPair, amendment: OrderAmendment) -> None:
+        """``POST /v5/order/amend``, once: never retried; asynchronous like a cancel."""
+        envelope = await self._post(
+            "/v5/order/amend", order_amend_body(amendment), keys=keys, errors=error_for_order_change
+        )
+        require_changed_order(envelope.result, order_id=amendment.order_id)
+
+    async def _post(
+        self,
+        path: str,
+        body: Mapping[str, object],
+        *,
+        keys: ApiKeyPair,
+        errors: Callable[..., DomainError] = error_for_create,
+    ) -> Envelope:
         """One signed POST. The body is serialised once and both signed and sent verbatim.
 
         Failures before the request can have left (no connection) are ``ExchangeUnavailable``;
@@ -316,7 +384,7 @@ class BybitClient:
             raise outcome_unknown("unexpected response format") from None
         if envelope.ret_code == RET_OK:
             return envelope
-        raise error_for_create(
+        raise errors(
             envelope.ret_code, envelope.ret_msg, retry_after_s=self._retry_after(response, envelope.time_ms)
         )
 

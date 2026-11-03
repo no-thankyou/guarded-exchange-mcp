@@ -217,7 +217,11 @@ def plan_amend(
     current = require_changeable(
         order, symbol=action.symbol, category=action.category, order_id=action.order_id
     )
-    if current.order_type is not OrderType.LIMIT or current.price is None or current.qty_unit is not QtyUnit.BASE:
+    if (
+        current.order_type is not OrderType.LIMIT
+        or current.price is None
+        or current.qty_unit is not QtyUnit.BASE
+    ):
         raise InvalidParams(
             "only a resting limit order can be amended",
             next_step="Cancel the order instead, or place a new one.",
@@ -268,7 +272,11 @@ def _new_qty(
     it stays within the position (FR-43): ``filled + position size`` at most."""
     wanted, adjustment, position_size = requested, None, None
     if order.reduce_only and requested > order.qty:
-        if position is None or position.symbol != order.symbol or _REDUCING_SIDE[position.side] is not order.side:
+        if (
+            position is None
+            or position.symbol != order.symbol
+            or _REDUCING_SIDE[position.side] is not order.side
+        ):
             raise PositionNotFound(
                 f"there is no {order.symbol} position this reduce-only order could reduce",
                 next_step="Check get_positions; a reduce-only order can only grow up to the position.",

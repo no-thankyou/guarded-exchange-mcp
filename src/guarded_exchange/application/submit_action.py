@@ -313,8 +313,7 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
         details = {"reason": "superseded"}
         return OutcomeUnknown(
             "this call took too long before sending: nothing was sent to the exchange",
-            next_step="Check get_open_orders for the current state, then tell the user before trying "
-            "again.",
+            next_step="Check get_open_orders for the current state, then tell the user before trying again.",
             details=details,
         )
 
@@ -576,9 +575,7 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
                 )
                 await self._settle(uow, attempt.claims, refusal_outcome(refusal), refusal)
                 return refusal
-            await uow.audit.append(
-                attempt.user_id, self._attempted(attempt, action, plan), self._clock.now()
-            )
+            await uow.audit.append(attempt.user_id, self._attempted(attempt, action, plan), self._clock.now())
             return plan
 
     @staticmethod
@@ -610,7 +607,9 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
 
     # --- sending and the outcome ----------------------------------------------------------------
 
-    async def _send_within_deadline[T](self, send: Callable[[], Awaitable[T]], seconds: float | None = None) -> T:
+    async def _send_within_deadline[T](
+        self, send: Callable[[], Awaitable[T]], seconds: float | None = None
+    ) -> T:
         """One request, never repeated (ADR-002), bounded as a whole: the HTTP client's read timeout
         only limits the silence between chunks, so a slowly dripping answer could hold the shield."""
         bound = self._send_deadline_s if seconds is None else seconds

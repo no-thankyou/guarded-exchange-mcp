@@ -208,7 +208,9 @@ ORDER_NOT_OPEN_RET_CODES: Final = frozenset(
 """The order is not open any more (or never was): this request changed nothing."""
 
 
-def error_for_order_change(ret_code: int, ret_msg: str, *, retry_after_s: float | None = None) -> DomainError:
+def error_for_order_change(  # noqa: PLR0911 - one return per class of answer
+    ret_code: int, ret_msg: str, *, retry_after_s: float | None = None
+) -> DomainError:
     """``retCode`` of ``POST /v5/order/cancel`` or ``/v5/order/amend`` -> domain exception (FR-27, FR-28).
 
     The rule of ``order/create`` (ticket 012): a definite refusal only within the documented refusal

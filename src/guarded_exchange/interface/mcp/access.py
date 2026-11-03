@@ -35,6 +35,9 @@ TOOL_PERMISSIONS: Final[Mapping[str, Permission]] = {
     "get_positions": Permission.READ,
     "get_open_orders": Permission.READ,
     "place_order": Permission.TRADE,
+    "cancel_order": Permission.TRADE,
+    "amend_order": Permission.TRADE,
+    "cancel_all_orders": Permission.TRADE,
     "activate_kill_switch": Permission.READ,  # FR-44: any user may stop their own trading
 }
 """What every registered tool needs. A tool missing here is hidden and refused (fail closed)."""

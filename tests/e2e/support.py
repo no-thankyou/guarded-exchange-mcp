@@ -12,6 +12,11 @@ from guarded_exchange.application.credentials import (
 )
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.kill_switch import ActivateKillSwitch
+from guarded_exchange.application.order_changes import (
+    SubmitAmendOrder,
+    SubmitCancelAllOrders,
+    SubmitCancelOrder,
+)
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy
 from guarded_exchange.application.ports import UnitOfWorkFactory
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
@@ -23,6 +28,7 @@ from guarded_exchange.domain.policy import Permission
 from guarded_exchange.domain.users import Environment
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, fixed_principal
 from guarded_exchange.interface.mcp.server import UseCases, create_server
+from guarded_exchange.interface.mcp.tools.order_changes import OrderChangeUseCases
 from tests.fakes import (
     FakeAccount,
     FakeCipher,
@@ -34,6 +40,7 @@ from tests.fakes import (
     SequentialIds,
 )
 from tests.fakes_history import FakeHistory
+from tests.fakes_trading import FakeOrderChanges
 
 
 def use_cases(
@@ -45,6 +52,7 @@ def use_cases(
     cipher: FakeCipher | None = None,
     trading: FakeTrading | None = None,
     key_reader: FakeKeyReader | None = None,
+    changes: FakeOrderChanges | None = None,
 ) -> UseCases:
     """The MCP use cases wired to fakes, as the composition root wires the real adapters."""
     exchange, clock, account = exchange or FakeExchange(), clock or FakeClock(), account or FakeAccount()
@@ -76,6 +84,32 @@ def use_cases(
             **scope,
         ),
         activate_kill_switch=ActivateKillSwitch(db, clock),
+        order_changes=order_change_use_cases(db, cipher, recheck, rules, clock, trading, changes),
+    )
+
+
+def order_change_use_cases(  # noqa: PLR0917 - the fakes the composition root would wire
+    db: UnitOfWorkFactory,
+    cipher: FakeCipher,
+    recheck: RecheckCredential,
+    rules: InstrumentRulesCache,
+    clock: FakeClock,
+    trading: FakeTrading | None,
+    changes: FakeOrderChanges | None,
+) -> OrderChangeUseCases:
+    scope: dict[str, Any] = {"exchange": EXCHANGE_BYBIT, "environment": Environment.TESTNET}
+    credentials = RequireTradingCredential(db, cipher, recheck, clock, **scope)
+    common: dict[str, Any] = {
+        "changes": changes or FakeOrderChanges(),
+        "clock": clock,
+        "ids": SequentialIds("chg"),
+        "reconnaissance_delay_s": 0,
+        **scope,
+    }
+    return OrderChangeUseCases(
+        cancel_order=SubmitCancelOrder(db, credentials, **common),
+        amend_order=SubmitAmendOrder(db, credentials, rules, trading=trading or FakeTrading(), **common),
+        cancel_all_orders=SubmitCancelAllOrders(db, credentials, **common),
     )
 
 
@@ -89,11 +123,12 @@ def server_for(
     trading: FakeTrading | None = None,
     clock: FakeClock | None = None,
     tool_permissions: Mapping[str, Permission] = TOOL_PERMISSIONS,
+    changes: FakeOrderChanges | None = None,
 ) -> MCPServer[Any]:
     """The production server for principal ``user_id`` (``None``: nobody resolved)."""
     principal = fixed_principal(user_id) if user_id is not None else (lambda: None)
     return create_server(
-        use_cases(db, exchange, clock, account=account, cipher=cipher, trading=trading),
+        use_cases(db, exchange, clock, account=account, cipher=cipher, trading=trading, changes=changes),
         principal=principal,
         tool_permissions=tool_permissions,
     )
