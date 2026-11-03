@@ -14,7 +14,7 @@ from guarded_exchange.application.submit_action import PlaceOrderInput, ResultSo
 from guarded_exchange.domain.account import SymbolPosition
 from guarded_exchange.domain.errors import OutcomeUnknown
 from guarded_exchange.domain.idempotency import IN_FLIGHT_GUARD, KeyKind, RecordStatus, new_claim
-from tests.fakes import InMemoryDatabase, make_position
+from tests.fakes import InMemoryDatabase, call_with_watchdog, make_position
 from tests.unit.test_submit_action import ORDER_EVENTS, World, make_world, payload, types
 from tests.unit.test_submit_action_idempotency import KEY, records
 
@@ -214,12 +214,13 @@ async def test_a_bug_while_sending_is_outcome_unknown_and_repeats_send_nothing()
 async def test_a_read_back_that_never_answers_is_fill_unknown() -> None:
     world = make_world()
     await world.grant()
-    world.trading.hold_get = anyio.Event()  # never set
+    hold = world.trading.hold_get = anyio.Event()  # set only by the watchdog
     world.place._fill_read_deadline_s = 0.05
 
-    with anyio.fail_after(5):
-        result = await world()
+    result, error = await call_with_watchdog(world, hold)
 
+    assert error is None
+    assert result is not None
     assert result.source is ResultSource.PLACED
     assert result.fill is None
     assert types(world.journal(*ORDER_EVENTS)) == ["order_attempt", "order_outcome"]

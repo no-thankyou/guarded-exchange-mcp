@@ -11,6 +11,7 @@ from guarded_exchange.domain.errors import ExchangeUnavailable, OutcomeUnknown
 from guarded_exchange.domain.idempotency import KeyKind, RecordStatus
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.orders import FillStatus, OrderFill
+from tests.fakes import call_with_watchdog
 from tests.unit.test_submit_action import ORDER_EVENTS, World, make_world, payload, types
 
 pytestmark = pytest.mark.req("FR-27")
@@ -107,13 +108,13 @@ async def test_a_lookup_that_never_answers_is_bounded() -> None:
     world = make_world()
     await world.grant()
     world.trading.place_error = TIMEOUT
-    world.trading.hold_find = anyio.Event()  # never set
+    hold = world.trading.hold_find = anyio.Event()  # set only by the watchdog
     world.place._reconnaissance_deadline_s = 0.05
 
-    with anyio.fail_after(5), pytest.raises(OutcomeUnknown) as error:
-        await world()
+    _, error = await call_with_watchdog(world, hold)
 
-    assert error.value.details["reconnaissance"] == "failed"
+    assert isinstance(error, OutcomeUnknown)
+    assert error.details["reconnaissance"] == "failed"
     assert types(world.journal(*ORDER_EVENTS)) == ["order_attempt", "order_outcome"]
 
 
@@ -122,13 +123,13 @@ async def test_a_send_that_never_answers_hits_the_overall_deadline_and_is_looked
     has its own deadline, after which the outcome is unknown and the order is looked up."""
     world = make_world()
     await world.grant()
-    world.trading.hold_place = anyio.Event()  # never set: a slowly dripping answer
+    hold = world.trading.hold_place = anyio.Event()  # a slowly dripping answer; only the watchdog ends it
     world.place._send_deadline_s = 0.05
 
-    with anyio.fail_after(5), pytest.raises(OutcomeUnknown) as error:
-        await world()
+    _, error = await call_with_watchdog(world, hold)
 
-    assert error.value.details["reason"] == "send_deadline"
+    assert isinstance(error, OutcomeUnknown)
+    assert error.details["reason"] == "send_deadline"
     assert len(world.trading.sent) == 1
     assert len(lookups(world)) == 1
 

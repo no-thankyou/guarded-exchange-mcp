@@ -23,8 +23,8 @@ stored (``domain.idempotency.keeps_record``). A new attempt needs a new key.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import timedelta
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import Final
 
 import anyio
@@ -67,6 +67,7 @@ from guarded_exchange.domain.errors import (
 )
 from guarded_exchange.domain.idempotency import (
     FINGERPRINT_WINDOW,
+    IN_FLIGHT_GUARD,
     IdempotencyRecord,
     KeyKind,
     Outcome,
@@ -122,6 +123,15 @@ _LOOKED_UP: Final = {
     "not_found": "; it was not found by its client order id (yet)",
     "failed": "; looking it up by its client order id failed",
 }
+
+_KEYED_REPEAT: Final = (
+    "Repeating this exact call with the same idempotency_key returns this answer and never sends a "
+    "second order."
+)
+_KEYLESS_REPEAT: Final = (
+    "Without an idempotency_key, repeating this call later places a NEW order: first check "
+    "get_open_orders and get_order_history for this client_order_id."
+)
 
 DEFAULT_SEND_DEADLINE_S: Final = 15.0
 """Overall bound of one order request, whatever the HTTP client's per-phase timeouts allow."""
@@ -339,6 +349,9 @@ class SubmitPlaceOrder:
             raise self._in_progress(held)
         answer = restore_answer(held.result)
         if isinstance(answer, DomainError):
+            if held.kind is KeyKind.FINGERPRINT and answer.next_step:
+                # Stored by a keyed call: this caller has no key, so a later repeat is a new order.
+                answer.next_step = answer.next_step.replace(_KEYED_REPEAT, _KEYLESS_REPEAT)
             raise answer
         return answer
 
@@ -527,7 +540,7 @@ class SubmitPlaceOrder:
                 )
                 return superseded
             if attempt.claims.shadow is not None:
-                await uow.idempotency.mark_sent(attempt.claims.shadow, now)  # best effort, no fence
+                await self._keep_shadow(uow, attempt.claims.shadow, now)
             try:
                 plan = await self._decide_locked(uow, attempt, action, market)
             except DomainError as refusal:
@@ -538,6 +551,18 @@ class SubmitPlaceOrder:
                 return refusal
             await uow.audit.append(attempt.user_id, self._attempted(attempt, plan), self._clock.now())
             return plan
+
+    @staticmethod
+    async def _keep_shadow(uow: UnitOfWork, shadow: IdempotencyRecord, now: datetime) -> None:
+        """The keyed call's fingerprint follows it to ``sent`` without fencing the send. If it expired
+        while the call was stuck, take it again (when free), so a keyless identical call during this
+        send is a repeat and not a second order (review 2)."""
+        if await uow.idempotency.mark_sent(shadow, now):
+            return
+        fresh = replace(shadow, created_at=now, expires_at=now + IN_FLIGHT_GUARD)
+        held = await uow.idempotency.claim(fresh, now)
+        if held.held_by(shadow.action_id):
+            await uow.idempotency.mark_sent(fresh, now)
 
     async def _decide_locked(
         self, uow: UnitOfWork, attempt: _Attempt, action: PlaceOrder, market: _Market
@@ -742,16 +767,9 @@ class SubmitPlaceOrder:
             "tell the user what you found. "
         )
         primary = attempt.claims.primary
-        if primary is not None and primary.kind is KeyKind.EXPLICIT:
-            repeat = (
-                "Repeating this exact call with the same idempotency_key returns this answer and never "
-                "sends a second order."
-            )
-        else:  # no key: only a fingerprint that expires (or none for a reduce-only order)
-            repeat = (
-                "Without an idempotency_key, repeating this call later places a NEW order: first check "
-                "get_open_orders and get_order_history for this client_order_id."
-            )
+        keyed = primary is not None and primary.kind is KeyKind.EXPLICIT
+        # Without a key: only a fingerprint that expires (or none for a reduce-only order).
+        repeat = _KEYED_REPEAT if keyed else _KEYLESS_REPEAT
         return OutcomeUnknown(
             f"the order may or may not have reached the exchange ({cause.message})"
             + _LOOKED_UP.get(looked, ""),

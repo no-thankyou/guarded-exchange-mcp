@@ -1,7 +1,7 @@
 """In-memory fakes of application ports (no mocks of everything, ENGINEERING.md)."""
 
 import json
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -924,3 +924,30 @@ class FakeTrading:
         self.calls.append(call)
         if self.db is not None and self.db.open_transactions:
             self.calls_in_transaction += 1
+
+
+async def call_with_watchdog[T](
+    call: Callable[[], Awaitable[T]], hold: anyio.Event, *, after_s: float = 2.0
+) -> tuple[T | None, BaseException | None]:
+    """Run ``call`` whose fake exchange waits on ``hold`` and must return on its own deadline. Shielded
+    code ignores outer cancellation, so a removed deadline would hang the test: the watchdog releases
+    ``hold`` after ``after_s`` and the helper then fails fast. Returns ``(result, exception)``."""
+    needed = False
+    result: T | None = None
+    error: BaseException | None = None
+
+    async def watchdog() -> None:
+        nonlocal needed
+        await anyio.sleep(after_s)
+        needed = True
+        hold.set()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(watchdog)
+        try:
+            result = await call()
+        except Exception as exc:
+            error = exc
+        tasks.cancel_scope.cancel()
+    assert not needed, "the bound under test did not fire: the watchdog had to release the hold"
+    return result, error
