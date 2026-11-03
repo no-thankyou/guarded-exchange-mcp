@@ -19,6 +19,7 @@ from guarded_exchange.domain.credentials import (
     permissions_to_payload,
 )
 from guarded_exchange.domain.idempotency import IN_FLIGHT_GUARD, IdempotencyRecord, KeyKind, RecordStatus
+from guarded_exchange.domain.kill_switch import KillSwitch
 from guarded_exchange.domain.policy import (
     PolicyRecord,
     ceiling_from_payload,
@@ -64,6 +65,7 @@ class SqlUserRepository(_Repository):
                     status=user.status.value,
                     environment=user.environment.value,
                     created_at=user.created_at,
+                    kill_switch=user.kill_switch.value,
                 )
             )
         except IntegrityError as exc:
@@ -82,6 +84,10 @@ class SqlUserRepository(_Repository):
 
     async def list(self) -> Sequence[User]:
         return [_user_from_row(row) for row in await self._conn.execute(select(users).order_by(users.c.name))]
+
+    async def set_kill_switch(self, user_id: str, state: KillSwitch) -> None:
+        self._require_writable("users.set_kill_switch")
+        await self._conn.execute(update(users).where(users.c.id == user_id).values(kill_switch=state.value))
 
 
 class SqlAccessTokenRepository(_Repository):
@@ -454,6 +460,7 @@ def _user_from_row(row: Row[tuple[object, ...]]) -> User:
         status=UserStatus(mapping["status"]),
         environment=Environment(mapping["environment"]),
         created_at=mapping["created_at"],
+        kill_switch=KillSwitch(mapping["kill_switch"]),
     )
 
 

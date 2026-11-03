@@ -1,4 +1,4 @@
-"""Users of the server and the defaults a new user starts with (SPEC FR-45, NFR-1)."""
+"""Users of the server and the defaults a new user starts with (SPEC FR-16, FR-45, NFR-1)."""
 
 import re
 from dataclasses import dataclass
@@ -6,6 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from guarded_exchange.domain.errors import InvalidParams
+from guarded_exchange.domain.kill_switch import KillSwitch
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
@@ -29,6 +30,7 @@ class User:
     status: UserStatus
     environment: Environment
     created_at: datetime
+    kill_switch: KillSwitch = KillSwitch.NONE  # FR-16: on (and by whom) blocks risk-increasing actions
 
     @property
     def is_active(self) -> bool:

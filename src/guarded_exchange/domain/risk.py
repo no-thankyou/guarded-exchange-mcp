@@ -1,7 +1,7 @@
 """Risk direction of a trading action and the reduce-only clamp (SPEC FR-43, FR-15, FR-16; GP-2, GP-5).
 
 The direction decides which limits apply: risk-increasing actions face the allowlist, the order
-size and leverage limits (and later the kill switch); risk-reducing ones only the position size.
+size and leverage limits and the kill switch; risk-reducing ones only the position size.
 A reduce-only order can never grow or flip a position: its quantity is cut to the position.
 """
 

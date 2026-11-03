@@ -3,7 +3,7 @@ FR-17, FR-25 - FR-27, FR-36, FR-43; PLAN ADR-008, ADR-010, ADR-014, D-8, D-10, D
 
 auth -> repeat check (idempotency key, or the 30 s fingerprint window of a risk-increasing call) ->
 key check (D-24) -> exchange reads -> plan (rules, rounding, worst price) -> one write transaction
-under ``lock_user``: fence the idempotency claim, re-check access, key and policy, limits,
+under ``lock_user``: fence the idempotency claim, re-check access, key, policy, kill switch, limits,
 confirmation, journal the refusal or the attempt -> send outside any transaction, with an overall
 deadline -> on an unknown outcome, look the order up by its client order id (never resend) -> journal
 the outcome and store the answer for repeats, in one transaction.
@@ -81,6 +81,7 @@ from guarded_exchange.domain.idempotency import (
     request_hash,
 )
 from guarded_exchange.domain.instruments import Category, InstrumentRules, require_supported_quote
+from guarded_exchange.domain.kill_switch import require_allowed
 from guarded_exchange.domain.limits import (
     check_limits,
     no_confirmation_channel,
@@ -441,6 +442,8 @@ class SubmitPlaceOrder:
         """The key check and everything read from the exchange before the decision. Refusals of a
         known user are journaled (FR-36); errors in the request itself are not."""
         try:
+            # FR-16, after the repeat check: a repeat still gets the first call's answer.
+            require_allowed(policy.kill_switch, classify(action), action.kind)
             cleared = await self._credentials(user.id)  # D-24 re-check if stale; may call the exchange
             market = await self._read_market(action, cleared.keys)
             # Early plan: rule violations (tick, minimums, status) are input errors, answered before
@@ -577,6 +580,7 @@ class SubmitPlaceOrder:
             raise key_replaced_or_deleted()
         policy = (await load_policy_view(uow, user)).effective
         require_permission(policy, Permission.TRADE)
+        require_allowed(policy.kill_switch, classify(action), action.kind)  # FR-16, as of now (D-8)
         plan = self._plan(action, market, policy)
         leverage = market.symbol_position.leverage if market.symbol_position is not None else None
         check_limits(plan, policy, leverage=leverage)

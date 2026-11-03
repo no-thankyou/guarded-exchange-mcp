@@ -168,6 +168,7 @@ def _app() -> typer.Typer:
         tighten=bootstrap.tighten_policy,
         set_ceiling=bootstrap.set_ceiling,
         reset_overrides=bootstrap.reset_overrides,
+        kill_switch=bootstrap.set_kill_switch,
     )
     admin = AdminCommands(
         create_user=bootstrap.create_user,

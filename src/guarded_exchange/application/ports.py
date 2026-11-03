@@ -23,6 +23,7 @@ from guarded_exchange.domain.credentials import (
 from guarded_exchange.domain.history import HistoryPage, HistoryPeriod, Trade
 from guarded_exchange.domain.idempotency import IdempotencyRecord, RecordStatus
 from guarded_exchange.domain.instruments import Category, InstrumentRules
+from guarded_exchange.domain.kill_switch import KillSwitch
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
 from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
 from guarded_exchange.domain.policy import PolicyRecord
@@ -258,6 +259,11 @@ class UserRepository(Protocol):
 
     async def list(self) -> Sequence[User]:
         """All users ordered by name."""
+        ...
+
+    async def set_kill_switch(self, user_id: str, state: KillSwitch) -> None:
+        """Store the user's kill switch (FR-16). Needs a write unit of work; the caller holds
+        ``lock_user`` (D-8), so a decision under the same lock sees either the old or the new state."""
         ...
 
 

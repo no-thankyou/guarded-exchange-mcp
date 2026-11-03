@@ -112,6 +112,12 @@ class LimitExceeded(DomainError):
     code: ClassVar[str] = "limit_exceeded"
 
 
+class KillSwitchActive(DomainError):
+    """The user's kill switch is on and the action increases risk; nothing was sent (FR-16)."""
+
+    code: ClassVar[str] = "kill_switch_active"
+
+
 class ConfirmationChannelUnavailable(DomainError):
     """The policy requires the user's confirmation, but no trusted channel can ask for it (FR-25)."""
 
@@ -150,6 +156,7 @@ _RESTORABLE: dict[str, type[DomainError]] = {
         RateLimited,
         InstrumentRuleViolation,
         LimitExceeded,
+        KillSwitchActive,
         ConfirmationChannelUnavailable,
         PositionNotFound,
         OutcomeUnknown,
