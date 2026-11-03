@@ -10,11 +10,13 @@ import typer
 
 from guarded_exchange.application.admin import IssuedToken, RevokedToken
 from guarded_exchange.application.credentials import StoredCredential
+from guarded_exchange.application.kill_switch import KillSwitchChange
 from guarded_exchange.application.policy import OverridesReset, PolicyView
 from guarded_exchange.domain.actions import ALL_ACTION_KINDS
 from guarded_exchange.domain.audit import canonical_decimal, canonical_time
 from guarded_exchange.domain.credentials import WARNING_NO_IP_WHITELIST, ApiKeyPair, Credential
 from guarded_exchange.domain.errors import InvalidParams
+from guarded_exchange.domain.kill_switch import KillSwitch, KillSwitchActor
 from guarded_exchange.domain.policy import (
     UNSET,
     InstrumentRef,
@@ -59,6 +61,8 @@ class PolicyCommands:
     tighten: Callable[[Path | None, PolicyPatch], PolicyView]
     set_ceiling: Callable[[Path | None, str | None, PolicyPatch], PolicyView]
     reset_overrides: Callable[[Path | None, str, frozenset[str] | None], OverridesReset]
+    kill_switch: Callable[[Path | None, str | None, bool, KillSwitchActor], KillSwitchChange]
+    """``(env_file, user, on, by)``: turn the user's kill switch on or off (FR-16)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,7 +301,24 @@ def render_policy(view: PolicyView) -> str:
     user = view.user
     header = f"user: {user.name} [{user.id}] ({user.status.value}, {user.environment.value})"
     note = ["", "note: the exchange key is read-only, so the effective profile is read_only"]
-    return "\n".join([header, "", *table, *(note if view.key_read_only else [])])
+    switch = f"kill switch: {render_kill_switch_state(view.effective.kill_switch)}"
+    return "\n".join([header, switch, "", *table, *(note if view.key_read_only else [])])
+
+
+def render_kill_switch_state(state: KillSwitch) -> str:
+    if not state.is_on:
+        return "off"
+    return f"ON, turned on by the {state.value}: risk-increasing actions are refused"
+
+
+def render_kill_switch_change(change: KillSwitchChange) -> str:
+    state = render_kill_switch_state(change.after)
+    if not change.changed:
+        return f"user {change.user.name}: kill switch unchanged, {state}"
+    lines = [f"user {change.user.name}: kill switch {state}"]
+    if change.after.is_on:
+        lines.append("Nothing was cancelled on the exchange: open orders stay open (cancel them if needed).")
+    return "\n".join(lines)
 
 
 def _set[T](value: T | None) -> T | Unset:
@@ -432,12 +453,39 @@ def build_cli(
         typer.echo(render_init_report(init(env_file)))
 
     app.add_typer(_policy_cli(policy), name="policy")
+    app.add_typer(_kill_switch_cli(policy, KillSwitchActor.USER), name="kill-switch")
     app.add_typer(_keys_cli(keys), name="keys")
     admin = typer.Typer(no_args_is_help=True, help="Admin commands (service channel only, never MCP).")
     admin.add_typer(_admin_policy_cli(policy), name="policy")
+    admin.add_typer(_kill_switch_cli(policy, KillSwitchActor.ADMIN), name="kill-switch")
     admin.add_typer(_admin_user_cli(admin_commands), name="user")
     admin.add_typer(_admin_token_cli(admin_commands), name="token")
     app.add_typer(admin, name="admin")
+    return app
+
+
+def _kill_switch_cli(policy: PolicyCommands, by: KillSwitchActor) -> typer.Typer:
+    admin = by is KillSwitchActor.ADMIN
+    who = "the admin" if admin else "the user"
+    app = typer.Typer(
+        no_args_is_help=True,
+        help=f"Kill switch as {who}: on = refuse every risk-increasing action; reads and risk-reducing "
+        "actions keep working; nothing is cancelled on the exchange."
+        + ("" if admin else " A kill switch the admin turned on only the admin can turn off."),
+    )
+
+    @app.command("on")
+    def on_command(user: UserOpt = None, env_file: EnvFileOpt = None) -> None:
+        """Turn the kill switch on: risk-increasing actions are refused from the next decision on."""
+        typer.echo(render_kill_switch_change(policy.kill_switch(env_file, user, True, by)))
+
+    @app.command("off")
+    def off_command(user: UserOpt = None, yes: YesOpt = False, env_file: EnvFileOpt = None) -> None:
+        """Turn the kill switch off: risk-increasing actions are allowed again (within the policy)."""
+        if not yes:
+            _confirm_or_exit(f"Turn the kill switch of {user or 'the local user'} off?")
+        typer.echo(render_kill_switch_change(policy.kill_switch(env_file, user, False, by)))
+
     return app
 
 

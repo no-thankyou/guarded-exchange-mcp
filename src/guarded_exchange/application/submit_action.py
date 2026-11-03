@@ -3,7 +3,7 @@ FR-36, FR-43; PLAN ADR-008, ADR-010, ADR-014, D-8, D-10, D-15, D-19, D-20, D-21)
 
 auth -> repeat check (idempotency key, or the 30 s fingerprint window of a risk-increasing call) ->
 key check (D-24) -> exchange reads -> plan (rules, rounding, worst price) -> one write transaction
-under ``lock_user``: fence the idempotency claim, re-check access, key and policy, limits,
+under ``lock_user``: fence the idempotency claim, re-check access, key, policy, kill switch, limits,
 confirmation, journal the refusal or the attempt -> send outside any transaction, with an overall
 deadline -> on an unknown outcome, find out by reading the exchange (never resend) -> journal the
 outcome and store the answer for repeats, in one transaction.
@@ -87,6 +87,7 @@ from guarded_exchange.domain.idempotency import (
     request_hash,
 )
 from guarded_exchange.domain.instruments import Category, InstrumentRules, require_supported_quote
+from guarded_exchange.domain.kill_switch import require_allowed
 from guarded_exchange.domain.limits import (
     check_limits,
     no_confirmation_channel,
@@ -268,6 +269,15 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
     async def _read(self, action: A, keys: ApiKeyPair, policy: EffectivePolicy) -> M:
         """Everything read from the exchange before the decision, and the early checks of the request
         (an input error here is answered without a journal record)."""
+
+    @abstractmethod
+    def _risk_before_reads(self, action: A) -> RiskDirection | None:
+        """The risk direction (FR-43) when the arguments alone tell it; ``None``: only the exchange's
+        state does (an amend compares with the current order)."""
+
+    @abstractmethod
+    def _risk(self, action: A, market: M) -> RiskDirection:
+        """The risk direction given what was read before the decision."""
 
     @abstractmethod
     def _check(self, action: A, market: M, policy: EffectivePolicy) -> P:
@@ -485,8 +495,14 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
         """The key check and everything read from the exchange before the decision. Refusals of a
         known user are journaled (FR-36); errors in the request itself are not."""
         try:
+            # FR-16, after the repeat check: a repeat still gets the first call's answer.
+            early = self._risk_before_reads(action)
+            if early is not None:
+                require_allowed(policy.kill_switch, early, action.kind)
             cleared = await self._credentials(user.id)  # D-24 re-check if stale; may call the exchange
             market = await self._read(action, cleared.keys, policy)
+            if early is None:  # known only now, e.g. an amend against the current order
+                require_allowed(policy.kill_switch, self._risk(action, market), action.kind)
         except INPUT_ERRORS:
             raise
         except DomainError as refusal:  # incl. "no best price" from the plan (ticket 011 review 3)
@@ -588,6 +604,8 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
             raise key_replaced_or_deleted()
         policy = (await load_policy_view(uow, user)).effective
         require_permission(policy, Permission.TRADE)
+        # FR-16, as of now (D-8): the switch may have been turned on since the early check.
+        require_allowed(policy.kill_switch, self._risk(action, market), action.kind)
         return self._check(action, market, policy)
 
     # --- sending and the outcome ----------------------------------------------------------------
@@ -756,6 +774,12 @@ class SubmitPlaceOrder(ActionPath[PlaceOrder, _Market, OrderPlan, OrderResult]):
 
     def _deduplicated_without_key(self, action: PlaceOrder) -> bool:
         return fingerprint_applies(classify(action))
+
+    def _risk_before_reads(self, action: PlaceOrder) -> RiskDirection:
+        return classify(action)
+
+    def _risk(self, action: PlaceOrder, market: _Market) -> RiskDirection:
+        return classify(action)
 
     def _client_order_id(self, action_id: str) -> str:
         return self._trading.client_order_id(action_id)

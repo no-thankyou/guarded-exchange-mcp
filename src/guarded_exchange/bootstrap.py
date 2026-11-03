@@ -41,6 +41,7 @@ from guarded_exchange.application.credentials import (
     StoredCredential,
 )
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
+from guarded_exchange.application.kill_switch import ActivateKillSwitch, KillSwitchChange, SetKillSwitch
 from guarded_exchange.application.policy import (
     AuthorizeAccess,
     OverridesReset,
@@ -58,6 +59,7 @@ from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.config import ConfigError, Settings, load_settings
 from guarded_exchange.domain.credentials import EXCHANGE_BYBIT, ApiKeyPair, Credential
 from guarded_exchange.domain.errors import DomainError
+from guarded_exchange.domain.kill_switch import KillSwitchActor
 from guarded_exchange.domain.policy import PolicyPatch
 from guarded_exchange.domain.users import User
 from guarded_exchange.infrastructure.bybit.client import BybitClient, RetryPolicy
@@ -154,6 +156,7 @@ def build_use_cases(
             send_deadline_s=settings.order_send_deadline_s,
             fill_read_deadline_s=settings.order_fill_read_deadline_s,
         ),
+        activate_kill_switch=ActivateKillSwitch(uow, clock),
     )
 
 
@@ -465,6 +468,14 @@ def reset_overrides(env_file: Path | None, user: str, fields: frozenset[str] | N
     return _with_storage(env_file, lambda uow, s: ResetOverrides(uow, SystemClock())(user, fields))
 
 
+def set_kill_switch(
+    env_file: Path | None, user: str | None, on: bool, by: KillSwitchActor
+) -> KillSwitchChange:
+    return _with_storage(
+        env_file, lambda uow, s: SetKillSwitch(uow, SystemClock())(user or s.local_user, on=on, by=by)
+    )
+
+
 # --- users and access tokens (remote mode) ------------------------------------------------
 
 
@@ -553,6 +564,7 @@ def cli() -> None:
             tighten=tighten_policy,
             set_ceiling=set_ceiling,
             reset_overrides=reset_overrides,
+            kill_switch=set_kill_switch,
         ),
         AdminCommands(
             create_user=create_user, list_users=list_users, issue_token=issue_token, revoke_token=revoke_token

@@ -12,6 +12,7 @@ from mcp.server import MCPServer
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 
+from guarded_exchange.application.kill_switch import ActivateKillSwitch
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
 from guarded_exchange.application.read_history import GetOrderHistory, GetTrades
@@ -20,7 +21,7 @@ from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.domain.policy import Permission
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, PrincipalProvider, ToolGate
 from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
-from guarded_exchange.interface.mcp.tools import account, history, market, policy, trading
+from guarded_exchange.interface.mcp.tools import account, history, kill_switch, market, policy, trading
 
 SERVER_NAME = "guarded-exchange"
 INSTRUCTIONS = (
@@ -46,6 +47,7 @@ class UseCases:
     read_policy: ReadPolicy
     authorize: AuthorizeAccess
     place_order: SubmitPlaceOrder
+    activate_kill_switch: ActivateKillSwitch
 
 
 def create_server(
@@ -89,6 +91,7 @@ def create_server(
     )
     policy.register(mcp, use_cases.read_policy, principal)
     trading.register(mcp, place_order=use_cases.place_order, principal=principal)
+    kill_switch.register(mcp, activate_kill_switch=use_cases.activate_kill_switch, principal=principal)
     return mcp
 
 

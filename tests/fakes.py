@@ -42,6 +42,7 @@ from guarded_exchange.domain.credentials import (
 from guarded_exchange.domain.errors import NotFound
 from guarded_exchange.domain.idempotency import IN_FLIGHT_GUARD, IdempotencyRecord, KeyKind, RecordStatus
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
+from guarded_exchange.domain.kill_switch import KillSwitch
 from guarded_exchange.domain.market import Candle, CandleInterval, Candles, Orderbook, OrderbookLevel, Ticker
 from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
 from guarded_exchange.domain.policy import PolicyRecord
@@ -445,6 +446,11 @@ class InMemoryUserRepository:
 
     async def list(self) -> Sequence[User]:
         return sorted(self._state.users.values(), key=lambda u: u.name)
+
+    async def set_kill_switch(self, user_id: str, state: KillSwitch) -> None:
+        if not self._writable:
+            raise ReadOnlyViolation("users.set_kill_switch needs a write unit of work")
+        self._state.users[user_id] = replace(self._state.users[user_id], kill_switch=state)
 
 
 class InMemoryAccessTokenRepository:
