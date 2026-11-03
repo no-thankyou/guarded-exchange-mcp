@@ -14,9 +14,12 @@ final answer: the accepted order or a definite refusal) or ``unknown`` (no relia
 order was not found). A call that ends with nothing decided and nothing created releases (deletes) its
 record (``keeps_record``), so retrying an unavailable exchange is not answered from storage.
 
-A record can be taken over by a new call only once it has expired. While a call is in flight its
-record does not expire before ``IN_FLIGHT_GUARD``; a call whose record was taken over anyway (it was
-stuck before its decision longer than that) finds out in its decision transaction and sends nothing.
+A record can be taken over by a new call only once it has expired, or while still ``in_progress``
+(nothing sent) after ``IN_FLIGHT_GUARD``. While a call is in flight its record does not expire before
+``IN_FLIGHT_GUARD``, and moving it to ``sent`` extends it by that much; a call whose record expired or
+was taken over (it was stuck before its decision) finds out in its decision transaction and sends
+nothing. A call with an explicit key also claims the fingerprint of the call when it is free, so a
+keyless repeat from another client is a repeat too; only keyless calls consult fingerprints.
 """
 
 import hashlib
@@ -83,6 +86,8 @@ class IdempotencyRecord:
     expires_at: datetime
     result: Mapping[str, Any] | None = None
     """The stored answer (``completed`` and ``unknown``), canonical JSON decoded."""
+    sent_at: datetime | None = None
+    """When the decision moved it to ``sent`` (the call's send started then)."""
 
     def held_by(self, action_id: str) -> bool:
         return self.action_id == action_id
@@ -127,9 +132,22 @@ def new_claim(
     )
 
 
-def expiry_when_done(record: IdempotencyRecord, now: datetime, window: timedelta) -> datetime:
-    """An explicit key lives its 24 h from the claim; a fingerprint ``window`` after the answer."""
-    return record.expires_at if record.kind is KeyKind.EXPLICIT else now + window
+def expiry_when_done(
+    record: IdempotencyRecord, now: datetime, window: timedelta, outcome: "Outcome"
+) -> datetime:
+    """An explicit key lives its 24 h from the claim; a fingerprint ``window`` after the answer, but
+    an unknown outcome ``IN_FLIGHT_GUARD`` (the exchange may still list the order with a delay; an
+    identical call soon after must not become a second order, review 1 of ticket 012)."""
+    if record.kind is KeyKind.EXPLICIT:
+        return record.expires_at
+    return now + (IN_FLIGHT_GUARD if outcome is Outcome.UNKNOWN else window)
+
+
+def is_stale(record: IdempotencyRecord, now: datetime) -> bool:
+    """Claimed (or, once sent, sending) longer than any call can take: its holder did not complete
+    (a crash, an answer that could not be stored)."""
+    since = record.sent_at if record.sent_at is not None else record.created_at
+    return now - since >= IN_FLIGHT_GUARD
 
 
 def keeps_record(kind: KeyKind, outcome: Outcome) -> bool:

@@ -33,9 +33,11 @@ PLACE_ORDER_DESCRIPTION = (
     "if it requires confirming orders, the call is refused with confirmation_channel_unavailable: do "
     "not retry it. Pass a fresh idempotency_key (e.g. a UUID) with every new order: repeating a call with "
     "the same key returns the first call's answer and never places a second order, so after a timeout or "
-    "outcome_unknown repeat the exact call with the same key instead of placing it again. A new attempt "
-    "(after a refusal, or a second identical order on purpose) needs a new key. Without a key, an "
-    "identical order within 30 s of the previous one is treated as a repeat."
+    "outcome_unknown made with a key, repeat the exact call with the same key to learn the outcome. A new "
+    "attempt (after a refusal, or a second identical order on purpose) needs a new key. Without a key, an "
+    "identical order shortly after the previous one (30 s; 10 min after an unknown outcome) is treated as "
+    "a repeat, but later it places a new order: after outcome_unknown without a key, check "
+    "get_open_orders / get_order_history for the client_order_id before anything else."
 )
 
 AmountStr = Annotated[str, Field(pattern=AMOUNT_PATTERN)]

@@ -40,7 +40,7 @@ from guarded_exchange.domain.credentials import (
     SealedSecret,
 )
 from guarded_exchange.domain.errors import NotFound
-from guarded_exchange.domain.idempotency import IdempotencyRecord, KeyKind, RecordStatus
+from guarded_exchange.domain.idempotency import IN_FLIGHT_GUARD, IdempotencyRecord, KeyKind, RecordStatus
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
 from guarded_exchange.domain.market import Candle, CandleInterval, Candles, Orderbook, OrderbookLevel, Ticker
 from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
@@ -627,21 +627,33 @@ class InMemoryIdempotencyRepository:
         if record.user_id not in self._state.users:
             raise ValueError(f"no user {record.user_id}")  # the SQL table has a foreign key
         current = self._state.idempotency.get(self._key(record))
-        if current is None or current.expires_at <= now:
-            self._state.idempotency[self._key(record)] = replace(record, result=None)
+        stuck = (
+            current is not None
+            and current.status is RecordStatus.IN_PROGRESS
+            and current.created_at <= now - IN_FLIGHT_GUARD
+        )
+        if current is None or current.expires_at <= now or stuck:
+            self._state.idempotency[self._key(record)] = replace(record, result=None, sent_at=None)
             current = record
+        answered = {RecordStatus.UNKNOWN, RecordStatus.COMPLETED}
         for key, other in list(self._state.idempotency.items()):  # housekeeping, as the SQL one does
-            if other.user_id == record.user_id and other.expires_at <= now:
+            if other.user_id == record.user_id and other.expires_at <= now and other.status in answered:
                 del self._state.idempotency[key]
         return current
 
-    async def mark_sent(self, record: IdempotencyRecord) -> bool:
+    async def mark_sent(self, record: IdempotencyRecord, now: datetime) -> bool:
         self._write("mark_sent")
         held = self._held(record)
-        if held is None or held.status is not RecordStatus.IN_PROGRESS:
+        if held is None or held.status is not RecordStatus.IN_PROGRESS or held.expires_at <= now:
             return False
-        self._state.idempotency[self._key(record)] = replace(held, status=RecordStatus.SENT)
+        expires_at = max(held.expires_at, now + IN_FLIGHT_GUARD)
+        self._state.idempotency[self._key(record)] = replace(
+            held, status=RecordStatus.SENT, expires_at=expires_at, sent_at=now
+        )
         return True
+
+    async def current(self, record: IdempotencyRecord) -> IdempotencyRecord | None:
+        return self._state.idempotency.get(self._key(record))
 
     async def finish(
         self,
@@ -706,6 +718,10 @@ class InMemoryDatabase:
         """Every journal append: (chain, event type, lock_user(chain) held in that transaction)."""
         self.fail_writes: Exception | None = None
         """If set, opening a write unit of work raises it (e.g. ``database is locked``)."""
+        self.fail_next_write: Exception | None = None
+        """Like ``fail_writes``, for the next write unit of work only."""
+        self.serialize_writers = True
+        """``False`` only to show what the writer lock protects against (lost updates)."""
         self.checkpoint = False
         """Yield to the event loop on opening a transaction and after a commit, as a real driver does
         (cancellation points: a commit may complete and its ``await`` still be cancelled)."""
@@ -721,6 +737,10 @@ class InMemoryDatabase:
             async with self._transaction(write=False) as uow:
                 yield uow
             return
+        if not self.serialize_writers:
+            async with self._transaction(write=True) as uow:
+                yield uow
+            return
         async with self._writer, self._transaction(write=True) as uow:
             yield uow
 
@@ -730,6 +750,9 @@ class InMemoryDatabase:
             await anyio.lowlevel.checkpoint()
         if write and self.fail_writes is not None:
             raise self.fail_writes
+        if write and self.fail_next_write is not None:
+            failure, self.fail_next_write = self.fail_next_write, None
+            raise failure
         self.transactions.append(write)
         working = self.state.copy()
         self.open_transactions += 1
@@ -817,6 +840,8 @@ class FakeTrading:
     find_error: Exception | None = None
     hold_find: "anyio.Event | None" = None
     """If set, ``find_order`` waits for it: a reconnaissance that does not answer."""
+    hold_get: "anyio.Event | None" = None
+    """If set, ``get_order`` waits for it: the read-back after placing does not answer."""
     hold_band: "anyio.Event | None" = None
     """If set, ``get_price_band`` waits for it: a call stuck before its decision."""
     in_band: "anyio.Event" = field(default_factory=anyio.Event)
@@ -879,6 +904,8 @@ class FakeTrading:
         self, keys: ApiKeyPair, category: Category, symbol: str, client_order_id: str
     ) -> OrderFill | None:
         self._call("get_order", category, symbol, client_order_id)
+        if self.hold_get is not None:
+            await self.hold_get.wait()
         if self.read_error is not None:
             raise self.read_error
         return self.fills.get(client_order_id)

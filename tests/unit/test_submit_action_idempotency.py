@@ -60,7 +60,7 @@ async def test_edge_the_same_key_twice_places_one_order_and_answers_the_first_re
     # D-20 (1): a repeat is answered before anything that could refuse or slow it - no exchange call.
     assert len(world.trading.calls) + len(world.exchange.calls) == calls_after_first
     assert types(world.journal(*ORDER_EVENTS)) == ["order_attempt", "order_outcome"]
-    assert records(world) == {(KeyKind.EXPLICIT, KEY): RecordStatus.COMPLETED}
+    assert records(world)[(KeyKind.EXPLICIT, KEY)] is RecordStatus.COMPLETED
 
 
 async def test_edge_no_key_twice_within_the_window_places_one_order() -> None:
@@ -341,7 +341,7 @@ async def test_a_journal_failure_after_an_accepted_order_leaves_the_key_claimed(
     assert first.source is ResultSource.PLACED
     assert repeat.value.details["reason"] == "in_progress"
     assert len(world.trading.sent) == 1
-    assert records(world) == {(KeyKind.EXPLICIT, KEY): RecordStatus.SENT}
+    assert set(records(world).values()) == {RecordStatus.SENT}  # the key and its fingerprint
 
 
 @pytest.mark.req("FR-36")

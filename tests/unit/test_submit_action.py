@@ -411,7 +411,7 @@ async def test_a_crash_while_sending_still_records_an_unknown_outcome() -> None:
     await world.grant()
     world.trading.place_error = RuntimeError("bug")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(OutcomeUnknown):  # ticket 012 review 1: never internal_error after a send
         await world()
 
     outcome = payload(world.journal("order_outcome")[0])

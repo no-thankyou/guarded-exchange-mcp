@@ -59,7 +59,7 @@ async def test_an_order_only_in_the_history_is_found_too() -> None:
     result = await world(idempotency_key="k-1")
 
     assert result.source is ResultSource.RECONNAISSANCE
-    [record] = world.db.state.idempotency.values()
+    record = world.db.state.idempotency[(world.user.id, KeyKind.EXPLICIT, "k-1")]
     assert record.status is RecordStatus.COMPLETED
     assert (await world(idempotency_key="k-1")).order_id == "exchange-order-7"  # replayed as found
 

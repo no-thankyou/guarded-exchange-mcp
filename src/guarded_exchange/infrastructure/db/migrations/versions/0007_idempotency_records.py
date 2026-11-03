@@ -26,9 +26,9 @@ def upgrade() -> None:
         sa.Column("result", sa.Text(), nullable=True),
         sa.Column("created_at", sa.BigInteger(), nullable=False),
         sa.Column("expires_at", sa.BigInteger(), nullable=False),
+        sa.Column("sent_at", sa.BigInteger(), nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_idempotency_records_user_id_users"),
         sa.PrimaryKeyConstraint("user_id", "key_kind", "key", name="pk_idempotency_records"),
-        sa.UniqueConstraint("action_id", name="uq_idempotency_records_action_id"),
         sa.CheckConstraint("key_kind IN ('explicit', 'fingerprint')", name="ck_idempotency_records_key_kind"),
         sa.CheckConstraint(
             "status IN ('in_progress', 'sent', 'unknown', 'completed')", name="ck_idempotency_records_status"

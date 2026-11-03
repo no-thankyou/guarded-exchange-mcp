@@ -73,6 +73,7 @@ from guarded_exchange.domain.idempotency import (
     RecordStatus,
     expiry_when_done,
     fingerprint_applies,
+    is_stale,
     keeps_record,
     new_claim,
     parse_idempotency_key,
@@ -127,6 +128,8 @@ DEFAULT_SEND_DEADLINE_S: Final = 15.0
 DEFAULT_RECONNAISSANCE_DELAY_S: Final = 1.0
 """Pause before looking the order up after an unknown outcome: the exchange's lists lag behind."""
 DEFAULT_RECONNAISSANCE_DEADLINE_S: Final = 15.0
+DEFAULT_FILL_READ_DEADLINE_S: Final = 5.0
+"""Bound of reading an accepted order back; after it the fill is "unknown", not an error."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +157,19 @@ class _Market:
 
 
 @dataclass(frozen=True, slots=True)
+class _Claims:
+    """The records a call holds. ``primary`` fences the call (its key, or its fingerprint without a
+    key); ``shadow`` is the fingerprint a keyed call also holds when it was free, so that a keyless
+    repeat from another client is answered too (review 1). Only the primary may stop a send."""
+
+    primary: IdempotencyRecord | None = None
+    shadow: IdempotencyRecord | None = None
+
+    def held(self) -> tuple[IdempotencyRecord, ...]:
+        return tuple(r for r in (self.primary, self.shadow) if r is not None)
+
+
+@dataclass(frozen=True, slots=True)
 class _Attempt:
     user_id: str
     action_id: str
@@ -161,7 +177,7 @@ class _Attempt:
     credential_id: str
     environment: Environment
     client: ClientDescription | None
-    claim: IdempotencyRecord | None
+    claims: _Claims
 
 
 class SubmitPlaceOrder:
@@ -184,6 +200,7 @@ class SubmitPlaceOrder:
         reconnaissance_delay_s: float = DEFAULT_RECONNAISSANCE_DELAY_S,
         reconnaissance_deadline_s: float = DEFAULT_RECONNAISSANCE_DEADLINE_S,
         fingerprint_window: timedelta = FINGERPRINT_WINDOW,
+        fill_read_deadline_s: float = DEFAULT_FILL_READ_DEADLINE_S,
     ) -> None:
         self._uow = uow
         self._credentials = credentials
@@ -199,6 +216,7 @@ class SubmitPlaceOrder:
         self._reconnaissance_delay_s = reconnaissance_delay_s
         self._reconnaissance_deadline_s = reconnaissance_deadline_s
         self._fingerprint_window = fingerprint_window
+        self._fill_read_deadline_s = fill_read_deadline_s
 
     async def __call__(
         self, user_id: str | None, request: PlaceOrderInput, client: ClientDescription | None = None
@@ -221,21 +239,22 @@ class SubmitPlaceOrder:
             raise
         action_id = self._ids.new_id()
         # D-20 (1): the repeat check comes before anything that could refuse or slow a repeat.
-        claim = self._new_claim(user, action, key, action_id)
-        if claim is not None:
+        wanted = self._new_claims(user, action, key, action_id)
+        claims = _Claims()
+        if wanted.primary is not None:
             with anyio.CancelScope(shield=True):  # a committed claim is always released or settled
-                held = await self._claim(claim)
+                held, claims = await self._claim(wanted)
             if not held.held_by(action_id):
-                return await self._repeat(user, action, claim, held, client)
+                return await self._repeat(user, action, wanted.primary, held, client)
         try:
-            cleared, market = await self._prepare(user, action, policy, claim, client)
+            cleared, market = await self._prepare(user, action, policy, claims.primary, client)
             # A cancellation that arrived before the decision is honoured here; from now on a
             # committed attempt must be followed by the send and the outcome, so the decision is
             # shielded too (its transaction is short and bounded by SQLite's busy_timeout).
             await anyio.lowlevel.checkpoint_if_cancelled()
         except BaseException:
             with anyio.CancelScope(shield=True):
-                await self._try_release(claim)  # nothing was decided: a repeat may run afresh
+                await self._try_release(claims)  # nothing was decided: a repeat may run afresh
             raise
         attempt = _Attempt(
             user_id=user.id,
@@ -244,13 +263,13 @@ class SubmitPlaceOrder:
             credential_id=cleared.credential_id,
             environment=user.environment,
             client=client,
-            claim=claim,
+            claims=claims,
         )
         with anyio.CancelScope(shield=True):
             try:
                 decided = await self._decide(attempt, action, market)
             except BaseException:  # the decision did not commit: nothing journaled, nothing sent
-                await self._try_release(claim)
+                await self._try_release(claims)
                 raise
         if isinstance(decided, DomainError):
             raise decided
@@ -258,28 +277,37 @@ class SubmitPlaceOrder:
 
     # --- repeats (FR-26, ADR-014, D-20) --------------------------------------------------------
 
-    def _new_claim(
-        self, user: User, action: PlaceOrder, key: str | None, action_id: str
-    ) -> IdempotencyRecord | None:
+    def _new_claims(self, user: User, action: PlaceOrder, key: str | None, action_id: str) -> _Claims:
         digest = request_hash(action.kind.value, _action_payload(action), user.environment)
-        if key is not None:
-            kind = KeyKind.EXPLICIT
-        elif fingerprint_applies(classify(action)):
-            kind, key = KeyKind.FINGERPRINT, digest
-        else:
-            return None  # a risk-reducing call without a key is never deduplicated (D-20 (3))
-        return new_claim(
-            user_id=user.id,
-            kind=kind,
-            key=key,
-            request_hash=digest,
-            action_id=action_id,
-            now=self._clock.now(),
-        )
+        now = self._clock.now()
 
-    async def _claim(self, claim: IdempotencyRecord) -> IdempotencyRecord:
+        def record(kind: KeyKind, key: str) -> IdempotencyRecord:
+            return new_claim(
+                user_id=user.id, kind=kind, key=key, request_hash=digest, action_id=action_id, now=now
+            )
+
+        # A risk-reducing call is never deduplicated by its fingerprint (D-20 (3)).
+        fingerprint = record(KeyKind.FINGERPRINT, digest) if fingerprint_applies(classify(action)) else None
+        if key is None:
+            return _Claims(primary=fingerprint)
+        return _Claims(primary=record(KeyKind.EXPLICIT, key), shadow=fingerprint)
+
+    async def _claim(self, wanted: _Claims) -> tuple[IdempotencyRecord, _Claims]:
+        """One transaction: the primary record, then (if the primary is ours) the fingerprint of a
+        keyed call when it is free; a busy fingerprint is not consulted by a keyed call (ladders)."""
+        primary = wanted.primary
+        if primary is None:
+            raise ValueError("nothing to claim")
         async with self._uow(write=True) as uow:
-            return await uow.idempotency.claim(claim, self._clock.now())
+            now = self._clock.now()
+            held = await uow.idempotency.claim(primary, now)
+            if not held.held_by(primary.action_id):
+                return held, _Claims()
+            shadow = None
+            if wanted.shadow is not None:
+                taken = await uow.idempotency.claim(wanted.shadow, now)
+                shadow = wanted.shadow if taken.held_by(wanted.shadow.action_id) else None
+            return held, _Claims(primary=primary, shadow=shadow)
 
     async def _repeat(
         self,
@@ -305,6 +333,8 @@ class SubmitPlaceOrder:
             status=held.status.value,
             action_id=held.action_id,
         )
+        status = "in_progress" if held.result is None else "replay"
+        await self._journal_repeat(user, action, held, client, status)
         if held.result is None:  # in_progress or sent: the first call has not answered yet
             raise self._in_progress(held)
         answer = restore_answer(held.result)
@@ -312,8 +342,49 @@ class SubmitPlaceOrder:
             raise answer
         return answer
 
+    async def _journal_repeat(
+        self,
+        user: User,
+        action: PlaceOrder,
+        held: IdempotencyRecord,
+        client: ClientDescription | None,
+        status: str,
+    ) -> None:
+        """FR-36: a repeat is a call of a known user too; nothing was sent, no exchange was asked."""
+        payload: dict[str, JsonValue] = {
+            "tool": action.kind.value,
+            "status": status,
+            "holder_action_id": held.action_id,
+            "client_order_id": self._trading.client_order_id(held.action_id),
+            "environment": user.environment.value,
+            "client": None if client is None else client.to_payload(),
+            "idempotency": _claim_payload(held),
+        }
+        try:
+            async with self._uow(write=True) as uow:
+                await uow.audit.append(
+                    user.id,
+                    AuditEvent(AuditEventType.ORDER_REPEAT, self._actor, payload),
+                    self._clock.now(),
+                )
+        except Exception:
+            log.exception("order_repeat_not_recorded", action_id=held.action_id)
+
     def _in_progress(self, held: IdempotencyRecord) -> OutcomeUnknown:
         client_order_id = self._trading.client_order_id(held.action_id)
+        if is_stale(held, self._clock.now()):  # sent long ago and never answered: its call is gone
+            return OutcomeUnknown(
+                "an earlier identical call sent this order but did not complete; its outcome was never "
+                "recorded, and this call sent nothing",
+                next_step="Do not place it again blindly: check get_open_orders and get_order_history "
+                f"for client_order_id {client_order_id}, then tell the user. A new attempt needs a new "
+                "idempotency_key.",
+                details={
+                    "reason": "incomplete",
+                    "client_order_id": client_order_id,
+                    "replayed": "true",
+                },
+            )
         how = (
             "an earlier call with the same idempotency_key"
             if held.kind is KeyKind.EXPLICIT
@@ -445,21 +516,25 @@ class SubmitPlaceOrder:
         idempotency record moves to ``sent`` (or gets the refusal) in it too."""
         async with self._uow(write=True) as uow:
             await uow.lock_user(attempt.user_id)
-            if attempt.claim is not None and not await uow.idempotency.mark_sent(attempt.claim):
-                # The record expired while this call was stuck before its decision and another call
-                # took it over: that call answers for the key now. Never send twice.
-                superseded = self._superseded(attempt)
+            now = self._clock.now()
+            primary = attempt.claims.primary
+            if primary is not None and not await uow.idempotency.mark_sent(primary, now):
+                # The record expired while this call was stuck before its decision (and may have been
+                # taken over by another call, which answers for the key now). Never send twice.
+                superseded = self._superseded(attempt, await uow.idempotency.current(primary))
                 await uow.audit.append(
                     attempt.user_id, self._refused(attempt, action, superseded), self._clock.now()
                 )
                 return superseded
+            if attempt.claims.shadow is not None:
+                await uow.idempotency.mark_sent(attempt.claims.shadow, now)  # best effort, no fence
             try:
                 plan = await self._decide_locked(uow, attempt, action, market)
             except DomainError as refusal:
                 await uow.audit.append(
                     attempt.user_id, self._refused(attempt, action, refusal), self._clock.now()
                 )
-                await self._settle(uow, attempt.claim, _refusal_outcome(refusal), refusal)
+                await self._settle(uow, attempt.claims, _refusal_outcome(refusal), refusal)
                 return refusal
             await uow.audit.append(attempt.user_id, self._attempted(attempt, plan), self._clock.now())
             return plan
@@ -484,13 +559,18 @@ class SubmitPlaceOrder:
             raise no_confirmation_channel(action.kind)  # FR-25 until tickets 016/020
         return plan
 
-    @staticmethod
-    def _superseded(attempt: _Attempt) -> OutcomeUnknown:
+    def _superseded(self, attempt: _Attempt, holder: IdempotencyRecord | None) -> OutcomeUnknown:
+        details = {"reason": "superseded", "client_order_id": attempt.client_order_id}
+        other = ""
+        if holder is not None and not holder.held_by(attempt.action_id):
+            details["holder_client_order_id"] = self._trading.client_order_id(holder.action_id)
+            other = f"; the call now handling it uses client_order_id {details['holder_client_order_id']}"
         return OutcomeUnknown(
-            "this call took too long before sending and an identical call now handles the order; "
-            "this call sent nothing",
-            next_step="Do not place the order again. Check get_open_orders, then tell the user.",
-            details={"reason": "superseded", "client_order_id": attempt.client_order_id},
+            "this call took too long before sending: its order (client_order_id "
+            f"{attempt.client_order_id}) was never sent{other}",
+            next_step="Do not place the order again yet. Check get_open_orders for the client_order_id "
+            "named here, then tell the user.",
+            details=details,
         )
 
     # --- sending: outside any transaction ------------------------------------------------------
@@ -511,10 +591,17 @@ class SubmitPlaceOrder:
             except DomainError as exc:
                 await self._try_record_outcome(attempt, _failure("rejected", exc), _refusal_outcome(exc), exc)
                 raise
-            except BaseException as exc:  # a bug: the order may have been sent
-                unknown = self._unknown(attempt, OutcomeUnknown("internal error while sending"), "skipped")
+            except Exception as exc:  # a bug: the order may have been sent
+                log.exception("order_send_failed", action_id=attempt.action_id)
+                cause = OutcomeUnknown("internal error while sending", details={"reason": "internal_error"})
+                unknown = self._unknown(attempt, cause, "skipped")
                 outcome: dict[str, JsonValue] = {"status": "unknown", "error_type": type(exc).__name__}
                 await self._try_record_outcome(attempt, outcome, Outcome.UNKNOWN, unknown)
+                raise unknown from exc
+            except BaseException as exc:  # not an error (e.g. the interpreter exits): record, re-raise
+                unknown = self._unknown(attempt, OutcomeUnknown("send interrupted"), "skipped")
+                stopped: dict[str, JsonValue] = {"status": "unknown", "error_type": type(exc).__name__}
+                await self._try_record_outcome(attempt, stopped, Outcome.UNKNOWN, unknown)
                 raise
             # The exchange accepted the order: from here on nothing may turn into an error the agent
             # could read as "failed" and retry (a second order). Worst case: accepted, fill unknown.
@@ -577,12 +664,14 @@ class SubmitPlaceOrder:
         """The order right after placement (D-15). A failed read is "not visible yet", not an error:
         the order was accepted, and the agent is told how to check."""
         try:
-            return await self._trading.get_order(
-                keys, plan.action.category, plan.action.symbol, client_order_id
-            )
+            with anyio.move_on_after(self._fill_read_deadline_s):
+                return await self._trading.get_order(
+                    keys, plan.action.category, plan.action.symbol, client_order_id
+                )
+            log.warning("order_fill_read_timed_out", client_order_id=client_order_id)
         except Exception:
             log.exception("order_fill_not_read", client_order_id=client_order_id)
-            return None
+        return None
 
     async def _try_record_outcome(
         self,
@@ -609,7 +698,7 @@ class SubmitPlaceOrder:
                     AuditEvent(AuditEventType.ORDER_OUTCOME, self._actor, payload),
                     self._clock.now(),
                 )
-                await self._settle(uow, attempt.claim, kind, answer)
+                await self._settle(uow, attempt.claims, kind, answer)
         except Exception:
             log.exception(
                 "order_outcome_not_recorded",
@@ -622,37 +711,51 @@ class SubmitPlaceOrder:
     async def _settle(
         self,
         uow: UnitOfWork,
-        claim: IdempotencyRecord | None,
+        claims: _Claims,
         outcome: Outcome,
         answer: OrderResult | DomainError,
     ) -> None:
-        """Store the answer for repeats, or release the key (``keeps_record``)."""
-        if claim is None:
-            return
-        if not keeps_record(claim.kind, outcome):
-            await uow.idempotency.release(claim)
-            return
+        """Store the answer for repeats, or release the key (``keeps_record``), per held record."""
         status = RecordStatus.UNKNOWN if outcome is Outcome.UNKNOWN else RecordStatus.COMPLETED
-        expires_at = expiry_when_done(claim, self._clock.now(), self._fingerprint_window)
-        await uow.idempotency.finish(claim, status, answer_payload(answer), expires_at)
+        for record in claims.held():
+            if not keeps_record(record.kind, outcome):
+                await uow.idempotency.release(record)
+                continue
+            expires_at = expiry_when_done(record, self._clock.now(), self._fingerprint_window, outcome)
+            await uow.idempotency.finish(record, status, answer_payload(answer), expires_at)
 
-    async def _try_release(self, claim: IdempotencyRecord | None) -> None:
-        if claim is None:
+    async def _try_release(self, claims: _Claims) -> None:
+        held = claims.held()
+        if not held:
             return
         try:
             async with self._uow(write=True) as uow:
-                await uow.idempotency.release(claim)
+                for record in held:
+                    await uow.idempotency.release(record)
         except Exception:  # the key stays claimed until it expires: fail closed
-            log.exception("idempotency_claim_not_released", action_id=claim.action_id)
+            log.exception("idempotency_claim_not_released", action_id=held[0].action_id)
 
     def _unknown(self, attempt: _Attempt, cause: OutcomeUnknown, looked: str) -> OutcomeUnknown:
+        check = (
+            "Do not place it again. The exchange may still list it with a delay: check get_open_orders "
+            f"(and get_order_history) for client_order_id {attempt.client_order_id} in a minute, then "
+            "tell the user what you found. "
+        )
+        primary = attempt.claims.primary
+        if primary is not None and primary.kind is KeyKind.EXPLICIT:
+            repeat = (
+                "Repeating this exact call with the same idempotency_key returns this answer and never "
+                "sends a second order."
+            )
+        else:  # no key: only a fingerprint that expires (or none for a reduce-only order)
+            repeat = (
+                "Without an idempotency_key, repeating this call later places a NEW order: first check "
+                "get_open_orders and get_order_history for this client_order_id."
+            )
         return OutcomeUnknown(
             f"the order may or may not have reached the exchange ({cause.message})"
             + _LOOKED_UP.get(looked, ""),
-            next_step="Do not place it again. The exchange may still list it with a delay: check "
-            f"get_open_orders (and get_order_history) for client_order_id {attempt.client_order_id} "
-            "in a minute, then tell the user what you found. Repeating this exact call with the same "
-            "idempotency_key returns this answer and never sends a second order.",
+            next_step=check + repeat,
             details={
                 **cause.details,
                 "client_order_id": attempt.client_order_id,
@@ -672,7 +775,7 @@ class SubmitPlaceOrder:
             "environment": attempt.environment.value,
             "client": None if attempt.client is None else attempt.client.to_payload(),
             "request": _action_payload(action),
-            "idempotency": _claim_payload(attempt.claim),
+            "idempotency": _claim_payload(attempt.claims.primary),
         }
 
     def _refused(self, attempt: _Attempt, action: PlaceOrder, refusal: DomainError) -> AuditEvent:

@@ -22,4 +22,4 @@
 - [ ] Integration: неизвестный исход cancel/amend → разведка по статусу ордера.
 
 ## Заметки
-—
+- Из ревью 012 (раунд 1): классифицировать коды `amend`/`cancel` по правилу 012 «неизвестно по умолчанию вне документированных семейств» и явно занести в неизвестные (исход возможен, нужна разведка по `orderId`, D-21): spot `170147` «Order cancellation timeout», `170150` «Cancel order failed», `170191` «Can not cancel order, please try again later», `170212` «Cancel order request processing», `170310` «Order modification timeout», `170311` «Order modification failed»; linear `110079` «The order is processing and can not be operated, please try again later». Сверено с https://bybit-exchange.github.io/docs/v5/error 2026-11-03.

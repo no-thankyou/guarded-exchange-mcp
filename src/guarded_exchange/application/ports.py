@@ -351,14 +351,20 @@ class IdempotencyRepository(Protocol):
     """
 
     async def claim(self, record: IdempotencyRecord, now: datetime) -> IdempotencyRecord:
-        """Insert ``record`` atomically unless a live (not expired at ``now``) record holds its key; an
-        expired one is replaced. Returns the record that holds the key afterwards: ``record`` itself if
-        the claim succeeded, otherwise the existing one (compare ``action_id``). Expired records of the
-        same user are purged on the way."""
+        """Insert ``record`` atomically unless a live record holds its key. A record is taken over
+        once expired at ``now``, or while still ``in_progress`` (nothing sent) after
+        ``IN_FLIGHT_GUARD``. Returns the record that holds the key afterwards: ``record`` itself if
+        the claim succeeded, otherwise the existing one (compare ``action_id``). Expired answered
+        records of the same user are purged on the way; unanswered ones only by a takeover."""
         ...
 
-    async def mark_sent(self, record: IdempotencyRecord) -> bool:
-        """``in_progress`` -> ``sent`` if still held by ``record.action_id``; ``False`` otherwise (fence)."""
+    async def mark_sent(self, record: IdempotencyRecord, now: datetime) -> bool:
+        """``in_progress`` -> ``sent`` if still held by ``record.action_id`` and not expired at ``now``;
+        the expiry becomes at least ``now + IN_FLIGHT_GUARD``. ``False``: not held any more (fence)."""
+        ...
+
+    async def current(self, record: IdempotencyRecord) -> IdempotencyRecord | None:
+        """Whatever record holds ``record``'s key now (``None``: none)."""
         ...
 
     async def finish(

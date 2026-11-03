@@ -4,7 +4,7 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, Row, delete, select, update
+from sqlalchemy import ColumnElement, Row, and_, case, delete, literal, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -18,7 +18,7 @@ from guarded_exchange.domain.credentials import (
     permissions_from_payload,
     permissions_to_payload,
 )
-from guarded_exchange.domain.idempotency import IdempotencyRecord, KeyKind, RecordStatus
+from guarded_exchange.domain.idempotency import IN_FLIGHT_GUARD, IdempotencyRecord, KeyKind, RecordStatus
 from guarded_exchange.domain.policy import (
     PolicyRecord,
     ceiling_from_payload,
@@ -27,7 +27,7 @@ from guarded_exchange.domain.policy import (
     settings_to_payload,
 )
 from guarded_exchange.domain.users import Environment, User, UserNameTaken, UserStatus
-from guarded_exchange.infrastructure.db.dialect import insert_for
+from guarded_exchange.infrastructure.db.dialect import EpochMillis, insert_for
 from guarded_exchange.infrastructure.db.schema import (
     access_tokens,
     audit_heads,
@@ -318,6 +318,7 @@ class SqlIdempotencyRepository(_Repository):
             "result": None,
             "created_at": record.created_at,
             "expires_at": record.expires_at,
+            "sent_at": None,
         }
         insert = insert_for(self._conn, t).values(**values)
         # One statement: insert, or take over the key only if its record has expired (ADR-014).
@@ -326,26 +327,45 @@ class SqlIdempotencyRepository(_Repository):
             set_={
                 name: insert.excluded[name] for name in values if name not in {"user_id", "key_kind", "key"}
             },
-            where=t.c.expires_at <= now,
+            where=or_(
+                t.c.expires_at <= now,
+                and_(
+                    t.c.status == RecordStatus.IN_PROGRESS.value,
+                    t.c.created_at <= now - IN_FLIGHT_GUARD,  # stuck before sending: fenced anyway
+                ),
+            ),
         ).returning(t.c.action_id)
         claimed = (await self._conn.execute(upsert)).scalar_one_or_none()
-        await self._conn.execute(  # housekeeping: other expired claims of this user
-            delete(t).where(t.c.user_id == record.user_id, t.c.expires_at <= now)
+        await self._conn.execute(  # housekeeping: expired answered records of this user only; an
+            delete(t).where(  # unanswered one may still have a holder in flight (fenced by expiry)
+                t.c.user_id == record.user_id,
+                t.c.expires_at <= now,
+                t.c.status.in_([RecordStatus.UNKNOWN.value, RecordStatus.COMPLETED.value]),
+            )
         )
         if claimed == record.action_id:
             return record
         row = (await self._conn.execute(select(t).where(*self._key(record)))).one()
         return _idempotency_from_row(row)
 
-    async def mark_sent(self, record: IdempotencyRecord) -> bool:
+    async def mark_sent(self, record: IdempotencyRecord, now: datetime) -> bool:
         self._require_writable("idempotency.mark_sent")
         t = idempotency_records
+        guard = literal(now + IN_FLIGHT_GUARD, EpochMillis())
         result = await self._conn.execute(
             update(t)
-            .where(*self._held(record), t.c.status == RecordStatus.IN_PROGRESS.value)
-            .values(status=RecordStatus.SENT.value)
+            .where(*self._held(record), t.c.status == RecordStatus.IN_PROGRESS.value, t.c.expires_at > now)
+            .values(
+                status=RecordStatus.SENT.value,
+                sent_at=now,
+                expires_at=case((t.c.expires_at > guard, t.c.expires_at), else_=guard),
+            )
         )
         return result.rowcount == 1
+
+    async def current(self, record: IdempotencyRecord) -> IdempotencyRecord | None:
+        row = (await self._conn.execute(select(idempotency_records).where(*self._key(record)))).one_or_none()
+        return None if row is None else _idempotency_from_row(row)
 
     async def finish(
         self,
@@ -392,6 +412,7 @@ def _idempotency_from_row(row: Row[tuple[object, ...]]) -> IdempotencyRecord:
         created_at=mapping["created_at"],
         expires_at=mapping["expires_at"],
         result=None if raw_result is None else json.loads(str(raw_result)),
+        sent_at=mapping["sent_at"],
     )
 
 

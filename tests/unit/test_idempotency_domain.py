@@ -116,8 +116,13 @@ def test_expiry_of_an_explicit_key_and_of_a_fingerprint() -> None:
     assert (explicit.status, explicit.expires_at) == (RecordStatus.IN_PROGRESS, NOW + EXPLICIT_KEY_TTL)
     assert fingerprint.expires_at == NOW + IN_FLIGHT_GUARD  # never expires while the call is in flight
     later = NOW + timedelta(seconds=5)
-    assert expiry_when_done(explicit, later, FINGERPRINT_WINDOW) == NOW + EXPLICIT_KEY_TTL
-    assert expiry_when_done(fingerprint, later, FINGERPRINT_WINDOW) == later + FINGERPRINT_WINDOW
+    assert expiry_when_done(explicit, later, FINGERPRINT_WINDOW, Outcome.ACCEPTED) == NOW + EXPLICIT_KEY_TTL
+    assert (
+        expiry_when_done(fingerprint, later, FINGERPRINT_WINDOW, Outcome.ACCEPTED)
+        == later + FINGERPRINT_WINDOW
+    )
+    unknown = expiry_when_done(fingerprint, later, FINGERPRINT_WINDOW, Outcome.UNKNOWN)
+    assert unknown == later + IN_FLIGHT_GUARD  # the exchange may still list it: keep it longer (review 1)
     assert explicit.held_by("a")
     assert not explicit.held_by("b")
 

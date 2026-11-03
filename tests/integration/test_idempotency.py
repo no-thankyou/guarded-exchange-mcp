@@ -22,8 +22,19 @@ from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.submit_action import OrderResult, ResultSource, SubmitPlaceOrder
 from guarded_exchange.domain.audit import JsonValue
 from guarded_exchange.domain.credentials import EXCHANGE_BYBIT, Credential, CredentialStatus
-from guarded_exchange.domain.errors import ExchangeRejected, OutcomeUnknown
-from guarded_exchange.domain.idempotency import IdempotencyRecord, KeyKind, RecordStatus, new_claim
+from guarded_exchange.domain.errors import (
+    ExchangeCredentialsInvalid,
+    ExchangeRejected,
+    OutcomeUnknown,
+    RateLimited,
+)
+from guarded_exchange.domain.idempotency import (
+    IN_FLIGHT_GUARD,
+    IdempotencyRecord,
+    KeyKind,
+    RecordStatus,
+    new_claim,
+)
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.orders import FillStatus
 from guarded_exchange.domain.policy import NO_OVERRIDES, PolicyRecord
@@ -120,11 +131,11 @@ async def test_changes_are_fenced_by_the_holder_and_answers_round_trip(uow: SqlU
     other = replace(mine, action_id="a-2")
     async with uow(write=True) as tx:
         await tx.idempotency.claim(mine, AT)
-        assert await tx.idempotency.mark_sent(other) is False
+        assert await tx.idempotency.mark_sent(other, AT) is False
         assert await tx.idempotency.finish(other, RecordStatus.COMPLETED, {"x": "1"}, AT) is False
         assert await tx.idempotency.release(other) is False
-        assert await tx.idempotency.mark_sent(mine) is True
-        assert await tx.idempotency.mark_sent(mine) is False  # only from in_progress
+        assert await tx.idempotency.mark_sent(mine, AT) is True
+        assert await tx.idempotency.mark_sent(mine, AT) is False  # only from in_progress
         answer: dict[str, JsonValue] = {
             "kind": "error",
             "code": "limit_exceeded",
@@ -138,6 +149,71 @@ async def test_changes_are_fenced_by_the_holder_and_answers_round_trip(uow: SqlU
     async with uow(write=True) as tx:
         assert await tx.idempotency.release(mine) is True
         assert (await tx.idempotency.claim(claim_for("u-1", "a-4"), AT)).action_id == "a-4"
+
+
+async def test_mark_sent_refuses_an_expired_claim_and_extends_a_live_one(uow: SqlUnitOfWorkFactory) -> None:
+    """Review 1: the fence also checks expiry (a takeover may come any moment), and a send started
+    near the expiry gets ``IN_FLIGHT_GUARD`` more."""
+    await add_user(uow, "u-1")
+    fingerprint = replace(
+        claim_for("u-1", "a-1"), kind=KeyKind.FINGERPRINT, expires_at=AT + timedelta(minutes=10)
+    )
+    expired = replace(claim_for("u-1", "a-2", key="other"), expires_at=AT + timedelta(seconds=30))
+    async with uow(write=True) as tx:
+        await tx.idempotency.claim(fingerprint, AT)
+        await tx.idempotency.claim(expired, AT)
+        late = AT + timedelta(minutes=9)
+        assert await tx.idempotency.mark_sent(fingerprint, late) is True
+        assert await tx.idempotency.mark_sent(expired, AT + timedelta(seconds=30)) is False
+        sent = await tx.idempotency.current(fingerprint)
+
+    assert sent is not None
+    assert (sent.status, sent.sent_at, sent.expires_at) == (RecordStatus.SENT, late, late + IN_FLIGHT_GUARD)
+
+
+async def test_housekeeping_never_deletes_an_unanswered_record(uow: SqlUnitOfWorkFactory) -> None:
+    await add_user(uow, "u-1")
+    sent = claim_for("u-1", "a-1", key="sent")
+    answered = claim_for("u-1", "a-2", key="answered")
+    async with uow(write=True) as tx:
+        await tx.idempotency.claim(sent, AT)
+        await tx.idempotency.mark_sent(sent, AT)
+        await tx.idempotency.claim(answered, AT)
+        await tx.idempotency.finish(
+            answered, RecordStatus.COMPLETED, {"kind": "x"}, AT + timedelta(seconds=1)
+        )
+    much_later = AT + timedelta(days=2)
+    async with uow(write=True) as tx:
+        await tx.idempotency.claim(claim_for("u-1", "a-3", key="new", now=much_later), much_later)
+        kept = await tx.idempotency.current(sent)
+        purged = await tx.idempotency.current(answered)
+
+    assert kept is not None
+    assert kept.status is RecordStatus.SENT
+    assert purged is None
+
+
+async def test_a_stale_unsent_claim_is_reclaimed_a_sent_one_is_not(uow: SqlUnitOfWorkFactory) -> None:
+    """``in_progress`` after ``IN_FLIGHT_GUARD``: nothing was sent, its holder is fenced, so it may
+    be reclaimed before its 24 h; a ``sent`` one keeps answering until it expires."""
+    await add_user(uow, "u-1")
+    unsent, sent = claim_for("u-1", "a-1", key="unsent"), claim_for("u-1", "a-2", key="sent")
+    stale = AT + IN_FLIGHT_GUARD
+    async with uow(write=True) as tx:
+        await tx.idempotency.claim(unsent, AT)
+        await tx.idempotency.claim(sent, AT)
+        await tx.idempotency.mark_sent(sent, AT)
+        early = await tx.idempotency.claim(
+            claim_for("u-1", "b-0", key="unsent", now=stale), stale - timedelta(seconds=1)
+        )
+        taken = await tx.idempotency.claim(claim_for("u-1", "b-1", key="unsent", now=stale), stale)
+        kept = await tx.idempotency.claim(claim_for("u-1", "b-2", key="sent", now=stale), stale)
+        fenced = await tx.idempotency.mark_sent(unsent, stale)
+
+    assert early.action_id == "a-1"
+    assert taken.action_id == "b-1"
+    assert kept.action_id == "a-2"
+    assert fenced is False
 
 
 @pytest.mark.req("FR-33")
@@ -166,12 +242,14 @@ def test_an_answered_record_must_carry_its_answer(db_path: Path) -> None:
         )
         with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
             conn.execute(
-                "INSERT INTO idempotency_records VALUES ('u','explicit','k',?, 'a','completed',NULL,0,1)",
+                "INSERT INTO idempotency_records (user_id, key_kind, key, request_hash, action_id, status, "
+                "result, created_at, expires_at) VALUES ('u','explicit','k',?, 'a','completed',NULL,0,1)",
                 ("a" * 64,),
             )
         with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
             conn.execute(
-                "INSERT INTO idempotency_records VALUES ('u','explicit','k',?, 'a','in_progress','{}',0,1)",
+                "INSERT INTO idempotency_records (user_id, key_kind, key, request_hash, action_id, status, "
+                "result, created_at, expires_at) VALUES ('u','explicit','k',?, 'a','in_progress','{}',0,1)",
                 ("a" * 64,),
             )
     finally:
@@ -422,6 +500,15 @@ def _ret(code: int, message: str) -> dict[str, Any]:
         (110007, ExchangeRejected, None),  # insufficient balance: a documented refusal
         (170131, ExchangeRejected, None),  # spot: insufficient balance
         (10027, ExchangeRejected, None),  # transactions are banned
+        # review 1: "being processed" / failed without a reason -> may exist (never rejected)
+        (170035, OutcomeUnknown, "exchange_internal_error"),  # Submitted to the system for processing!
+        (170149, OutcomeUnknown, "exchange_internal_error"),  # Create order failed
+        (110030, OutcomeUnknown, "duplicate_client_order_id"),  # Duplicate orderId
+        # explicit definite answers come before the families (33004 and 10429 are in none)
+        (33004, ExchangeCredentialsInvalid, None),
+        (10003, ExchangeCredentialsInvalid, None),
+        (10006, RateLimited, None),
+        (10429, RateLimited, None),  # system-level frequency protection
     ],
 )
 async def test_an_unrecognised_create_code_is_unknown_and_documented_refusals_stay_definite(
