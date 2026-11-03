@@ -39,6 +39,8 @@ class AuditEventType(StrEnum):
     """Written and committed before the request leaves for the exchange (ADR-008)."""
     ORDER_OUTCOME = "order_outcome"
     """What the exchange answered: accepted, rejected or unknown (FR-27)."""
+    ORDER_REPEAT = "order_repeat"
+    """A repeated call answered from its idempotency record; nothing was sent (FR-26, FR-36)."""
 
 
 _CLIENT_TEXT_MAX: Final = 64

@@ -5,14 +5,14 @@ names, codes or URLs. Implementations must raise ``guarded_exchange.domain.error
 exceptions, never transport-specific ones.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Protocol
 
 from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.account import AccountBalances, Order, Page, Position, SymbolPosition
-from guarded_exchange.domain.audit import AuditEvent, AuditRecord
+from guarded_exchange.domain.audit import AuditEvent, AuditRecord, JsonValue
 from guarded_exchange.domain.credentials import (
     ApiKeyPair,
     Credential,
@@ -21,6 +21,7 @@ from guarded_exchange.domain.credentials import (
     SealedSecret,
 )
 from guarded_exchange.domain.history import HistoryPage, HistoryPeriod, Trade
+from guarded_exchange.domain.idempotency import IdempotencyRecord, RecordStatus
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
 from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
@@ -114,6 +115,17 @@ class TradingExchange(Protocol):
         self, keys: ApiKeyPair, category: Category, symbol: str, client_order_id: str
     ) -> OrderFill | None:
         """The order with this client id as the exchange shows it now; ``None`` if not visible yet.
+
+        Raises what ``AccountReader`` methods raise.
+        """
+        ...
+
+    async def find_order(
+        self, keys: ApiKeyPair, category: Category, symbol: str, client_order_id: str
+    ) -> OrderFill | None:
+        """Reconnaissance after an unknown outcome (FR-27, ADR-014): the order with this client id among
+        the open and recent orders, then in the order history. ``None``: not found anywhere, which is
+        **not** proof that it was never created (the exchange's lists lag behind).
 
         Raises what ``AccountReader`` methods raise.
         """
@@ -331,6 +343,45 @@ class CredentialRepository(Protocol):
         ...
 
 
+class IdempotencyRepository(Protocol):
+    """Claims of state-changing calls (FR-26, ADR-014, D-20), one per ``(user, kind, key)``.
+
+    Every change is conditional on the record still being held by the caller's ``action_id``: a call
+    whose record expired and was taken over can no longer change it. Needs a write unit of work.
+    """
+
+    async def claim(self, record: IdempotencyRecord, now: datetime) -> IdempotencyRecord:
+        """Insert ``record`` atomically unless a live record holds its key. A record is taken over
+        once expired at ``now``, or while still ``in_progress`` (nothing sent) after
+        ``IN_FLIGHT_GUARD``. Returns the record that holds the key afterwards: ``record`` itself if
+        the claim succeeded, otherwise the existing one (compare ``action_id``). Expired answered
+        records of the same user are purged on the way; unanswered ones only by a takeover."""
+        ...
+
+    async def mark_sent(self, record: IdempotencyRecord, now: datetime) -> bool:
+        """``in_progress`` -> ``sent`` if still held by ``record.action_id`` and not expired at ``now``;
+        the expiry becomes at least ``now + IN_FLIGHT_GUARD``. ``False``: not held any more (fence)."""
+        ...
+
+    async def current(self, record: IdempotencyRecord) -> IdempotencyRecord | None:
+        """Whatever record holds ``record``'s key now (``None``: none)."""
+        ...
+
+    async def finish(
+        self,
+        record: IdempotencyRecord,
+        status: RecordStatus,
+        result: Mapping[str, JsonValue],
+        expires_at: datetime,
+    ) -> bool:
+        """Store the call's answer if the record is still held by ``record.action_id``."""
+        ...
+
+    async def release(self, record: IdempotencyRecord) -> bool:
+        """Delete the record if still held by ``record.action_id`` (nothing to protect any more)."""
+        ...
+
+
 class MasterKeyStore(Protocol):
     """Where the local master key lives (PLAN ADR-009). Never exposes the key to use cases."""
 
@@ -376,6 +427,9 @@ class UnitOfWork(Protocol):
 
     @property
     def credentials(self) -> CredentialRepository: ...
+
+    @property
+    def idempotency(self) -> IdempotencyRepository: ...
 
     async def lock_user(self, user_id: str) -> None:
         """Serialise read-modify-write of one user's state until the transaction ends (PLAN D-8).

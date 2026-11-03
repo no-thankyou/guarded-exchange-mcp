@@ -29,7 +29,9 @@ DEFAULT_NEXT_STEP: Final[dict[str, str]] = {
     "limit_exceeded": "Do not retry or work around it; tell the user which limit was hit.",
     "confirmation_channel_unavailable": "Do not retry; tell the user the action needs their confirmation.",
     "position_not_found": "Check get_positions before a reduce-only order.",
-    "outcome_unknown": "Do not repeat the action; check the open orders first.",
+    "outcome_unknown": "Do not place the order again; check the open orders first.",
+    "idempotency_conflict": "Use a new idempotency_key for a new action; reuse a key only to repeat "
+    "exactly the same call.",
 }
 _FALLBACK_NEXT_STEP: Final = "Report this error to the user."
 

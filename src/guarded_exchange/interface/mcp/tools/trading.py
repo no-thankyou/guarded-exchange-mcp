@@ -16,6 +16,7 @@ from pydantic import Field
 
 from guarded_exchange.application.submit_action import PlaceOrderInput, SubmitPlaceOrder
 from guarded_exchange.domain.audit import ClientDescription
+from guarded_exchange.domain.idempotency import IDEMPOTENCY_KEY_PATTERN
 from guarded_exchange.domain.money import AMOUNT_PATTERN
 from guarded_exchange.interface.mcp.access import PrincipalProvider
 from guarded_exchange.interface.mcp.results import run_tool
@@ -30,7 +31,13 @@ PLACE_ORDER_DESCRIPTION = (
     "cancelled. reduce_only (perpetuals only) can only shrink an open position and is cut to its size. "
     "Your policy's limits apply (allowed instruments, max order value, leverage; see get_my_policy); "
     "if it requires confirming orders, the call is refused with confirmation_channel_unavailable: do "
-    "not retry it. Each call places a new order: never repeat a call to 'make sure'."
+    "not retry it. Pass a fresh idempotency_key (e.g. a UUID) with every new order: repeating a call with "
+    "the same key returns the first call's answer and never places a second order, so after a timeout or "
+    "outcome_unknown made with a key, repeat the exact call with the same key to learn the outcome. A new "
+    "attempt (after a refusal, or a second identical order on purpose) needs a new key. Without a key, an "
+    "identical order shortly after the previous one (30 s; 10 min after an unknown outcome) is treated as "
+    "a repeat, but later it places a new order: after outcome_unknown without a key, check "
+    "get_open_orders / get_order_history for the client_order_id before anything else."
 )
 
 AmountStr = Annotated[str, Field(pattern=AMOUNT_PATTERN)]
@@ -49,6 +56,15 @@ SideArg = Annotated[Literal["buy", "sell"], Field(description="buy or sell.")]
 OrderTypeArg = Annotated[
     Literal["market", "limit"],
     Field(description="market: execute now within the slippage bound; limit: rest at price."),
+]
+IdempotencyKeyArg = Annotated[
+    str | None,
+    Field(
+        pattern=IDEMPOTENCY_KEY_PATTERN,
+        description="Optional but recommended: 1-64 letters, digits or _ . : - (e.g. a UUID), new for each "
+        "new order. The same key with the same arguments returns the first answer (no second order); with "
+        "other arguments it is idempotency_conflict. Kept 24 h.",
+    ),
 ]
 ReduceOnlyArg = Annotated[
     bool,
@@ -81,6 +97,7 @@ def register(mcp: MCPServer[Any], *, place_order: SubmitPlaceOrder, principal: P
         ctx: Context,
         price: PriceArg = None,
         reduce_only: ReduceOnlyArg = False,
+        idempotency_key: IdempotencyKeyArg = None,
     ) -> Annotated[CallToolResult, PlaceOrderOut]:
         async def call() -> PlaceOrderOut:
             request = PlaceOrderInput(
@@ -91,6 +108,7 @@ def register(mcp: MCPServer[Any], *, place_order: SubmitPlaceOrder, principal: P
                 qty=qty,
                 price=price,
                 reduce_only=reduce_only,
+                idempotency_key=idempotency_key,
             )
             return PlaceOrderOut.from_domain(await place_order(principal(), request, client_description(ctx)))
 

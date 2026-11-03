@@ -20,6 +20,7 @@ from guarded_exchange.bootstrap import app_server
 from guarded_exchange.config import Settings
 from guarded_exchange.domain.actions import ActionKind
 from guarded_exchange.domain.credentials import ApiKeyPair, KeyPermissions
+from guarded_exchange.domain.idempotency import IDEMPOTENCY_KEY_PATTERN
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.money import AMOUNT_PATTERN
 from guarded_exchange.domain.orders import FillStatus, OrderFill
@@ -267,3 +268,44 @@ async def test_the_wired_server_places_a_limit_order_through_the_bybit_adapter()
     [body] = sent
     assert (body["orderType"], body["timeInForce"], body["price"]) == ("Limit", "GTC", "68797.6")
     assert re.fullmatch(r"gx-[0-9a-f]{32}", body["orderLinkId"])  # D-19: uuid4 hex, 35 characters
+
+
+# --- idempotency through MCP (ticket 012: FR-26, FR-28) -------------------------------------------
+
+
+@pytest.mark.req("FR-26")
+async def test_the_tool_offers_an_idempotency_key_and_says_a_new_attempt_needs_a_new_key() -> None:
+    setup = Setup()
+    await setup.grant()
+    async with Client(setup.server) as client:
+        tool = next(t for t in (await client.list_tools()).tools if t.name == "place_order")
+
+    key = tool.input_schema["properties"]["idempotency_key"]
+    branch = next(b for b in key["anyOf"] if b.get("type") == "string")
+    assert branch["pattern"] == IDEMPOTENCY_KEY_PATTERN
+    assert "idempotency_key" not in tool.input_schema["required"]
+    assert "needs a new key" in (tool.description or "")
+    assert tool.output_schema is not None
+    assert "result_source" in tool.output_schema["properties"]
+
+
+@pytest.mark.req("FR-26", "FR-28")
+async def test_a_repeated_call_is_answered_as_a_replay_and_other_arguments_conflict() -> None:
+    setup = Setup()
+    await setup.grant()
+    keyed = {**MARKET_BUY, "idempotency_key": "e2e-key-1"}
+
+    async with Client(setup.server) as client:
+        tool = next(t for t in (await client.list_tools()).tools if t.name == "place_order")
+        first = _structured(await client.call_tool("place_order", keyed))
+        again = _structured(await client.call_tool("place_order", keyed))
+        conflict = await client.call_tool("place_order", {**keyed, "qty": "0.002"})
+
+    assert tool.output_schema is not None
+    jsonschema.validate(again, tool.output_schema)
+    assert (first["result_source"], again["result_source"]) == ("placed", "replay")
+    assert again["order_id"] == first["order_id"]
+    assert "new idempotency_key" in again["next_step"]
+    assert len(setup.trading.sent) == 1
+    assert conflict.is_error is True
+    assert _structured(conflict)["code"] == "idempotency_conflict"

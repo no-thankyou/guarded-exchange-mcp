@@ -266,6 +266,22 @@ class BybitClient:
         envelope = await self._get("/v5/order/realtime", params, keys=keys)
         return order_fill_from_result(envelope.result, symbol=symbol, client_order_id=client_order_id)
 
+    async def find_order(
+        self, keys: ApiKeyPair, category: Category, symbol: str, client_order_id: str
+    ) -> OrderFill | None:
+        """Reconnaissance by ``orderLinkId`` (FR-27, ADR-014): ``order/realtime`` (open orders and the
+        most recent 500 closed ones; ``openOnly`` is ignored for an ``orderLinkId`` query), then
+        ``order/history`` (last 7 days by default; cancelled or rejected orders only for 24 h). Both
+        are GETs: safe to repeat. Bybit docs checked 2026-11-03."""
+        found = await self.get_order(keys, category, symbol, client_order_id)
+        if found is not None:
+            return found
+        params = {"category": category.value, "symbol": symbol, "orderLinkId": client_order_id}
+        envelope = await self._get("/v5/order/history", params, keys=keys)
+        return order_fill_from_result(
+            envelope.result, symbol=symbol, client_order_id=client_order_id, endpoint="order/history"
+        )
+
     async def _post(self, path: str, body: Mapping[str, object], *, keys: ApiKeyPair) -> Envelope:
         """One signed POST. The body is serialised once and both signed and sent verbatim.
 

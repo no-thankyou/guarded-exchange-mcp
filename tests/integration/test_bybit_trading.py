@@ -102,7 +102,7 @@ class Stub:
         link_id = _link_id(request)
         if link_id and path == "/v5/order/create" and "orderLinkId" in body["result"]:
             body["result"]["orderLinkId"] = link_id
-        if link_id and path == "/v5/order/realtime":
+        if link_id and path in {"/v5/order/realtime", "/v5/order/history"}:
             for item in body["result"]["list"]:
                 item["orderLinkId"] = link_id
         return httpx2.Response(200, json=body)
@@ -414,7 +414,7 @@ async def live(uow: SqlUnitOfWorkFactory, db_path: Path, ceiling: AdminCeiling) 
             user.id, PolicyRecord(ceiling=ceiling, overrides=NO_OVERRIDES, updated_at=clock.now())
         )
         await tx.credentials.add(credential, cipher.seal(KEYS, credential.binding))
-    stub = Stub(override={"/v5/order/realtime": EMPTY_ORDERS})
+    stub = Stub(override={"/v5/order/realtime": EMPTY_ORDERS, "/v5/order/history": EMPTY_ORDERS})
     bybit = client(stub)
     scope: dict[str, Any] = {"exchange": EXCHANGE_BYBIT, "environment": Environment.TESTNET}
     place = SubmitPlaceOrder(
@@ -427,6 +427,7 @@ async def live(uow: SqlUnitOfWorkFactory, db_path: Path, ceiling: AdminCeiling) 
         trading=bybit,
         clock=clock,
         ids=SequentialIds("0123456789abcdef0123456789ab"),
+        reconnaissance_delay_s=0,
         **scope,
     )
     return Live(place, stub, user.id, db_path)

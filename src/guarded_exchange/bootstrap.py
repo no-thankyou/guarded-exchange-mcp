@@ -151,6 +151,8 @@ def build_use_cases(
             ids=UuidGenerator(),
             exchange=EXCHANGE_BYBIT,
             environment=environment,
+            send_deadline_s=settings.order_send_deadline_s,
+            fill_read_deadline_s=settings.order_fill_read_deadline_s,
         ),
     )
 

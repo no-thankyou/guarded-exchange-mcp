@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     bybit_connect_timeout_s: float = Field(default=3.0, gt=0, le=30)
     bybit_read_timeout_s: float = Field(default=5.0, gt=0, le=60)
     bybit_get_max_attempts: int = Field(default=3, ge=1, le=5)
+    # Overall bound of one order request (POST), whatever the per-phase timeouts above allow; after it the
+    # outcome is unknown and the order is looked up by its client id (FR-27). Never retried.
+    order_send_deadline_s: float = Field(default=15.0, gt=0, le=60)
+    # Bound of reading an accepted order back; after it the fill is reported as unknown, never an error.
+    order_fill_read_deadline_s: float = Field(default=5.0, gt=0, le=60)
     bybit_get_backoff_base_s: float = Field(default=0.2, ge=0, le=5)
     # Instrument rules (tick size, qty step, minimums) are cached in memory for this long.
     instrument_rules_ttl_s: int = Field(default=600, ge=1, le=86_400)

@@ -6,7 +6,7 @@ serialised as strings so no precision is lost, absent values are omitted rather 
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, WithJsonSchema
 
@@ -514,12 +514,26 @@ _FILL_UNKNOWN_NEXT_STEP = (
 )
 
 
+_RESULT_NEXT_STEP: Final = {
+    "replay": "This is the stored answer of an earlier call (same idempotency_key, or an identical call "
+    "within 30 s): no new order was placed. To place another identical order on purpose, call again with "
+    "a new idempotency_key.",
+    "reconnaissance": "The send had no reliable answer; the order was then found on the exchange by its "
+    "client_order_id: it exists, do not place it again.",
+}
+
+
 class PlaceOrderOut(BaseModel):
     """An order the exchange accepted: exactly what was sent and what is known about its execution."""
 
     model_config = ConfigDict(frozen=True)
 
     status: Literal["accepted"] = Field(description="The exchange accepted the order request.")
+    result_source: Literal["placed", "reconnaissance", "replay"] = Field(
+        description="placed: this call placed it. reconnaissance: this call's send had no reliable answer "
+        "and the order was then found by its client_order_id. replay: the stored answer of an earlier call "
+        "with the same idempotency_key (or an identical call within 30 s); nothing new was placed."
+    )
     order_id: str = Field(description="Exchange order id; use it to refer to this order.")
     client_order_id: str = Field(description="This server's id of the order on the exchange (gx-...).")
     symbol: str = Field(description="Exchange symbol, e.g. BTCUSDT.")
@@ -580,6 +594,7 @@ class PlaceOrderOut(BaseModel):
         action = plan.action
         return cls(
             status="accepted",
+            result_source=result.source.value,
             order_id=result.order_id,
             client_order_id=result.client_order_id,
             symbol=action.symbol,
@@ -601,8 +616,17 @@ class PlaceOrderOut(BaseModel):
             order_status="unknown" if fill is None else fill.status.value,
             filled_qty="unknown" if fill is None or fill.filled_qty is None else fill.filled_qty,
             avg_fill_price=None if fill is None else fill.avg_fill_price,
-            next_step=_FILL_UNKNOWN_NEXT_STEP if fill is None else None,
+            next_step=_next_step(result),
         )
+
+
+def _next_step(result: OrderResult) -> str | None:
+    parts = [
+        _RESULT_NEXT_STEP.get(result.source.value),
+        _FILL_UNKNOWN_NEXT_STEP if result.fill is None else None,
+    ]
+    present = [part for part in parts if part]
+    return " ".join(present) if present else None
 
 
 class ToolErrorOut(BaseModel):
