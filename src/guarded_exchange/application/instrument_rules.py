@@ -51,7 +51,11 @@ class InstrumentRulesCache:
         self._max_entries = max_entries
         self._entries: OrderedDict[tuple[str, Category], _Entry] = OrderedDict()
 
-    async def get(self, symbol: str, category: Category) -> InstrumentRules:
+    async def get(self, symbol: str, category: Category, *, any_status: bool = False) -> InstrumentRules:
+        """``any_status``: also find an instrument that is no longer open for trading (see the port).
+
+        A cached entry answers both kinds of lookup: it carries its status, and callers decide by it.
+        """
         key = (symbol, category)
         entry = self._entries.get(key)
         if entry is not None:
@@ -59,7 +63,7 @@ class InstrumentRulesCache:
                 self._entries.move_to_end(key)  # LRU: a hit makes the entry the most recent
                 return entry.rules
             del self._entries[key]  # expired: drop it now, even if the refresh below fails
-        rules = await self._exchange.get_instrument_rules(symbol, category)
+        rules = await self._exchange.get_instrument_rules(symbol, category, any_status=any_status)
         self._entries[key] = _Entry(rules, self._clock.now() + self._ttl)
         self._entries.move_to_end(key)
         while len(self._entries) > self._max_entries:

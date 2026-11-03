@@ -94,3 +94,38 @@ class UnsupportedPositionMode(DomainError):
             "exchange; until then perpetual positions and orders cannot be read or managed here.",
             details={"reason": "hedge_mode"},
         )
+
+
+class InstrumentRuleViolation(DomainError):
+    """The order breaks a rule of the instrument (tick size, minimum quantity or value, trading
+    status, the exchange's price band); nothing was sent (FR-10)."""
+
+    code: ClassVar[str] = "instrument_rule_violation"
+
+
+class LimitExceeded(DomainError):
+    """A risk limit of the effective policy refuses the action; nothing was sent (FR-13 - FR-17).
+
+    ``details`` name the limit (``limit``) and the allowed value (``allowed``).
+    """
+
+    code: ClassVar[str] = "limit_exceeded"
+
+
+class ConfirmationChannelUnavailable(DomainError):
+    """The policy requires the user's confirmation, but no trusted channel can ask for it (FR-25)."""
+
+    code: ClassVar[str] = "confirmation_channel_unavailable"
+
+
+class PositionNotFound(DomainError):
+    """A risk-reducing action needs an open position it can reduce, and there is none (FR-43, D-18)."""
+
+    code: ClassVar[str] = "position_not_found"
+
+
+class OutcomeUnknown(DomainError):
+    """The request may or may not have reached the exchange (timeout, broken connection, an
+    exchange-side internal error): never retried blindly (FR-27)."""
+
+    code: ClassVar[str] = "outcome_unknown"

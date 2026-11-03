@@ -13,6 +13,7 @@ from guarded_exchange.domain.errors import (
     ExchangeRejected,
     ExchangeUnavailable,
     InvalidParams,
+    OutcomeUnknown,
     RateLimited,
 )
 
@@ -76,6 +77,69 @@ def error_for_ret_code(ret_code: int, ret_msg: str, *, retry_after_s: float | No
         details=details,
         untrusted_text=ret_msg,
     )
+
+
+UNKNOWN_OUTCOME_RET_CODES: Final = frozenset(
+    {
+        10000,  # Server Timeout
+        10016,  # Server error
+        3400214,  # Server error, please try again later (UTA)
+        170001,  # Internal error (spot)
+        170007,  # Timeout waiting for response from backend server (spot)
+        170032,  # Network error. Please try again later (spot)
+        170146,  # Order creation timeout (spot)
+        170234,  # System Error (spot)
+    }
+)
+"""Server-side errors and timeouts after which an order may still exist (ADR-014): never "failed".
+Checked against https://bybit-exchange.github.io/docs/v5/error on 2026-11-03. An unlisted code is
+still a definite refusal in v1 (ticket 012 notes: consider unknown by default for a mutating POST)."""
+DUPLICATE_CLIENT_ID_RET_CODES: Final = frozenset({110072, 170141})
+"""``orderLinkId`` already used (spike 004: also after cancel or fill): the order may be ours."""
+PRICE_BAND_RET_CODES: Final = frozenset({110121, 170193})
+"""Price outside the exchange's corridor (linear in reject mode / spot, spike 004): no order."""
+
+
+def error_for_create(ret_code: int, ret_msg: str, *, retry_after_s: float | None = None) -> DomainError:
+    """``retCode`` of ``POST /v5/order/create`` -> domain exception (FR-27, FR-28, ADR-014).
+
+    Unknown-outcome and duplicate-id codes become ``OutcomeUnknown`` (ticket 012 finds out what
+    happened); everything else is a definite refusal: no order was created.
+    """
+    details = {"exchange_code": str(ret_code)}
+    if ret_code in UNKNOWN_OUTCOME_RET_CODES:
+        return OutcomeUnknown(
+            "the exchange reported an internal error while placing the order",
+            details={**details, "reason": "exchange_internal_error"},
+            untrusted_text=ret_msg,
+        )
+    if ret_code in DUPLICATE_CLIENT_ID_RET_CODES:
+        return OutcomeUnknown(
+            "the exchange already has an order with this client id",
+            details={**details, "reason": "duplicate_client_order_id"},
+            untrusted_text=ret_msg,
+        )
+    if ret_code in PRICE_BAND_RET_CODES:
+        return ExchangeRejected(
+            "the price is outside the exchange's current price band",
+            next_step="Use a price closer to the market (or a market order); the band moves with the market.",
+            details={**details, "reason": "price_outside_band"},
+            untrusted_text=ret_msg,
+        )
+    if ret_code == _PARAM_ERROR:
+        return InvalidParams(
+            "the exchange rejected the order parameters",
+            next_step="Check qty and price against get_instrument_rules; report the exchange reason to "
+            "the user.",
+            details=details,
+            untrusted_text=ret_msg,
+        )
+    return error_for_ret_code(ret_code, ret_msg, retry_after_s=retry_after_s)
+
+
+def outcome_unknown(reason: str) -> OutcomeUnknown:
+    """The order request may have reached the exchange (read timeout, broken connection, 5xx)."""
+    return OutcomeUnknown(f"no reliable answer from the exchange: {reason}", details={"reason": "no_answer"})
 
 
 def unavailable(reason: str) -> ExchangeUnavailable:

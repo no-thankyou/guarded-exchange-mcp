@@ -53,7 +53,7 @@ BASE = "http://127.0.0.1:8000"
 URL = f"{BASE}/mcp"
 LOCAL_HOSTS = ["127.0.0.1:*", "localhost:*"]
 LOCAL_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*"]
-WITH_TRADING_TOOL = {**TOOL_PERMISSIONS, "place_order": Permission.TRADE}
+WITH_TRADING_TOOL = {**TOOL_PERMISSIONS, "stub_trade": Permission.TRADE}
 
 
 class Tenants:
@@ -109,7 +109,7 @@ def production_server(uow: SqlUnitOfWorkFactory, exchange: FakeExchange) -> Guar
 def server_with_trading_stub(
     uow: SqlUnitOfWorkFactory, exchange: FakeExchange, calls: list[str], *, header_annotated: bool = False
 ) -> GuardedMCPServer:
-    """The production wiring plus a stub ``place_order`` (TRADE) until ticket 011 brings the real one."""
+    """The production wiring plus a stub trading tool (TRADE) with a trivial schema."""
     mcp = create_server(
         use_cases(uow, exchange),
         principal=token_principal,
@@ -120,8 +120,8 @@ def server_with_trading_stub(
     # `x-mcp-header`: the SDK checks the matching `Mcp-Param-Symbol` header BEFORE dispatch.
     extra: dict[str, Any] = {"x-mcp-header": "Symbol"} if header_annotated else {}
 
-    @mcp.tool(name="place_order", description="Stub trading tool.")
-    async def place_order(
+    @mcp.tool(name="stub_trade", description="Stub trading tool.")
+    async def stub_trade(
         symbol: Annotated[str, Field(pattern=r"^[A-Z]{3,20}$", json_schema_extra=extra)],
         qty: Annotated[int, Field(gt=0)],
     ) -> str:
@@ -498,13 +498,13 @@ async def test_forbidden_hidden_tool_over_http_is_refused_before_any_argument_ch
         ) as bob:
             listed = {t.name for t in (await bob.list_tools()).tools}
             results = [
-                await bob.call_tool("place_order", args)
+                await bob.call_tool("stub_trade", args)
                 for args in ({}, {"symbol": "bad", "qty": -1}, {"symbol": "BTCUSDT", "qty": 1})
             ]
         async with server.connect(tenants.secrets["alice"]) as alice:
-            invalid = await alice.call_tool("place_order", {"symbol": "bad", "qty": 1})
+            invalid = await alice.call_tool("stub_trade", {"symbol": "bad", "qty": 1})
 
-    assert "place_order" not in listed
+    assert "stub_trade" not in listed
     for result in results:
         assert result.is_error
         assert _structured(result)["code"] == "permission_denied"
@@ -542,7 +542,7 @@ async def test_canary_sdk_checks_mcp_param_headers_of_hidden_tools_before_the_ga
     mcp = server_with_trading_stub(uow, exchange, calls, header_annotated=True)
     async with serving(mcp) as server, server.connect(tenants.secrets["bob"]) as bob:
         with pytest.raises(MCPError) as leaked:
-            await bob.call_tool("place_order", {"symbol": "BTCUSDT", "qty": 1})
+            await bob.call_tool("stub_trade", {"symbol": "BTCUSDT", "qty": 1})
 
     assert "Mcp-Param-Symbol" in leaked.value.error.message
     assert calls == []

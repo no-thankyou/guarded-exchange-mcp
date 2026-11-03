@@ -24,6 +24,7 @@ from guarded_exchange.domain.account import (
     Position,
     PositionSide,
     QtyUnit,
+    SymbolPosition,
     TimeInForce,
     UntrustedText,
 )
@@ -33,6 +34,7 @@ from guarded_exchange.domain.errors import (
     ExchangeUnavailable,
     InvalidParams,
     NotFound,
+    OutcomeUnknown,
     UnsupportedPositionMode,
 )
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
@@ -43,6 +45,14 @@ from guarded_exchange.domain.market import (
     Orderbook,
     OrderbookLevel,
     Ticker,
+)
+from guarded_exchange.domain.orders import (
+    FillStatus,
+    OrderFill,
+    OrderRequest,
+    OrderTimeInForce,
+    PlacedOrder,
+    PriceBand,
 )
 from guarded_exchange.infrastructure.bybit.errors import unavailable
 
@@ -805,3 +815,167 @@ def _qty_unit(item: _OrderDTO, category: Category) -> QtyUnit:
 def order_origin(order_link_id: str) -> OrderOrigin:
     """``system`` for an ``orderLinkId`` in this system's format, else ``external`` (FR-2)."""
     return OrderOrigin.SYSTEM if order_link_id.startswith(CLIENT_ORDER_ID_PREFIX) else OrderOrigin.EXTERNAL
+
+
+# --- trading: price band, symbol position, order create and read back (ticket 011) -----------
+
+_MAX_ORDER_LINK_ID: Final = 36
+"""Bybit's ``orderLinkId`` limit (https://bybit-exchange.github.io/docs/v5/order/create-order)."""
+_ACTION_ID_RE: Final = re.compile(rf"^[A-Za-z0-9-]{{1,{_MAX_ORDER_LINK_ID - len(CLIENT_ORDER_ID_PREFIX)}}}$")
+
+
+def client_order_id_for(action_id: str) -> str:
+    """``gx-`` + the action id (D-19): one id for the journal and the exchange, at most 36 characters."""
+    if not _ACTION_ID_RE.fullmatch(action_id):
+        raise ValueError("action id does not fit Bybit's orderLinkId")
+    return CLIENT_ORDER_ID_PREFIX + action_id
+
+
+class _PriceLimitDTO(BaseModel):
+    """``GET /v5/market/price-limit``: ``buyLmt`` is the highest buy price, ``sellLmt`` the lowest sell."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str
+    buy_lmt: str = Field(alias="buyLmt")
+    sell_lmt: str = Field(alias="sellLmt")
+
+
+def price_band_from_result(result: dict[str, Any], *, symbol: str) -> PriceBand:
+    """https://bybit-exchange.github.io/docs/v5/market/order-price-limit (spike 004 fixtures)."""
+    parsed = _validated(_PriceLimitDTO, result)
+    if parsed is None:
+        raise unavailable("unexpected price-limit format")
+    if parsed.symbol != symbol:
+        raise unavailable("price-limit returned another symbol")
+    try:
+        return PriceBand(buy_max=_required_dec(parsed.buy_lmt), sell_min=_required_dec(parsed.sell_lmt))
+    except (InvalidOperation, ValueError) as exc:
+        raise unavailable("unparsable price-limit") from exc
+
+
+def symbol_position_from_result(result: dict[str, Any], *, symbol: str) -> SymbolPosition:
+    """``position/list?symbol=``: one row per symbol in one-way mode, also when flat (``size`` 0),
+    and it carries the symbol's leverage setting (spike 004 ``demo_position_list_before``)."""
+    parsed = _validated(_PositionsResultDTO, result)
+    if parsed is None:
+        raise unavailable("unexpected position/list format")
+    if any(p.position_idx != _ONE_WAY for p in parsed.items):
+        raise UnsupportedPositionMode()
+    rows = [p for p in parsed.items if p.symbol == symbol]
+    if len(rows) != len(parsed.items) or len(rows) > 1:
+        raise unavailable("position/list returned an unexpected row set")
+    if not rows:
+        return SymbolPosition(symbol=symbol, position=None, leverage=None)
+    row = rows[0]
+    try:
+        is_open = bool(row.side) and _required_dec(row.size) != 0
+        return SymbolPosition(
+            symbol=symbol,
+            position=_position(row) if is_open else None,
+            leverage=_positive_or_none(row.leverage),
+        )
+    except (InvalidOperation, ValueError) as exc:
+        raise unavailable("inconsistent position/list") from exc
+
+
+_SIDE_TO_WIRE: Final = {OrderSide.BUY: "Buy", OrderSide.SELL: "Sell"}
+_TIF_TO_WIRE: Final = {OrderTimeInForce.GTC: "GTC", OrderTimeInForce.IOC: "IOC"}
+
+
+def order_create_body(order: OrderRequest) -> dict[str, str | int | bool]:
+    """The ``POST /v5/order/create`` body: always ``Limit`` (a market order is IOC, ADR-010).
+
+    Linear: one-way ``positionIdx=0`` and an explicit ``reduceOnly`` (D-8: the flag always travels
+    as a second line of defence). Spot: neither field exists.
+    """
+    body: dict[str, str | int | bool] = {
+        "category": order.category.value,
+        "symbol": order.symbol,
+        "side": _SIDE_TO_WIRE[order.side],
+        "orderType": "Limit",
+        "qty": _wire_decimal(order.qty),
+        "price": _wire_decimal(order.price),
+        "timeInForce": _TIF_TO_WIRE[order.time_in_force],
+        "orderLinkId": order.client_order_id,
+    }
+    if order.category is Category.LINEAR:
+        body["reduceOnly"] = order.reduce_only
+        body["positionIdx"] = _ONE_WAY
+    return body
+
+
+def _wire_decimal(value: Decimal) -> str:
+    text = format(value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+class _CreateResultDTO(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    order_id: str = Field(alias="orderId")
+    order_link_id: str = Field(default="", alias="orderLinkId")
+
+
+def placed_order_from_result(result: dict[str, Any], *, client_order_id: str) -> PlacedOrder:
+    """``order/create`` answers only ``{orderId, orderLinkId}`` (spike 004). Anything unexpected after
+    a successful ``retCode`` means the order probably exists: ``OutcomeUnknown``, never "failed"."""
+    parsed = _validated(_CreateResultDTO, result)
+    if (
+        parsed is None
+        or not _ORDER_ID_RE.fullmatch(parsed.order_id)
+        or parsed.order_link_id not in ("", client_order_id)
+    ):
+        raise OutcomeUnknown(
+            "the exchange accepted the order request but its answer was not understood",
+            details={"reason": "unexpected_create_response"},
+        )
+    return PlacedOrder(order_id=parsed.order_id)
+
+
+_FILL_STATUSES: Final = {
+    "New": FillStatus.OPEN,
+    "Untriggered": FillStatus.OPEN,
+    "Triggered": FillStatus.OPEN,
+    "PartiallyFilled": FillStatus.PARTIALLY_FILLED,
+    "Filled": FillStatus.FILLED,
+    "Cancelled": FillStatus.CANCELLED,
+    "PartiallyFilledCanceled": FillStatus.CANCELLED,
+    "Deactivated": FillStatus.CANCELLED,
+    "Rejected": FillStatus.REJECTED,
+}
+"""https://bybit-exchange.github.io/docs/v5/enum#orderstatus; an IOC remainder ends as ``Cancelled``."""
+
+
+def order_fill_from_result(result: dict[str, Any], *, symbol: str, client_order_id: str) -> OrderFill | None:
+    """The order with ``client_order_id`` from ``order/realtime?orderLinkId=``; ``None`` if not listed yet
+    (D-15). ``realtime`` also shows recently closed orders (spike 004: a filled IOC on the first read)."""
+    parsed = _validated(_OrdersResultDTO, result)
+    if parsed is None:
+        raise unavailable("unexpected order/realtime format")
+    if not parsed.items:
+        return None
+    if len(parsed.items) != 1:
+        raise unavailable("order/realtime returned several orders for one client id")
+    item = parsed.items[0]
+    if (
+        item.symbol != symbol
+        or item.order_link_id != client_order_id
+        or not _ORDER_ID_RE.fullmatch(item.order_id)
+    ):
+        raise unavailable("order/realtime returned another order")
+    status = _FILL_STATUSES.get(item.order_status, FillStatus.UNKNOWN)
+    try:
+        filled = _dec(item.cum_exec_qty)
+        if filled is None and status is FillStatus.REJECTED:
+            filled = Decimal(0)  # a rejected order executed nothing
+        return OrderFill(
+            order_id=item.order_id,
+            status=status,
+            qty=_required_dec(item.qty),
+            price=_positive_or_none(item.price),
+            filled_qty=filled,  # empty otherwise: not known (D-15), never read as 0
+            avg_fill_price=_positive_or_none(item.avg_price),
+        )
+    except (InvalidOperation, ValueError) as exc:
+        raise unavailable("inconsistent order/realtime") from exc

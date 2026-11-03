@@ -1,11 +1,14 @@
 """In-memory fakes of application ports (no mocks of everything, ENGINEERING.md)."""
 
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+import anyio
+import anyio.lowlevel
 
 from guarded_exchange.application.ports import CredentialCipher
 from guarded_exchange.domain.access_tokens import TOKEN_PREFIX, AccessToken
@@ -21,6 +24,7 @@ from guarded_exchange.domain.account import (
     Position,
     PositionSide,
     QtyUnit,
+    SymbolPosition,
     TimeInForce,
     UntrustedText,
 )
@@ -38,6 +42,7 @@ from guarded_exchange.domain.credentials import (
 from guarded_exchange.domain.errors import NotFound
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
 from guarded_exchange.domain.market import Candle, CandleInterval, Candles, Orderbook, OrderbookLevel, Ticker
+from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
 from guarded_exchange.domain.policy import PolicyRecord
 from guarded_exchange.domain.users import Environment, User, UserNameTaken, UserStatus
 
@@ -128,6 +133,9 @@ def make_candles(
     )
 
 
+LISTED_BY_DEFAULT = frozenset({InstrumentStatus.TRADING, InstrumentStatus.PENDING_OPEN})
+
+
 @dataclass
 class FakeExchange:
     """``ExchangeClient`` with configurable market data and an optional forced failure.
@@ -142,6 +150,8 @@ class FakeExchange:
     rules: dict[tuple[str, Category], InstrumentRules] = field(default_factory=dict)
     fail_with: Exception | None = None
     calls: list[tuple[object, ...]] = field(default_factory=list)
+    listed_statuses: frozenset[InstrumentStatus] = frozenset(InstrumentStatus)
+    """Statuses found without ``any_status``; Bybit lists only ``LISTED_BY_DEFAULT`` that way."""
 
     async def get_ticker(self, symbol: str, category: Category) -> Ticker:
         self.calls.append((symbol, category))
@@ -157,9 +167,16 @@ class FakeExchange:
         self.calls.append(("get_candles", symbol, category, interval, limit))
         return self._lookup(self.candles, symbol, category)
 
-    async def get_instrument_rules(self, symbol: str, category: Category) -> InstrumentRules:
-        self.calls.append(("get_instrument_rules", symbol, category))
-        return self._lookup(self.rules, symbol, category)
+    async def get_instrument_rules(
+        self, symbol: str, category: Category, *, any_status: bool = False
+    ) -> InstrumentRules:
+        self.calls.append(
+            ("get_instrument_rules", symbol, category, *(("any_status",) if any_status else ()))
+        )
+        rules = self._lookup(self.rules, symbol, category)
+        if not any_status and rules.status not in self.listed_statuses:
+            raise NotFound(f"no {category.value} instrument {symbol}")  # like Bybit without `status`
+        return rules
 
     def _lookup[T](self, table: dict[tuple[str, Category], T], symbol: str, category: Category) -> T:
         if self.fail_with is not None:
@@ -460,13 +477,24 @@ class InMemoryAccessTokenRepository:
 
 
 class InMemoryAuditLogRepository:
-    def __init__(self, state: _State, *, writable: bool) -> None:
+    def __init__(
+        self,
+        state: _State,
+        *,
+        writable: bool,
+        held: set[str] | None = None,
+        appends: "list[tuple[str, str, bool]] | None" = None,
+    ) -> None:
         self._state = state
         self._writable = writable
+        self._held = held if held is not None else set()
+        self._appends = appends if appends is not None else []
 
     async def append(self, chain_id: str, event: AuditEvent, at: datetime) -> AuditRecord:
         if not self._writable:
             raise ReadOnlyViolation("audit.append needs a write unit of work")
+        # (chain, event type, was lock_user(chain) taken earlier in this same transaction)
+        self._appends.append((chain_id, str(event.event_type), chain_id in self._held))
         chain = self._state.audit.setdefault(chain_id, [])
         record = AuditRecord(
             chain_id=chain_id,
@@ -572,9 +600,17 @@ class InMemoryCredentialRepository:
 
 
 class InMemoryUnitOfWork:
-    def __init__(self, state: _State, *, write: bool, locks: list[str]) -> None:
+    def __init__(
+        self,
+        state: _State,
+        *,
+        write: bool,
+        locks: list[str],
+        appends: "list[tuple[str, str, bool]] | None" = None,
+    ) -> None:
+        self._held: set[str] = set()  # users locked in this transaction
         self.users = InMemoryUserRepository(state, writable=write)
-        self.audit = InMemoryAuditLogRepository(state, writable=write)
+        self.audit = InMemoryAuditLogRepository(state, writable=write, held=self._held, appends=appends)
         self.policies = InMemoryPolicyRepository(state, writable=write)
         self.access_tokens = InMemoryAccessTokenRepository(state, writable=write)
         self.credentials = InMemoryCredentialRepository(state, writable=write)
@@ -585,6 +621,7 @@ class InMemoryUnitOfWork:
         if not self._write:
             raise ReadOnlyViolation(f"lock_user({user_id!r}) needs a write unit of work")
         self._locks.append(user_id)
+        self._held.add(user_id)
 
 
 class InMemoryDatabase:
@@ -595,18 +632,37 @@ class InMemoryDatabase:
         self.transactions: list[bool] = []  # write flag of every unit of work opened
         self.locked_users: list[str] = []  # every lock_user call, in order
         self.open_transactions = 0  # > 0 while a unit of work is open (D-10: no network I/O then)
+        self.audit_appends: list[tuple[str, str, bool]] = []
+        """Every journal append: (chain, event type, lock_user(chain) held in that transaction)."""
+        self.fail_writes: Exception | None = None
+        """If set, opening a write unit of work raises it (e.g. ``database is locked``)."""
+        self.checkpoint = False
+        """Yield to the event loop on opening a transaction and after a commit, as a real driver does
+        (cancellation points: a commit may complete and its ``await`` still be cancelled)."""
+        self.after_commit: Callable[[], None] | None = None
+        """Runs right after a write unit of work committed, before the checkpoint after it."""
 
     @asynccontextmanager
     async def __call__(self, *, write: bool) -> AsyncIterator[InMemoryUnitOfWork]:
+        if self.checkpoint:
+            await anyio.lowlevel.checkpoint()
+        if write and self.fail_writes is not None:
+            raise self.fail_writes
         self.transactions.append(write)
         working = self.state.copy()
         self.open_transactions += 1
         try:
-            yield InMemoryUnitOfWork(working, write=write, locks=self.locked_users)
+            yield InMemoryUnitOfWork(
+                working, write=write, locks=self.locked_users, appends=self.audit_appends
+            )
         finally:
             self.open_transactions -= 1
         if write:
             self.state = working
+            if self.after_commit is not None:
+                self.after_commit()
+            if self.checkpoint:
+                await anyio.lowlevel.checkpoint()
 
     def all_audit(self) -> list[AuditRecord]:
         return [r for chain in self.state.audit.values() for r in chain]
@@ -655,3 +711,84 @@ class InMemoryDatabase:
         )
         self.state.credentials[credential.id] = (credential, cipher.seal(keys, credential.binding))
         return credential
+
+
+# --- trading ---------------------------------------------------------------------------------
+
+BAND = PriceBand(buy_max=Decimal("81747.70"), sell_min=Decimal("80128.90"))
+
+
+@dataclass
+class FakeTrading:
+    """``TradingExchange``: records orders; ``fills`` answers ``get_order`` by client order id.
+
+    ``place_error`` makes ``place_order`` raise (after recording the request). With ``db`` set,
+    ``calls_in_transaction`` counts calls made while a unit of work was open (D-10), and
+    ``audit_at_send`` keeps the journal event types committed when each order was sent.
+    """
+
+    bands: dict[tuple[str, Category], PriceBand] = field(default_factory=dict)
+    positions: dict[str, SymbolPosition] = field(default_factory=dict)
+    fills: dict[str, OrderFill] = field(default_factory=dict)
+    place_error: Exception | None = None
+    read_error: Exception | None = None
+    position_error: Exception | None = None
+    sent: list[OrderRequest] = field(default_factory=list)
+    calls: list[tuple[object, ...]] = field(default_factory=list)
+    db: "InMemoryDatabase | None" = None
+    calls_in_transaction: int = 0
+    audit_at_send: list[list[str]] = field(default_factory=list)
+    hold_place: "anyio.Event | None" = None
+    """If set, ``place_order`` waits for it (after recording the request): a slow exchange."""
+    placing: "anyio.Event" = field(default_factory=anyio.Event)
+    """Set when ``place_order`` has been entered."""
+    after_place: Callable[[], None] | None = None
+    """Runs after an accepted ``place_order``: something that breaks right after the exchange said yes."""
+    during_place: Callable[[], None] | None = None
+    """Runs inside ``place_order`` before its answer (``place_error`` too): breaks while it is in flight."""
+    before_band: Callable[[], None] | None = None
+    """Runs inside ``get_price_band``: something that happens between the checks and the decision."""
+
+    def client_order_id(self, action_id: str) -> str:
+        return f"gx-{action_id}"
+
+    async def get_price_band(self, symbol: str, category: Category) -> PriceBand:
+        self._call("get_price_band", symbol, category)
+        if self.before_band is not None:
+            self.before_band()
+        return self.bands.get((symbol, category), BAND)
+
+    async def get_symbol_position(self, keys: ApiKeyPair, symbol: str) -> SymbolPosition:
+        self._call("get_symbol_position", symbol)
+        if self.position_error is not None:
+            raise self.position_error
+        return self.positions.get(symbol, SymbolPosition(symbol=symbol, position=None, leverage=Decimal(10)))
+
+    async def place_order(self, keys: ApiKeyPair, order: OrderRequest) -> PlacedOrder:
+        self._call("place_order", order.client_order_id)
+        self.sent.append(order)
+        if self.db is not None:
+            self.audit_at_send.append([r.event_type for r in self.db.all_audit()])
+        self.placing.set()
+        if self.hold_place is not None:
+            await self.hold_place.wait()
+        if self.during_place is not None:
+            self.during_place()
+        if self.place_error is not None:
+            raise self.place_error
+        if self.after_place is not None:
+            self.after_place()
+        return PlacedOrder(order_id=f"order-{len(self.sent)}")
+
+    async def get_order(
+        self, keys: ApiKeyPair, category: Category, symbol: str, client_order_id: str
+    ) -> OrderFill | None:
+        self._call("get_order", category, symbol, client_order_id)
+        if self.read_error is not None:
+            raise self.read_error
+        return self.fills.get(client_order_id)
+
+    def _call(self, *call: object) -> None:
+        self.calls.append(call)
+        if self.db is not None and self.db.open_transactions:
+            self.calls_in_transaction += 1

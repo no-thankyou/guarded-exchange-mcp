@@ -51,7 +51,7 @@ class PolicyView:
     key_read_only: bool = False  # the active exchange key is read-only and caps the profile (FR-49)
 
 
-async def _view(uow: UnitOfWork, user: User) -> PolicyView:
+async def load_policy_view(uow: UnitOfWork, user: User) -> PolicyView:
     record = await uow.policies.get(user.id)
     stored_ceiling = record.ceiling if record is not None else None
     overrides = record.overrides if record is not None else NO_OVERRIDES
@@ -76,7 +76,7 @@ async def _user_by_name(uow: UnitOfWork, raw_name: str) -> User:
     return user
 
 
-async def _active_principal(uow: UnitOfWork, user_id: str | None) -> User | None:
+async def active_principal(uow: UnitOfWork, user_id: str | None) -> User | None:
     """The calling user if it exists and is active; ``None`` otherwise (callers fail closed)."""
     if user_id is None:
         return None
@@ -84,7 +84,7 @@ async def _active_principal(uow: UnitOfWork, user_id: str | None) -> User | None
     return user if user is not None and user.is_active else None
 
 
-def _no_access() -> PermissionDenied:
+def no_access() -> PermissionDenied:
     # Same answer for "no principal", "unknown user" and "revoked": nothing to learn from it (FR-33).
     return PermissionDenied(
         "access denied for this caller",
@@ -100,14 +100,14 @@ class ReadPolicy:
 
     async def for_principal(self, user_id: str | None) -> PolicyView:
         async with self._uow(write=False) as uow:
-            user = await _active_principal(uow, user_id)
+            user = await active_principal(uow, user_id)
             if user is None:
-                raise _no_access()
-            return await _view(uow, user)
+                raise no_access()
+            return await load_policy_view(uow, user)
 
     async def by_name(self, user_name: str) -> PolicyView:
         async with self._uow(write=False) as uow:
-            return await _view(uow, await _user_by_name(uow, user_name))
+            return await load_policy_view(uow, await _user_by_name(uow, user_name))
 
 
 class AuthorizeAccess:
@@ -128,13 +128,13 @@ class AuthorizeAccess:
         """Raise ``PermissionDenied`` unless the principal's profile grants ``permission``."""
         policy = await self._effective(user_id)
         if policy is None:
-            raise _no_access()
+            raise no_access()
         require_permission(policy, permission)
 
     async def _effective(self, user_id: str | None) -> EffectivePolicy | None:
         async with self._uow(write=False) as uow:
-            user = await _active_principal(uow, user_id)
-            return None if user is None else (await _view(uow, user)).effective
+            user = await active_principal(uow, user_id)
+            return None if user is None else (await load_policy_view(uow, user)).effective
 
 
 def _require_changes(change: PolicyPatch) -> None:
@@ -157,7 +157,7 @@ class SetCeiling:
         async with self._uow(write=True) as uow:
             user = await _user_by_name(uow, user_name)
             await uow.lock_user(user.id)
-            before = await _view(uow, user)
+            before = await load_policy_view(uow, user)
             ceiling = apply_patch(before.ceiling, change)
             now = self._clock.now()
             await uow.policies.save(
@@ -172,7 +172,7 @@ class SetCeiling:
                 ),
                 now,
             )
-            return await _view(uow, user)
+            return await load_policy_view(uow, user)
 
 
 class TightenPolicy:
@@ -194,7 +194,7 @@ class TightenPolicy:
             if not user.is_active:
                 raise PermissionDenied(f"user {user.name!r} is {user.status.value}")
             await uow.lock_user(user.id)
-            before = await _view(uow, user)
+            before = await load_policy_view(uow, user)
             validate_override(before.effective, change)
             overrides = apply_patch(before.overrides, change)
             now = self._clock.now()
@@ -202,7 +202,7 @@ class TightenPolicy:
             await uow.policies.save(
                 user.id, PolicyRecord(ceiling=stored_ceiling, overrides=overrides, updated_at=now)
             )
-            after = await _view(uow, user)
+            after = await load_policy_view(uow, user)
             await uow.audit.append(
                 user.id,
                 AuditEvent(
@@ -244,7 +244,7 @@ class ResetOverrides:
         async with self._uow(write=True) as uow:
             user = await _user_by_name(uow, user_name)
             await uow.lock_user(user.id)
-            before = await _view(uow, user)
+            before = await load_policy_view(uow, user)
             own = patch_to_payload(before.overrides)
             reset = tuple(name for name in own if wanted is None or name in wanted)
             if not reset:
@@ -255,7 +255,7 @@ class ResetOverrides:
             await uow.policies.save(
                 user.id, PolicyRecord(ceiling=stored_ceiling, overrides=overrides, updated_at=now)
             )
-            after = await _view(uow, user)
+            after = await load_policy_view(uow, user)
             effective_before = settings_to_payload(before.effective)
             effective_after = settings_to_payload(after.effective)
             await uow.audit.append(

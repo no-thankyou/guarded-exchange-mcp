@@ -23,14 +23,15 @@ from tests.fakes import FakeClock, InMemoryDatabase, InMemoryUnitOfWork
 
 BTC = InstrumentRef(Category.LINEAR, "BTCUSDT")
 GRANT_TRADING = PolicyPatch(profile=Profile.TRADE, allowlist=frozenset({BTC}))
-WITH_TRADING_TOOL = {**TOOL_PERMISSIONS, "place_order": Permission.TRADE}
+WITH_TRADING_TOOL = {**TOOL_PERMISSIONS, "stub_trade": Permission.TRADE}
 
 
 def with_stub_trading_tool(mcp: MCPServer[Any], calls: list[str]) -> MCPServer[Any]:
-    """A stand-in for a real trading tool (ticket 011): records that its body ran."""
+    """A stand-in trading tool with a trivial schema: records that its body ran (the real
+    ``place_order`` has its own e2e tests)."""
 
-    @mcp.tool(name="place_order", description="Stub trading tool.")
-    async def place_order(symbol: str) -> str:
+    @mcp.tool(name="stub_trade", description="Stub trading tool.")
+    async def stub_trade(symbol: str) -> str:
         calls.append(symbol)
         return "placed"
 
@@ -145,10 +146,11 @@ async def test_read_only_user_does_not_see_trading_tools_and_cannot_call_them() 
 
     async with Client(mcp) as client:
         listed = await client.session.list_tools()
-        result = await client.call_tool("place_order", {"symbol": "BTCUSDT"})
-        bad_args = await client.call_tool("place_order", {})
+        result = await client.call_tool("stub_trade", {"symbol": "BTCUSDT"})
+        bad_args = await client.call_tool("stub_trade", {})
 
-    assert {tool.name for tool in listed.tools} == set(TOOL_PERMISSIONS)  # every read tool, no trading
+    read_tools = {name for name, needed in TOOL_PERMISSIONS.items() if needed is Permission.READ}
+    assert {tool.name for tool in listed.tools} == read_tools  # every read tool, no trading
     assert (listed.ttl_ms, listed.cache_scope) == (0, "private")  # per-user list, never shared
     assert error_code(result) == "permission_denied"
     assert result.structured_content is not None
@@ -166,7 +168,7 @@ async def test_permitted_user_with_bad_arguments_gets_invalid_params() -> None:
     mcp = with_stub_trading_tool(server_for(db, user.id, tool_permissions=WITH_TRADING_TOOL), calls)
 
     async with Client(mcp) as client:
-        result = await client.call_tool("place_order", {})
+        result = await client.call_tool("stub_trade", {})
 
     assert error_code(result) == "invalid_params"  # past the permission check, then argument validation
     assert result.structured_content is not None
@@ -205,15 +207,15 @@ async def test_policy_changes_apply_to_the_next_list_and_call_without_reconnecti
         before = await tool_names(client)
         await SetCeiling(db, clock)("alice", GRANT_TRADING)
         granted = await tool_names(client)
-        placed = await client.call_tool("place_order", {"symbol": "BTCUSDT"})
+        placed = await client.call_tool("stub_trade", {"symbol": "BTCUSDT"})
         await TightenPolicy(db, clock)("alice", PolicyPatch(profile=Profile.READ_ONLY))
         after = await tool_names(client)
-        refused = await client.call_tool("place_order", {"symbol": "BTCUSDT"})
+        refused = await client.call_tool("stub_trade", {"symbol": "BTCUSDT"})
 
-    assert "place_order" not in before
-    assert "place_order" in granted
+    assert "stub_trade" not in before
+    assert "stub_trade" in granted
     assert placed.is_error is False
-    assert "place_order" not in after
+    assert "stub_trade" not in after
     assert error_code(refused) == "permission_denied"
     assert calls == ["BTCUSDT"]
 
@@ -223,13 +225,13 @@ async def test_a_tool_without_a_declared_permission_is_hidden_and_refused() -> N
     db, calls = InMemoryDatabase(), list[str]()
     owner = db.add_user("alice")
     await SetCeiling(db, FakeClock())("alice", GRANT_TRADING)
-    mcp = with_stub_trading_tool(server_for(db, owner.id), calls)  # place_order not declared
+    mcp = with_stub_trading_tool(server_for(db, owner.id), calls)  # stub_trade not declared
 
     async with Client(mcp) as client:
         names = await tool_names(client)
-        result = await client.call_tool("place_order", {"symbol": "BTCUSDT"})
+        result = await client.call_tool("stub_trade", {"symbol": "BTCUSDT"})
 
-    assert "place_order" not in names
+    assert "stub_trade" not in names
     assert error_code(result) == "permission_denied"
     assert calls == []
 

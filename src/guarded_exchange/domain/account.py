@@ -102,6 +102,16 @@ class Position:
             raise ValueError("an open position has a positive size")
 
 
+@dataclass(frozen=True, slots=True)
+class SymbolPosition:
+    """One perpetual as the account holds it: the open position (``None``: flat) and the leverage
+    set for the symbol, which a new order trades at (``None``: the exchange did not report it)."""
+
+    symbol: str
+    position: Position | None
+    leverage: Decimal | None
+
+
 # --- orders ----------------------------------------------------------------------------------
 
 
