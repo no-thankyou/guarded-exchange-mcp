@@ -116,6 +116,7 @@ def make_world(*, environment: Environment = Environment.TESTNET) -> World:
         trading=trading,
         clock=clock,
         ids=SequentialIds("act"),
+        reconnaissance_delay_s=0,
         **scope,
     )
     return World(db, clock, exchange, trading, reader, user, place)

@@ -129,3 +129,51 @@ class OutcomeUnknown(DomainError):
     exchange-side internal error): never retried blindly (FR-27)."""
 
     code: ClassVar[str] = "outcome_unknown"
+
+
+class IdempotencyConflict(DomainError):
+    """The idempotency key was already used for a call with other arguments (FR-26); nothing was sent."""
+
+    code: ClassVar[str] = "idempotency_conflict"
+
+
+_RESTORABLE: dict[str, type[DomainError]] = {
+    cls.code: cls
+    for cls in (
+        InvalidParams,
+        NotFound,
+        PermissionDenied,
+        ExchangeUnavailable,
+        ExchangeRejected,
+        ExchangeCredentialsInvalid,
+        CredentialsPermissionsChanged,
+        RateLimited,
+        InstrumentRuleViolation,
+        LimitExceeded,
+        ConfirmationChannelUnavailable,
+        PositionNotFound,
+        OutcomeUnknown,
+        IdempotencyConflict,
+    )
+}
+
+
+def restore_error(
+    code: str,
+    message: str,
+    *,
+    next_step: str | None,
+    details: dict[str, str],
+    untrusted_text: str | None,
+) -> DomainError:
+    """The stored answer of an earlier call, as the exception it was (FR-26: same key, same answer).
+
+    ``retry_after_s`` is not restored: an answer that asked to wait is never stored. A code this
+    version does not know is a programming error (raises ``ValueError``), never a guess.
+    """
+    if code == UnsupportedPositionMode.code:
+        return UnsupportedPositionMode()
+    cls = _RESTORABLE.get(code)
+    if cls is None:
+        raise ValueError(f"cannot restore an error with code {code!r}")
+    return cls(message, next_step=next_step, details=details, untrusted_text=untrusted_text)

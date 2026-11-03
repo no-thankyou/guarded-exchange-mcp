@@ -1133,23 +1133,26 @@ _FILL_STATUSES: Final = {
 """https://bybit-exchange.github.io/docs/v5/enum#orderstatus; an IOC remainder ends as ``Cancelled``."""
 
 
-def order_fill_from_result(result: dict[str, Any], *, symbol: str, client_order_id: str) -> OrderFill | None:
-    """The order with ``client_order_id`` from ``order/realtime?orderLinkId=``; ``None`` if not listed yet
-    (D-15). ``realtime`` also shows recently closed orders (spike 004: a filled IOC on the first read)."""
+def order_fill_from_result(
+    result: dict[str, Any], *, symbol: str, client_order_id: str, endpoint: str = "order/realtime"
+) -> OrderFill | None:
+    """The order with ``client_order_id`` from ``order/realtime?orderLinkId=`` (or ``order/history``: same
+    item format; ``endpoint`` names it in errors); ``None`` if not listed (yet, D-15). ``realtime`` also
+    shows recently closed orders (spike 004: a filled IOC on the first read)."""
     parsed = _validated(_OrdersResultDTO, result)
     if parsed is None:
-        raise unavailable("unexpected order/realtime format")
+        raise unavailable(f"unexpected {endpoint} format")
     if not parsed.items:
         return None
     if len(parsed.items) != 1:
-        raise unavailable("order/realtime returned several orders for one client id")
+        raise unavailable(f"{endpoint} returned several orders for one client id")
     item = parsed.items[0]
     if (
         item.symbol != symbol
         or item.order_link_id != client_order_id
         or not _ORDER_ID_RE.fullmatch(item.order_id)
     ):
-        raise unavailable("order/realtime returned another order")
+        raise unavailable(f"{endpoint} returned another order")
     status = _FILL_STATUSES.get(item.order_status, FillStatus.UNKNOWN)
     try:
         filled = _dec(item.cum_exec_qty)
@@ -1164,4 +1167,4 @@ def order_fill_from_result(result: dict[str, Any], *, symbol: str, client_order_
             avg_fill_price=_positive_or_none(item.avg_price),
         )
     except (InvalidOperation, ValueError) as exc:
-        raise unavailable("inconsistent order/realtime") from exc
+        raise unavailable(f"inconsistent {endpoint}") from exc

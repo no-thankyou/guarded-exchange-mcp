@@ -20,6 +20,7 @@ from guarded_exchange.infrastructure.db.repositories import (
     SqlAccessTokenRepository,
     SqlAuditLogRepository,
     SqlCredentialRepository,
+    SqlIdempotencyRepository,
     SqlPolicyRepository,
     SqlUserRepository,
 )
@@ -53,6 +54,7 @@ class SqlUnitOfWork:
         self._policies = SqlPolicyRepository(connection, writable=write)
         self._access_tokens = SqlAccessTokenRepository(connection, writable=write)
         self._credentials = SqlCredentialRepository(connection, writable=write)
+        self._idempotency = SqlIdempotencyRepository(connection, writable=write)
 
     @property
     def users(self) -> SqlUserRepository:
@@ -73,6 +75,10 @@ class SqlUnitOfWork:
     @property
     def credentials(self) -> SqlCredentialRepository:
         return self._credentials
+
+    @property
+    def idempotency(self) -> SqlIdempotencyRepository:
+        return self._idempotency
 
     async def lock_user(self, user_id: str) -> None:
         await lock_user(self._connection, user_id)

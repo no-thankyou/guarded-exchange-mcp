@@ -1,15 +1,15 @@
 """SQL repositories: the only place with SQL for these tables. Rows map to domain objects here."""
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, Row, select, update
+from sqlalchemy import ColumnElement, Row, delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from guarded_exchange.domain.access_tokens import AccessToken
-from guarded_exchange.domain.audit import AuditEvent, AuditRecord, canonical_json
+from guarded_exchange.domain.audit import AuditEvent, AuditRecord, JsonValue, canonical_json
 from guarded_exchange.domain.credentials import (
     Credential,
     CredentialStatus,
@@ -18,6 +18,7 @@ from guarded_exchange.domain.credentials import (
     permissions_from_payload,
     permissions_to_payload,
 )
+from guarded_exchange.domain.idempotency import IdempotencyRecord, KeyKind, RecordStatus
 from guarded_exchange.domain.policy import (
     PolicyRecord,
     ceiling_from_payload,
@@ -32,6 +33,7 @@ from guarded_exchange.infrastructure.db.schema import (
     audit_heads,
     audit_log,
     exchange_credentials,
+    idempotency_records,
     policies,
     users,
 )
@@ -297,6 +299,100 @@ class SqlCredentialRepository(_Repository):
             .values(status=CredentialStatus.DELETED.value, deleted_at=at)
         )
         return result.rowcount == 1
+
+
+class SqlIdempotencyRepository(_Repository):
+    """Claims of state-changing calls (ADR-014). Every change is conditional on the holder's
+    ``action_id``, so a call whose record was taken over cannot touch the new holder's row."""
+
+    async def claim(self, record: IdempotencyRecord, now: datetime) -> IdempotencyRecord:
+        self._require_writable("idempotency.claim")
+        t = idempotency_records
+        values = {
+            "user_id": record.user_id,
+            "key_kind": record.kind.value,
+            "key": record.key,
+            "request_hash": record.request_hash,
+            "action_id": record.action_id,
+            "status": record.status.value,
+            "result": None,
+            "created_at": record.created_at,
+            "expires_at": record.expires_at,
+        }
+        insert = insert_for(self._conn, t).values(**values)
+        # One statement: insert, or take over the key only if its record has expired (ADR-014).
+        upsert = insert.on_conflict_do_update(
+            index_elements=[t.c.user_id, t.c.key_kind, t.c.key],
+            set_={
+                name: insert.excluded[name] for name in values if name not in {"user_id", "key_kind", "key"}
+            },
+            where=t.c.expires_at <= now,
+        ).returning(t.c.action_id)
+        claimed = (await self._conn.execute(upsert)).scalar_one_or_none()
+        await self._conn.execute(  # housekeeping: other expired claims of this user
+            delete(t).where(t.c.user_id == record.user_id, t.c.expires_at <= now)
+        )
+        if claimed == record.action_id:
+            return record
+        row = (await self._conn.execute(select(t).where(*self._key(record)))).one()
+        return _idempotency_from_row(row)
+
+    async def mark_sent(self, record: IdempotencyRecord) -> bool:
+        self._require_writable("idempotency.mark_sent")
+        t = idempotency_records
+        result = await self._conn.execute(
+            update(t)
+            .where(*self._held(record), t.c.status == RecordStatus.IN_PROGRESS.value)
+            .values(status=RecordStatus.SENT.value)
+        )
+        return result.rowcount == 1
+
+    async def finish(
+        self,
+        record: IdempotencyRecord,
+        status: RecordStatus,
+        result: Mapping[str, JsonValue],
+        expires_at: datetime,
+    ) -> bool:
+        self._require_writable("idempotency.finish")
+        if status not in {RecordStatus.UNKNOWN, RecordStatus.COMPLETED}:
+            raise ValueError(f"{status} is not an answered status")
+        changed = await self._conn.execute(
+            update(idempotency_records)
+            .where(*self._held(record))
+            .values(status=status.value, result=canonical_json(result), expires_at=expires_at)
+        )
+        return changed.rowcount == 1
+
+    async def release(self, record: IdempotencyRecord) -> bool:
+        self._require_writable("idempotency.release")
+        result = await self._conn.execute(delete(idempotency_records).where(*self._held(record)))
+        return result.rowcount == 1
+
+    @staticmethod
+    def _key(record: IdempotencyRecord) -> tuple[ColumnElement[bool], ...]:
+        t = idempotency_records
+        return (t.c.user_id == record.user_id, t.c.key_kind == record.kind.value, t.c.key == record.key)
+
+    @classmethod
+    def _held(cls, record: IdempotencyRecord) -> tuple[ColumnElement[bool], ...]:
+        return (*cls._key(record), idempotency_records.c.action_id == record.action_id)
+
+
+def _idempotency_from_row(row: Row[tuple[object, ...]]) -> IdempotencyRecord:
+    mapping = row._mapping
+    raw_result = mapping["result"]
+    return IdempotencyRecord(
+        user_id=str(mapping["user_id"]),
+        kind=KeyKind(mapping["key_kind"]),
+        key=str(mapping["key"]),
+        request_hash=str(mapping["request_hash"]),
+        action_id=str(mapping["action_id"]),
+        status=RecordStatus(mapping["status"]),
+        created_at=mapping["created_at"],
+        expires_at=mapping["expires_at"],
+        result=None if raw_result is None else json.loads(str(raw_result)),
+    )
 
 
 # Every column except the encrypted secret: listing keys never loads ciphertext.

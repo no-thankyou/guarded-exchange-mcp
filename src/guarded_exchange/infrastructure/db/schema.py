@@ -127,3 +127,30 @@ Index(
     sqlite_where=text("status = 'active'"),
     postgresql_where=text("status = 'active'"),
 )
+
+# Claims of state-changing calls (FR-26, ADR-014, D-20; ticket 012): one row per user, key kind and
+# key. ``action_id`` is the call holding the row (its client order id is derived from it, D-19);
+# ``result`` is the stored answer as canonical JSON, present exactly once the call has one.
+idempotency_records = Table(
+    "idempotency_records",
+    metadata,
+    Column("user_id", String(64), ForeignKey("users.id"), nullable=False),
+    Column("key_kind", String(16), nullable=False),
+    Column("key", String(64), nullable=False),
+    Column("request_hash", String(64), nullable=False),
+    Column("action_id", String(64), nullable=False, unique=True),
+    Column("status", String(16), nullable=False),
+    Column("result", Text, nullable=True),
+    Column("created_at", EpochMillis(), nullable=False),
+    Column("expires_at", EpochMillis(), nullable=False),
+    PrimaryKeyConstraint("user_id", "key_kind", "key"),
+    CheckConstraint("key_kind IN ('explicit', 'fingerprint')", name="key_kind"),
+    CheckConstraint("status IN ('in_progress', 'sent', 'unknown', 'completed')", name="status"),
+    CheckConstraint("(result IS NULL) = (status IN ('in_progress', 'sent'))", name="result_iff_answered"),
+    CheckConstraint("length(request_hash) = 64", name="request_hash_sha256"),
+)
+Index(
+    "ix_idempotency_records_user_id_expires_at",
+    idempotency_records.c.user_id,
+    idempotency_records.c.expires_at,
+)

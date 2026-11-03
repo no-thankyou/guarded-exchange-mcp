@@ -89,28 +89,48 @@ UNKNOWN_OUTCOME_RET_CODES: Final = frozenset(
         170032,  # Network error. Please try again later (spot)
         170146,  # Order creation timeout (spot)
         170234,  # System Error (spot)
+        10014,  # Invalid duplicate request
     }
 )
 """Server-side errors and timeouts after which an order may still exist (ADR-014): never "failed".
-Checked against https://bybit-exchange.github.io/docs/v5/error on 2026-11-03. An unlisted code is
-still a definite refusal in v1 (ticket 012 notes: consider unknown by default for a mutating POST)."""
+Checked against https://bybit-exchange.github.io/docs/v5/error on 2026-11-03."""
 DUPLICATE_CLIENT_ID_RET_CODES: Final = frozenset({110072, 170141})
 """``orderLinkId`` already used (spike 004: also after cancel or fill): the order may be ours."""
 PRICE_BAND_RET_CODES: Final = frozenset({110121, 170193})
 """Price outside the exchange's corridor (linear in reject mode / spot, spike 004): no order."""
+DEFINITE_CREATE_FAMILIES: Final = (
+    range(10001, 10030),  # request, signature, key, rate and access errors
+    range(110001, 111000),  # derivatives order validation (UTA)
+    range(170001, 171000),  # spot order validation
+    range(3400001, 3401011),  # UTA account
+)
+"""Families of documented refusals of ``order/create`` (minus the codes above): no order was created.
+Any other non-zero ``retCode`` is treated as an unknown outcome (ticket 012): reconnaissance by
+client id then finds out, instead of a code nobody listed being read as "failed"."""
+
+
+def _definite_refusal(ret_code: int) -> bool:
+    return any(ret_code in family for family in DEFINITE_CREATE_FAMILIES)
 
 
 def error_for_create(ret_code: int, ret_msg: str, *, retry_after_s: float | None = None) -> DomainError:
     """``retCode`` of ``POST /v5/order/create`` -> domain exception (FR-27, FR-28, ADR-014).
 
-    Unknown-outcome and duplicate-id codes become ``OutcomeUnknown`` (ticket 012 finds out what
-    happened); everything else is a definite refusal: no order was created.
+    Unknown-outcome and duplicate-id codes, and every code outside the documented refusal families,
+    become ``OutcomeUnknown`` (the use case looks the order up by its client id); the rest is a
+    definite refusal: no order was created.
     """
     details = {"exchange_code": str(ret_code)}
     if ret_code in UNKNOWN_OUTCOME_RET_CODES:
         return OutcomeUnknown(
             "the exchange reported an internal error while placing the order",
             details={**details, "reason": "exchange_internal_error"},
+            untrusted_text=ret_msg,
+        )
+    if not _definite_refusal(ret_code):
+        return OutcomeUnknown(
+            "the exchange answered with a code this server does not recognise as a refusal",
+            details={**details, "reason": "unrecognised_exchange_code"},
             untrusted_text=ret_msg,
         )
     if ret_code in DUPLICATE_CLIENT_ID_RET_CODES:

@@ -1,7 +1,7 @@
 """In-memory fakes of application ports (no mocks of everything, ENGINEERING.md)."""
 
 import json
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -28,7 +28,7 @@ from guarded_exchange.domain.account import (
     TimeInForce,
     UntrustedText,
 )
-from guarded_exchange.domain.audit import AuditEvent, AuditRecord, canonical_json
+from guarded_exchange.domain.audit import AuditEvent, AuditRecord, JsonValue, canonical_json
 from guarded_exchange.domain.credentials import (
     EXCHANGE_BYBIT,
     ApiKeyPair,
@@ -40,6 +40,7 @@ from guarded_exchange.domain.credentials import (
     SealedSecret,
 )
 from guarded_exchange.domain.errors import NotFound
+from guarded_exchange.domain.idempotency import IdempotencyRecord, KeyKind, RecordStatus
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
 from guarded_exchange.domain.market import Candle, CandleInterval, Candles, Orderbook, OrderbookLevel, Ticker
 from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
@@ -409,6 +410,7 @@ class _State:
     policies: dict[str, PolicyRecord] = field(default_factory=dict)
     access_tokens: dict[str, AccessToken] = field(default_factory=dict)
     credentials: dict[str, tuple[Credential, SealedSecret]] = field(default_factory=dict)
+    idempotency: dict[tuple[str, KeyKind, str], IdempotencyRecord] = field(default_factory=dict)
 
     def copy(self) -> "_State":
         return _State(
@@ -417,6 +419,7 @@ class _State:
             dict(self.policies),
             dict(self.access_tokens),
             dict(self.credentials),
+            dict(self.idempotency),
         )
 
 
@@ -599,6 +602,72 @@ class InMemoryCredentialRepository:
         return True
 
 
+class InMemoryIdempotencyRepository:
+    """Same semantics as the SQL repository: claim takes over only an expired record, every change is
+    conditional on the holder's ``action_id``; results round-trip through canonical JSON."""
+
+    def __init__(self, state: _State, *, writable: bool) -> None:
+        self._state = state
+        self._writable = writable
+
+    def _write(self, operation: str) -> None:
+        if not self._writable:
+            raise ReadOnlyViolation(f"idempotency.{operation} needs a write unit of work")
+
+    @staticmethod
+    def _key(record: IdempotencyRecord) -> tuple[str, KeyKind, str]:
+        return (record.user_id, record.kind, record.key)
+
+    def _held(self, record: IdempotencyRecord) -> IdempotencyRecord | None:
+        current = self._state.idempotency.get(self._key(record))
+        return current if current is not None and current.action_id == record.action_id else None
+
+    async def claim(self, record: IdempotencyRecord, now: datetime) -> IdempotencyRecord:
+        self._write("claim")
+        if record.user_id not in self._state.users:
+            raise ValueError(f"no user {record.user_id}")  # the SQL table has a foreign key
+        current = self._state.idempotency.get(self._key(record))
+        if current is None or current.expires_at <= now:
+            self._state.idempotency[self._key(record)] = replace(record, result=None)
+            current = record
+        for key, other in list(self._state.idempotency.items()):  # housekeeping, as the SQL one does
+            if other.user_id == record.user_id and other.expires_at <= now:
+                del self._state.idempotency[key]
+        return current
+
+    async def mark_sent(self, record: IdempotencyRecord) -> bool:
+        self._write("mark_sent")
+        held = self._held(record)
+        if held is None or held.status is not RecordStatus.IN_PROGRESS:
+            return False
+        self._state.idempotency[self._key(record)] = replace(held, status=RecordStatus.SENT)
+        return True
+
+    async def finish(
+        self,
+        record: IdempotencyRecord,
+        status: RecordStatus,
+        result: Mapping[str, JsonValue],
+        expires_at: datetime,
+    ) -> bool:
+        self._write("finish")
+        held = self._held(record)
+        if held is None:
+            return False
+        stored = json.loads(canonical_json(result))
+        self._state.idempotency[self._key(record)] = replace(
+            held, status=status, result=stored, expires_at=expires_at
+        )
+        return True
+
+    async def release(self, record: IdempotencyRecord) -> bool:
+        self._write("release")
+        if self._held(record) is None:
+            return False
+        del self._state.idempotency[self._key(record)]
+        return True
+
+
 class InMemoryUnitOfWork:
     def __init__(
         self,
@@ -614,6 +683,7 @@ class InMemoryUnitOfWork:
         self.policies = InMemoryPolicyRepository(state, writable=write)
         self.access_tokens = InMemoryAccessTokenRepository(state, writable=write)
         self.credentials = InMemoryCredentialRepository(state, writable=write)
+        self.idempotency = InMemoryIdempotencyRepository(state, writable=write)
         self._write = write
         self._locks = locks
 
@@ -641,9 +711,21 @@ class InMemoryDatabase:
         (cancellation points: a commit may complete and its ``await`` still be cancelled)."""
         self.after_commit: Callable[[], None] | None = None
         """Runs right after a write unit of work committed, before the checkpoint after it."""
+        self._writer = anyio.Lock()
+        """One writer at a time, as SQLite's ``BEGIN IMMEDIATE``: concurrent read-modify-write of the
+        copied state would otherwise lose updates."""
 
     @asynccontextmanager
     async def __call__(self, *, write: bool) -> AsyncIterator[InMemoryUnitOfWork]:
+        if not write:
+            async with self._transaction(write=False) as uow:
+                yield uow
+            return
+        async with self._writer, self._transaction(write=True) as uow:
+            yield uow
+
+    @asynccontextmanager
+    async def _transaction(self, *, write: bool) -> AsyncIterator[InMemoryUnitOfWork]:
         if self.checkpoint:
             await anyio.lowlevel.checkpoint()
         if write and self.fail_writes is not None:
@@ -730,6 +812,15 @@ class FakeTrading:
     bands: dict[tuple[str, Category], PriceBand] = field(default_factory=dict)
     positions: dict[str, SymbolPosition] = field(default_factory=dict)
     fills: dict[str, OrderFill] = field(default_factory=dict)
+    history: dict[str, OrderFill] = field(default_factory=dict)
+    """What ``find_order`` finds in the order history (after ``fills``, the open/recent list)."""
+    find_error: Exception | None = None
+    hold_find: "anyio.Event | None" = None
+    """If set, ``find_order`` waits for it: a reconnaissance that does not answer."""
+    hold_band: "anyio.Event | None" = None
+    """If set, ``get_price_band`` waits for it: a call stuck before its decision."""
+    in_band: "anyio.Event" = field(default_factory=anyio.Event)
+    """Set when ``get_price_band`` has been entered."""
     place_error: Exception | None = None
     read_error: Exception | None = None
     position_error: Exception | None = None
@@ -754,6 +845,10 @@ class FakeTrading:
 
     async def get_price_band(self, symbol: str, category: Category) -> PriceBand:
         self._call("get_price_band", symbol, category)
+        self.in_band.set()
+        if self.hold_band is not None:
+            hold, self.hold_band = self.hold_band, None  # only the first call waits
+            await hold.wait()
         if self.before_band is not None:
             self.before_band()
         return self.bands.get((symbol, category), BAND)
@@ -787,6 +882,16 @@ class FakeTrading:
         if self.read_error is not None:
             raise self.read_error
         return self.fills.get(client_order_id)
+
+    async def find_order(
+        self, keys: ApiKeyPair, category: Category, symbol: str, client_order_id: str
+    ) -> OrderFill | None:
+        self._call("find_order", category, symbol, client_order_id)
+        if self.hold_find is not None:
+            await self.hold_find.wait()
+        if self.find_error is not None:
+            raise self.find_error
+        return self.fills.get(client_order_id) or self.history.get(client_order_id)
 
     def _call(self, *call: object) -> None:
         self.calls.append(call)
