@@ -24,6 +24,27 @@ def classify(action: PlaceOrder) -> RiskDirection:
     return RiskDirection.REDUCES if action.reduce_only else RiskDirection.INCREASES
 
 
+def classify_amend(
+    *,
+    side: OrderSide,
+    reduce_only: bool,
+    current_qty: Decimal,
+    current_price: Decimal,
+    new_qty: Decimal,
+    new_price: Decimal,
+) -> RiskDirection:
+    """FR-43: changing an order increases risk if it gets a larger quantity or a less favourable
+    price (a buy pays more, a sell receives less), otherwise it reduces risk. A reduce-only order
+    stays reduce-only when changed: it can never grow or flip a position, whatever its new size.
+    """
+    if reduce_only:
+        return RiskDirection.REDUCES
+    worse_price = new_price > current_price if side is OrderSide.BUY else new_price < current_price
+    if new_qty > current_qty or worse_price:
+        return RiskDirection.INCREASES
+    return RiskDirection.REDUCES
+
+
 _REDUCING_SIDE = {PositionSide.LONG: OrderSide.SELL, PositionSide.SHORT: OrderSide.BUY}
 
 

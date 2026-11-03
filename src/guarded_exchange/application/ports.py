@@ -24,6 +24,7 @@ from guarded_exchange.domain.history import HistoryPage, HistoryPeriod, Trade
 from guarded_exchange.domain.idempotency import IdempotencyRecord, RecordStatus
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
+from guarded_exchange.domain.order_changes import OrderAmendment
 from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
 from guarded_exchange.domain.policy import PolicyRecord
 from guarded_exchange.domain.users import Environment, User
@@ -129,6 +130,46 @@ class TradingExchange(Protocol):
 
         Raises what ``AccountReader`` methods raise.
         """
+        ...
+
+
+class OrderChanges(Protocol):
+    """Cancelling and amending existing orders of one account (FR-5, ticket 013). Signed calls take the
+    key as an argument. Changes are never retried automatically (ADR-002); the exchange applies them
+    asynchronously, so an accepted request is confirmed by reading the order back (D-21).
+    """
+
+    async def get_order_by_id(
+        self, keys: ApiKeyPair, category: Category, symbol: str, order_id: str
+    ) -> Order | None:
+        """The order with this exchange id: among the open and recent orders, then in the order
+        history; ``None`` if not listed anywhere (yet). ``origin`` is set by the adapter (D-26).
+
+        Raises what ``AccountReader`` methods raise, including ``UnsupportedPositionMode``.
+        """
+        ...
+
+    async def list_cancellable_orders(
+        self, keys: ApiKeyPair, category: Category, symbol: str, limit: int
+    ) -> Page[Order]:
+        """Plain open orders on ``symbol`` (never conditional orders or a position's TP/SL), newest
+        first, at most ``limit``. Raises what ``AccountReader.get_open_orders`` raises."""
+        ...
+
+    async def cancel_order(self, keys: ApiKeyPair, category: Category, symbol: str, order_id: str) -> None:
+        """Ask the exchange to cancel one order; returns when the request was accepted.
+
+        Raises:
+            OutcomeUnknown: the request may have reached the exchange (timeout, broken connection, an
+                exchange-side error or a "being processed" answer); never retried.
+            NotFound: the exchange says the order is not open (filled, cancelled or unknown to it).
+            ExchangeRejected / InvalidParams / ExchangeCredentialsInvalid / RateLimited /
+                ExchangeUnavailable: the exchange did not act on the request.
+        """
+        ...
+
+    async def amend_order(self, keys: ApiKeyPair, amendment: OrderAmendment) -> None:
+        """Ask the exchange to change one order's quantity and/or price; raises like ``cancel_order``."""
         ...
 
 

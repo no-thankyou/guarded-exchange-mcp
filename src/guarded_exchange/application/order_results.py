@@ -61,17 +61,34 @@ class OrderResult:
 # --- stored answers -------------------------------------------------------------------------------
 
 
+def error_payload(error: DomainError) -> dict[str, JsonValue]:
+    """A stored error answer (any action): restored by ``restore_error_payload``."""
+    return {
+        "kind": "error",
+        "code": error.code,
+        "message": error.message,
+        "next_step": error.next_step,
+        "details": dict(error.details),
+        "untrusted_text": error.untrusted_text,
+    }
+
+
+def restore_error_payload(payload: Mapping[str, Any]) -> DomainError:
+    """The stored error as it was given, marked as a replay. A malformed payload raises."""
+    details = {str(k): str(v) for k, v in payload["details"].items()}
+    return restore_error(
+        str(payload["code"]),
+        str(payload["message"]),
+        next_step=payload["next_step"],
+        details={**details, REPLAYED_DETAIL: "true"},
+        untrusted_text=payload["untrusted_text"],
+    )
+
+
 def answer_payload(answer: OrderResult | DomainError) -> dict[str, JsonValue]:
     """The answer as canonical-JSON-ready data (``Decimal`` stays ``Decimal``)."""
     if isinstance(answer, DomainError):
-        return {
-            "kind": "error",
-            "code": answer.code,
-            "message": answer.message,
-            "next_step": answer.next_step,
-            "details": dict(answer.details),
-            "untrusted_text": answer.untrusted_text,
-        }
+        return error_payload(answer)
     return {
         "kind": "order",
         "action_id": answer.action_id,
@@ -85,14 +102,7 @@ def answer_payload(answer: OrderResult | DomainError) -> dict[str, JsonValue]:
 def restore_answer(payload: Mapping[str, Any]) -> OrderResult | DomainError:
     """The stored answer as it was given, marked as a replay. A malformed payload raises."""
     if payload["kind"] == "error":
-        details = {str(k): str(v) for k, v in payload["details"].items()}
-        return restore_error(
-            str(payload["code"]),
-            str(payload["message"]),
-            next_step=payload["next_step"],
-            details={**details, REPLAYED_DETAIL: "true"},
-            untrusted_text=payload["untrusted_text"],
-        )
+        return restore_error_payload(payload)
     if payload["kind"] != "order":
         raise ValueError("unknown stored answer")
     fill = payload["fill"]

@@ -13,6 +13,7 @@ from guarded_exchange.domain.errors import (
     ExchangeRejected,
     ExchangeUnavailable,
     InvalidParams,
+    NotFound,
     OutcomeUnknown,
     RateLimited,
 )
@@ -97,8 +98,7 @@ UNKNOWN_OUTCOME_RET_CODES: Final = frozenset(
 )
 """Server-side errors, timeouts and "being processed" answers after which an order may still exist
 (ADR-014): never "failed". Re-scanned against https://bybit-exchange.github.io/docs/v5/error on
-2026-11-03 (ticket 012 review 1); amend/cancel codes (170147, 170150, 170191, 170212, 170310, 170311,
-110079) are ticket 013's."""
+2026-11-03 (ticket 012 review 1); the amend/cancel ones are ``ORDER_CHANGE_UNKNOWN_RET_CODES``."""
 DUPLICATE_CLIENT_ID_RET_CODES: Final = frozenset({110072, 170141, 110030})
 """``orderLinkId`` already used (spike 004: also after cancel or fill), or "Duplicate orderId": the
 order may be ours."""
@@ -175,3 +175,83 @@ def outcome_unknown(reason: str) -> OutcomeUnknown:
 def unavailable(reason: str) -> ExchangeUnavailable:
     """Network failure, timeout, HTTP 5xx/403 or an unparsable body."""
     return ExchangeUnavailable(f"the exchange is unavailable: {reason}", next_step=_RETRY_LATER)
+
+
+# --- cancel and amend (ticket 013) -----------------------------------------------------------------
+
+ORDER_CHANGE_UNKNOWN_RET_CODES: Final = frozenset(
+    {
+        170147,  # Order cancellation timeout (spot)
+        170150,  # Cancel order failed (spot): no reason given
+        170191,  # Can not cancel order, please try again later (spot)
+        170212,  # Cancel order request processing (spot)
+        170190,  # Cancel order has been finished (spot): whose cancel, it does not say
+        170310,  # Order modification timeout (spot)
+        170311,  # Order modification failed (spot): no reason given
+        110079,  # The order is processing and can not be operated, please try again later
+        40004,  # the order is modified during the process of replacing, please check the order status
+    }
+)
+"""Answers to ``order/cancel`` and ``order/amend`` after which the change may have been (or may still
+be) applied: timeouts, "being processed", failures without a reason. Checked against
+https://bybit-exchange.github.io/docs/v5/error on 2026-11-03 (ticket 013): none of them says that the
+order was left as it was, so each is "unknown" and the order's status is read (D-21)."""
+ORDER_NOT_OPEN_RET_CODES: Final = frozenset(
+    {
+        110001,  # Order does not exist
+        110008,  # The order has been completed or cancelled
+        110010,  # The order has been cancelled
+        170142,  # Order has been cancelled (spot)
+        170213,  # Order does not exist. (spot)
+    }
+)
+"""The order is not open any more (or never was): this request changed nothing."""
+
+
+def error_for_order_change(ret_code: int, ret_msg: str, *, retry_after_s: float | None = None) -> DomainError:
+    """``retCode`` of ``POST /v5/order/cancel`` or ``/v5/order/amend`` -> domain exception (FR-27, FR-28).
+
+    The rule of ``order/create`` (ticket 012): a definite refusal only within the documented refusal
+    families, minus the codes after which the change may have happened; anything else is
+    ``OutcomeUnknown``, and the use case reads the order to find out.
+    """
+    details = {"exchange_code": str(ret_code)}
+    if ret_code in CREDENTIAL_RET_CODES or ret_code in RATE_LIMITED_RET_CODES:
+        return error_for_ret_code(ret_code, ret_msg, retry_after_s=retry_after_s)
+    if ret_code in UNKNOWN_OUTCOME_RET_CODES or ret_code in ORDER_CHANGE_UNKNOWN_RET_CODES:
+        return OutcomeUnknown(
+            "the exchange did not confirm the change (it timed out, failed without a reason, or is still "
+            "processing the order)",
+            details={**details, "reason": "exchange_internal_error"},
+            untrusted_text=ret_msg,
+        )
+    if ret_code in ORDER_NOT_OPEN_RET_CODES:
+        return NotFound(
+            "the exchange says the order is not open (filled, cancelled or unknown to it); nothing was "
+            "changed",
+            next_step="Check get_order_history for what happened to the order; do not retry.",
+            details={**details, "reason": "order_not_open"},
+            untrusted_text=ret_msg,
+        )
+    if not _definite_refusal(ret_code):
+        return OutcomeUnknown(
+            "the exchange answered with a code this server does not recognise as a refusal",
+            details={**details, "reason": "unrecognised_exchange_code"},
+            untrusted_text=ret_msg,
+        )
+    if ret_code in PRICE_BAND_RET_CODES:
+        return ExchangeRejected(
+            "the price is outside the exchange's current price band",
+            next_step="Use a price closer to the market; the band moves with the market.",
+            details={**details, "reason": "price_outside_band"},
+            untrusted_text=ret_msg,
+        )
+    if ret_code == _PARAM_ERROR:
+        return InvalidParams(
+            "the exchange rejected the change",
+            next_step="Check qty and price against get_instrument_rules and the order in get_open_orders; "
+            "report the exchange reason to the user.",
+            details=details,
+            untrusted_text=ret_msg,
+        )
+    return error_for_ret_code(ret_code, ret_msg, retry_after_s=retry_after_s)

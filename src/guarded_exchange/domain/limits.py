@@ -12,6 +12,7 @@ from guarded_exchange.domain.actions import ActionKind
 from guarded_exchange.domain.audit import canonical_decimal
 from guarded_exchange.domain.errors import ConfirmationChannelUnavailable, LimitExceeded, PermissionDenied
 from guarded_exchange.domain.instruments import Category
+from guarded_exchange.domain.order_changes import AmendPlan
 from guarded_exchange.domain.orders import OrderPlan
 from guarded_exchange.domain.policy import EffectivePolicy, InstrumentRef
 from guarded_exchange.domain.risk import RiskDirection
@@ -42,7 +43,41 @@ def check_limits(plan: OrderPlan, policy: EffectivePolicy, *, leverage: Decimal 
     if plan.risk is RiskDirection.REDUCES:
         return
     action = plan.action
-    ref = InstrumentRef(action.category, action.symbol)
+    _check_increasing(
+        InstrumentRef(action.category, action.symbol),
+        policy,
+        notional=plan.notional,
+        notional_price=plan.notional_price,
+        price_basis=_price_basis(plan),
+        leverage=leverage,
+    )
+
+
+def check_amend_limits(plan: AmendPlan, policy: EffectivePolicy, *, leverage: Decimal | None) -> None:
+    """The same limits for an amend that increases risk (FR-43): allowlist, the order's new value
+    ``qty x price`` and, on a perpetual, the current leverage. A risk-reducing amend faces none."""
+    if plan.risk is RiskDirection.REDUCES:
+        return
+    action = plan.action
+    _check_increasing(
+        InstrumentRef(action.category, action.symbol),
+        policy,
+        notional=plan.notional,
+        notional_price=plan.price,
+        price_basis="limit price",
+        leverage=leverage,
+    )
+
+
+def _check_increasing(
+    ref: InstrumentRef,
+    policy: EffectivePolicy,
+    *,
+    notional: Decimal,
+    notional_price: Decimal,
+    price_basis: str,
+    leverage: Decimal | None,
+) -> None:
     if ref not in policy.allowlist:
         allowed = ", ".join(str(item) for item in sorted(policy.allowlist)) or "none"
         raise LimitExceeded(
@@ -51,30 +86,30 @@ def check_limits(plan: OrderPlan, policy: EffectivePolicy, *, leverage: Decimal 
             details={"limit": "allowlist", "instrument": str(ref)},
         )
     maximum = policy.max_order_notional_usdt
-    if plan.notional > maximum:
+    if notional > maximum:
         raise LimitExceeded(
-            f"order value {canonical_decimal(plan.notional)} USDT (qty x {_price_basis(plan)} "
-            f"{canonical_decimal(plan.notional_price)}) exceeds your limit of {canonical_decimal(maximum)} "
+            f"order value {canonical_decimal(notional)} USDT (qty x {price_basis} "
+            f"{canonical_decimal(notional_price)}) exceeds your limit of {canonical_decimal(maximum)} "
             "USDT per order",
             next_step="Reduce qty so that the order value stays within the limit; do not split one order "
             "into several to get around it.",
             details={
                 "limit": "max_order_notional_usdt",
                 "allowed": canonical_decimal(maximum),
-                "notional": canonical_decimal(plan.notional),
-                "price": canonical_decimal(plan.notional_price),
+                "notional": canonical_decimal(notional),
+                "price": canonical_decimal(notional_price),
             },
         )
-    if action.category is Category.LINEAR:
+    if ref.category is Category.LINEAR:
         if leverage is None:
             raise LimitExceeded(
-                f"the current leverage of {action.symbol} could not be determined",
+                f"the current leverage of {ref.symbol} could not be determined",
                 next_step="Retry in a few seconds; check get_positions.",
                 details={"limit": "max_leverage", "allowed": canonical_decimal(policy.max_leverage)},
             )
         if leverage > policy.max_leverage:
             raise LimitExceeded(
-                f"{action.symbol} is set to leverage x{canonical_decimal(leverage)}, above your limit of "
+                f"{ref.symbol} is set to leverage x{canonical_decimal(leverage)}, above your limit of "
                 f"x{canonical_decimal(policy.max_leverage)}",
                 next_step="Do not retry. Tell the user to lower the leverage of this perpetual on the "
                 "exchange.",
