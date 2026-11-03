@@ -63,7 +63,9 @@ async def load_policy_view(uow: UnitOfWork, user: User) -> PolicyView:
         ceiling=ceiling,
         ceiling_is_default=stored_ceiling is None,
         overrides=overrides,
-        effective=replace(effective, profile=cap_profile(effective.profile, key)),
+        effective=replace(
+            effective, profile=cap_profile(effective.profile, key), kill_switch=user.kill_switch
+        ),
         key_read_only=key is not None and key.read_only,
     )
 

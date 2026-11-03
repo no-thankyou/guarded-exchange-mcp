@@ -41,8 +41,11 @@ users = Table(
     Column("status", String(16), nullable=False),
     Column("environment", String(16), nullable=False),
     Column("created_at", EpochMillis(), nullable=False),
+    # FR-16 (migration 0008): who turned the kill switch on, or 'none'.
+    Column("kill_switch", String(16), nullable=False, server_default="none"),
     CheckConstraint("status IN ('active', 'revoked')", name="status"),
     CheckConstraint("environment IN ('testnet', 'mainnet')", name="environment"),
+    CheckConstraint("kill_switch IN ('none', 'user', 'admin')", name="kill_switch"),
 )
 
 # Append-only (FR-37): BEFORE UPDATE/DELETE triggers raise. No MAC until ticket 024 (D-13).

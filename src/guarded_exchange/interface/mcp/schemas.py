@@ -10,6 +10,7 @@ from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, WithJsonSchema
 
+from guarded_exchange.application.kill_switch import KillSwitchChange
 from guarded_exchange.application.read_history import HistoryResult
 from guarded_exchange.application.submit_action import OrderResult
 from guarded_exchange.domain.account import MAX_BALANCE_COINS, AccountBalances, Order, Page, Position
@@ -116,6 +117,10 @@ class PolicyOut(BaseModel):
     )
     unconfirmed_window_s: int = Field(description="Sliding window for unconfirmed_max_actions, seconds.")
     max_pending: int = Field(description="Confirmations that may be waiting at the same time.")
+    kill_switch: Literal["none", "user", "admin"] = Field(
+        description="none = off; user / admin = on, turned on by them: every risk-increasing action is "
+        "refused with kill_switch_active, reads and risk-reducing actions work."
+    )
 
     @classmethod
     def from_domain(cls, policy: EffectivePolicy) -> "PolicyOut":
@@ -134,7 +139,25 @@ class PolicyOut(BaseModel):
             unconfirmed_max_actions=policy.unconfirmed_max_actions,
             unconfirmed_window_s=policy.unconfirmed_window_s,
             max_pending=policy.max_pending,
+            kill_switch=policy.kill_switch.value,
         )
+
+
+class KillSwitchOut(BaseModel):
+    """The caller's kill switch after ``activate_kill_switch``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kill_switch: Literal["user", "admin"] = Field(
+        description="On, and who turned it on (admin: only the admin can turn it off)."
+    )
+    changed: bool = Field(description="False if it was already on; nothing changed then.")
+
+    @classmethod
+    def from_domain(cls, change: KillSwitchChange) -> "KillSwitchOut":
+        if not change.after.is_on:  # the use case only turns it on
+            raise ValueError("activate_kill_switch left the kill switch off")
+        return cls(kill_switch=change.after.value, changed=change.changed)
 
 
 PriceQty = tuple[DecimalStr, DecimalStr]

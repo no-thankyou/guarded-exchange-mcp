@@ -11,6 +11,7 @@ from guarded_exchange.application.credentials import (
     RequireTradingCredential,
 )
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
+from guarded_exchange.application.kill_switch import ActivateKillSwitch
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy
 from guarded_exchange.application.ports import UnitOfWorkFactory
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
@@ -74,6 +75,7 @@ def use_cases(
             ids=SequentialIds("act"),
             **scope,
         ),
+        activate_kill_switch=ActivateKillSwitch(db, clock),
     )
 
 

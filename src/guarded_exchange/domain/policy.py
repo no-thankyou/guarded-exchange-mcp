@@ -30,6 +30,7 @@ from guarded_exchange.domain.actions import ALL_ACTION_KINDS, ActionKind
 from guarded_exchange.domain.audit import JsonValue
 from guarded_exchange.domain.errors import InvalidParams, PermissionDenied
 from guarded_exchange.domain.instruments import Category, normalize_symbol, parse_category
+from guarded_exchange.domain.kill_switch import KillSwitch
 from guarded_exchange.domain.users import Environment
 
 MAX_SLIPPAGE_PCT: Final = Decimal(3)  # PLAN section 6: hard maximum
@@ -149,9 +150,12 @@ class AdminCeiling(PolicySettings):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EffectivePolicy(PolicySettings):
-    """What actually applies to the user: ``strictest(ceiling, overrides)`` plus the environment."""
+    """What actually applies to the user: ``strictest(ceiling, overrides)`` plus the environment and
+    the kill switch (PLAN 5.1). The kill switch is not a policy setting: it is stored with the user,
+    turned on and off by its own commands, and never part of a ceiling or an override."""
 
     environment: Environment
+    kill_switch: KillSwitch = KillSwitch.NONE
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

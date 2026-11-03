@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from guarded_exchange.application.admin import IssuedToken, RevokedToken
 from guarded_exchange.application.credentials import StoredCredential
+from guarded_exchange.application.kill_switch import KillSwitchChange
 from guarded_exchange.application.policy import OverridesReset, PolicyView
 from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.actions import ActionKind
@@ -24,6 +25,7 @@ from guarded_exchange.domain.credentials import (
 )
 from guarded_exchange.domain.errors import NotFound, PermissionDenied
 from guarded_exchange.domain.instruments import Category
+from guarded_exchange.domain.kill_switch import KillSwitch, KillSwitchActor, turned_off, turned_on
 from guarded_exchange.domain.policy import (
     NO_OVERRIDES,
     InstrumentRef,
@@ -95,7 +97,9 @@ class PolicySpy:
     tightened: list[PolicyPatch] = field(default_factory=list)
     ceilings: list[tuple[str | None, PolicyPatch]] = field(default_factory=list)
     resets: list[tuple[str, frozenset[str] | None]] = field(default_factory=list)
+    switches: list[tuple[str | None, bool, KillSwitchActor]] = field(default_factory=list)
     own: PolicyPatch = NO_OVERRIDES  # the user's settings ``show`` reports
+    switch: KillSwitch = KillSwitch.NONE  # the kill switch ``kill_switch`` starts from
     fail_with: Exception | None = None
 
     def commands(self) -> PolicyCommands:
@@ -104,7 +108,15 @@ class PolicySpy:
             tighten=self.tighten,
             set_ceiling=self.set_ceiling,
             reset_overrides=self.reset_overrides,
+            kill_switch=self.kill_switch,
         )
+
+    def kill_switch(
+        self, env_file: Path | None, user: str | None, on: bool, by: KillSwitchActor
+    ) -> KillSwitchChange:
+        self.switches.append((user, on, by))
+        after = turned_on(self.switch, by) if on else turned_off(self.switch, by)
+        return KillSwitchChange(user=replace(USER, kill_switch=after), before=self.switch, after=after)
 
     def show(self, env_file: Path | None, user: str | None) -> PolicyView:
         if self.fail_with is not None:
