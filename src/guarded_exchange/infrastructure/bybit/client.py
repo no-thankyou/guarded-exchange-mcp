@@ -13,6 +13,7 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from urllib.parse import urlencode
 
@@ -22,6 +23,7 @@ import structlog
 from guarded_exchange.domain.account import AccountBalances, Order, Page, Position
 from guarded_exchange.domain.credentials import ApiKeyPair, KeyPermissions
 from guarded_exchange.domain.errors import DomainError
+from guarded_exchange.domain.history import HistoryPage, HistoryPeriod, Trade
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
 from guarded_exchange.infrastructure.bybit.errors import (
@@ -33,6 +35,7 @@ from guarded_exchange.infrastructure.bybit.errors import (
 from guarded_exchange.infrastructure.bybit.mapper import (
     KLINE_INTERVALS,
     OPEN_ORDERS_PAGE_MAX,
+    ORDER_HISTORY_PAGE_MAX,
     UNIFIED_ACCOUNT,
     USDT_SETTLE,
     Envelope,
@@ -40,11 +43,14 @@ from guarded_exchange.infrastructure.bybit.mapper import (
     candles_from_result,
     key_permissions_from_result,
     open_orders_from_result,
+    order_history_from_result,
     orderbook_from_result,
     parse_envelope,
     positions_from_result,
     rules_from_result,
     ticker_from_result,
+    trades_from_result,
+    wire_exchange_cursor,
 )
 from guarded_exchange.infrastructure.bybit.signing import signed_headers
 
@@ -55,6 +61,7 @@ _HTTP_SERVER_ERROR: Final = 500
 _LIMIT_RESET_HEADER: Final = "X-Bapi-Limit-Reset-Timestamp"
 _MIN_RETRY_AFTER_S: Final = 1.0
 _MAX_RETRY_AFTER_S: Final = 600.0
+_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 log = structlog.get_logger(__name__)
 
@@ -143,6 +150,37 @@ class BybitClient:
         envelope = await self._get("/v5/order/realtime", params, keys=keys)
         return open_orders_from_result(envelope.result, category=category, symbol=symbol, limit=limit)
 
+    async def get_order_history(
+        self,
+        keys: ApiKeyPair,
+        category: Category,
+        *,
+        symbol: str | None,
+        period: HistoryPeriod,
+        exchange_cursor: str | None,
+        limit: int,
+    ) -> HistoryPage[Order]:
+        """``GET /v5/order/history`` (``AccountHistoryReader``): closed orders, newest first."""
+        page_limit = min(limit, ORDER_HISTORY_PAGE_MAX)
+        params = _history_params(category, symbol, period, exchange_cursor, page_limit)
+        envelope = await self._get("/v5/order/history", params, keys=keys)
+        return order_history_from_result(envelope.result, category=category, symbol=symbol, limit=page_limit)
+
+    async def get_trades(
+        self,
+        keys: ApiKeyPair,
+        category: Category,
+        *,
+        symbol: str | None,
+        period: HistoryPeriod,
+        exchange_cursor: str | None,
+        limit: int,
+    ) -> HistoryPage[Trade]:
+        """``GET /v5/execution/list`` (``AccountHistoryReader``): executions, newest first."""
+        params = _history_params(category, symbol, period, exchange_cursor, limit)
+        envelope = await self._get("/v5/execution/list", params, keys=keys)
+        return trades_from_result(envelope.result, category=category, symbol=symbol, limit=limit)
+
     async def get_ticker(self, symbol: str, category: Category) -> Ticker:
         envelope = await self._get("/v5/market/tickers", {"category": category.value, "symbol": symbol})
         return ticker_from_result(envelope.result, symbol=symbol, category=category, time_ms=envelope.time_ms)
@@ -197,7 +235,7 @@ class BybitClient:
                 response = await self._http.get(path, params=dict(params))
             else:
                 # Signed per attempt: a retry gets a fresh timestamp inside the receive window.
-                query = urlencode(sorted(params.items()))
+                query = _query(params)
                 headers = signed_headers(keys, timestamp_ms=self._now_ms(), payload=query)
                 response = await self._http.get(f"{path}?{query}" if query else path, headers=headers)
         except httpx2.TimeoutException as exc:
@@ -244,6 +282,37 @@ class BybitClient:
         now_ms = server_ms if server_ms else self._now_ms()
         seconds = (int(raw) - now_ms) / 1000
         return round(min(max(seconds, _MIN_RETRY_AFTER_S), _MAX_RETRY_AFTER_S), 3)
+
+
+def _history_params(
+    category: Category, symbol: str | None, period: HistoryPeriod, exchange_cursor: str | None, limit: int
+) -> dict[str, str]:
+    """Both period bounds are always sent, so the exchange reads exactly the period we checked."""
+    params = {
+        "category": category.value,
+        "startTime": str(_epoch_ms(period.start)),
+        "endTime": str(_epoch_ms(period.end)),
+        "limit": str(limit),
+    }
+    if symbol:
+        params["symbol"] = symbol
+    elif category is Category.LINEAR:
+        params["settleCoin"] = USDT_SETTLE  # v1 reads USDT perpetuals only
+    if exchange_cursor is not None:
+        params["cursor"] = wire_exchange_cursor(exchange_cursor)
+    return params
+
+
+def _epoch_ms(value: datetime) -> int:
+    return (value - _EPOCH) // timedelta(milliseconds=1)  # exact: no float on the way
+
+
+def _query(params: Mapping[str, str]) -> str:
+    """The signed query string, sorted. ``%`` stays as is: the only value carrying it is the
+    exchange's page cursor, which arrives percent-encoded and must go back verbatim
+    (``wire_exchange_cursor`` admits only unreserved characters and ``%XX`` in it); everything else
+    is percent-encoded as usual."""
+    return urlencode(sorted(params.items()), safe="%")
 
 
 def _json_or_none(response: httpx2.Response) -> Any:

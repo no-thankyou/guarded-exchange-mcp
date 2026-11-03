@@ -123,6 +123,7 @@ _RULES: dict[str, Rule] = {
     ".orders.conditional": _values(ConditionalKind),
     ".orders.origin": _values(OrderOrigin),
     ".orders.created_at": _TIME,
+    ".orders.updated_at": _TIME,
     **{
         f".orders.{f}": _DEC
         for f in ("qty", "filled_qty", "price", "avg_fill_price", "trigger_price", "take_profit", "stop_loss")

@@ -1,0 +1,44 @@
+{
+    "_source": "Built offline 2026-11-03 (ticket 010) from the response format and example of https://bybit-exchange.github.io/docs/v5/order/execution; not recorded. Request: category=spot, limit=20. One maker fill of an external spot buy; the fee is charged in the base coin (ETH).",
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "nextPageCursor": "",
+        "category": "spot",
+        "list": [
+            {
+                "symbol": "ETHUSDT",
+                "orderType": "Limit",
+                "underlyingPrice": "",
+                "orderLinkId": "",
+                "orderId": "2051234567890123456",
+                "stopOrderType": "UNKNOWN",
+                "execTime": "1793145000000",
+                "feeCurrency": "ETH",
+                "feeRate": "0.001",
+                "tradeIv": "",
+                "blockTradeId": "",
+                "markPrice": "",
+                "execPrice": "2400.50",
+                "markIv": "",
+                "orderQty": "0.0100",
+                "orderPrice": "2400.50",
+                "execValue": "24.005",
+                "closedSize": "",
+                "execType": "Trade",
+                "seq": 4688002127,
+                "side": "Buy",
+                "indexPrice": "",
+                "leavesQty": "0",
+                "isMaker": true,
+                "execFee": "0.00001",
+                "execId": "2100000000045678901",
+                "execQty": "0.0100",
+                "extraFees": "",
+                "execFeeV2": ""
+            }
+        ]
+    },
+    "retExtInfo": {},
+    "time": 1793169002000
+}

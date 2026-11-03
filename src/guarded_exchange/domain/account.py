@@ -117,10 +117,22 @@ class OrderType(StrEnum):
 
 
 class OrderStatus(StrEnum):
+    """Open: ``NEW``, ``PARTIALLY_FILLED``, ``UNTRIGGERED``; the rest are final (order history)."""
+
     NEW = "new"
     PARTIALLY_FILLED = "partially_filled"
     UNTRIGGERED = "untriggered"
     """A conditional order (stop, take-profit) waiting for its trigger price."""
+    FILLED = "filled"
+    CANCELLED = "cancelled"
+    """Cancelled without any fill (by the user, the exchange or an IOC/FOK remainder)."""
+    PARTIALLY_FILLED_CANCELLED = "partially_filled_cancelled"
+    """Cancelled after part of it was filled; ``filled_qty`` says how much."""
+    REJECTED = "rejected"
+    TRIGGERED = "triggered"
+    """A conditional order whose trigger fired; it became a plain order."""
+    DEACTIVATED = "deactivated"
+    """A conditional order (or attached TP/SL) cancelled before it was triggered."""
     UNKNOWN = "unknown"
 
 
@@ -164,11 +176,12 @@ class QtyUnit(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Order:
-    """An open order. Prices in the quote currency of the pair, ``qty`` in ``qty_unit``,
-    ``filled_qty`` in the base asset.
+    """An open or (order history) closed order. Prices in the quote currency of the pair, ``qty``
+    in ``qty_unit``, ``filled_qty`` in the base asset.
 
     ``client_order_id`` is untrusted: an external order's id is free text chosen by whoever placed
-    it, and even our own prefix can be imitated (``origin`` says how it was classified).
+    it, and even our own prefix can be imitated (``origin`` says how it was classified). So is
+    ``reject_reason``: the exchange's code for why it refused the order, passed on as data.
     """
 
     order_id: str
@@ -192,6 +205,7 @@ class Order:
     updated_at: datetime | None
     origin: OrderOrigin
     client_order_id: UntrustedText | None
+    reject_reason: UntrustedText | None = None
 
     def __post_init__(self) -> None:
         if self.qty < 0 or self.filled_qty < 0:

@@ -20,6 +20,7 @@ from guarded_exchange.domain.credentials import (
     KeyPermissions,
     SealedSecret,
 )
+from guarded_exchange.domain.history import HistoryPage, HistoryPeriod, Trade
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
 from guarded_exchange.domain.policy import PolicyRecord
@@ -107,6 +108,45 @@ class KeyPermissionsReader(Protocol):
             ExchangeUnavailable: the permissions cannot be checked right now (network, timeout,
                 5xx, endpoint missing, unexpected response).
         """
+        ...
+
+
+class AccountHistoryReader(Protocol):
+    """Signed reads of an account's past orders and fills (FR-2, FR-3), paged by the exchange.
+
+    ``exchange_cursor`` is the exchange's opaque cursor of the page to read (``None``: the first page),
+    as an earlier page returned it in ``next_exchange_cursor``; the period and filters must be the
+    ones that page was read with (the caller keeps them together, ``HistoryQuery``). A cursor the
+    adapter cannot send safely raises ``InvalidParams``. Raises what ``AccountReader`` methods
+    raise. ``origin`` of orders and fills is set by the adapter (D-26).
+    """
+
+    async def get_order_history(
+        self,
+        keys: ApiKeyPair,
+        category: Category,
+        *,
+        symbol: str | None,
+        period: HistoryPeriod,
+        exchange_cursor: str | None,
+        limit: int,
+    ) -> HistoryPage[Order]:
+        """Closed orders updated in ``period``, newest first, at most ``limit``; for ``linear``
+        without ``symbol`` all USDT perpetual ones."""
+        ...
+
+    async def get_trades(
+        self,
+        keys: ApiKeyPair,
+        category: Category,
+        *,
+        symbol: str | None,
+        period: HistoryPeriod,
+        exchange_cursor: str | None,
+        limit: int,
+    ) -> HistoryPage[Trade]:
+        """Executions (fills) in ``period``, newest first, at most ``limit``; for ``linear``
+        without ``symbol`` all USDT perpetual ones."""
         ...
 
 
