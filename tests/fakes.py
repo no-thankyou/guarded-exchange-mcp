@@ -637,7 +637,10 @@ class InMemoryDatabase:
         self.fail_writes: Exception | None = None
         """If set, opening a write unit of work raises it (e.g. ``database is locked``)."""
         self.checkpoint = False
-        """Yield to the event loop on opening a transaction, as a real driver does (cancellation point)."""
+        """Yield to the event loop on opening a transaction and after a commit, as a real driver does
+        (cancellation points: a commit may complete and its ``await`` still be cancelled)."""
+        self.after_commit: Callable[[], None] | None = None
+        """Runs right after a write unit of work committed, before the checkpoint after it."""
 
     @asynccontextmanager
     async def __call__(self, *, write: bool) -> AsyncIterator[InMemoryUnitOfWork]:
@@ -656,6 +659,10 @@ class InMemoryDatabase:
             self.open_transactions -= 1
         if write:
             self.state = working
+            if self.after_commit is not None:
+                self.after_commit()
+            if self.checkpoint:
+                await anyio.lowlevel.checkpoint()
 
     def all_audit(self) -> list[AuditRecord]:
         return [r for chain in self.state.audit.values() for r in chain]
@@ -725,6 +732,7 @@ class FakeTrading:
     fills: dict[str, OrderFill] = field(default_factory=dict)
     place_error: Exception | None = None
     read_error: Exception | None = None
+    position_error: Exception | None = None
     sent: list[OrderRequest] = field(default_factory=list)
     calls: list[tuple[object, ...]] = field(default_factory=list)
     db: "InMemoryDatabase | None" = None
@@ -736,6 +744,8 @@ class FakeTrading:
     """Set when ``place_order`` has been entered."""
     after_place: Callable[[], None] | None = None
     """Runs after an accepted ``place_order``: something that breaks right after the exchange said yes."""
+    during_place: Callable[[], None] | None = None
+    """Runs inside ``place_order`` before its answer (``place_error`` too): breaks while it is in flight."""
     before_band: Callable[[], None] | None = None
     """Runs inside ``get_price_band``: something that happens between the checks and the decision."""
 
@@ -750,6 +760,8 @@ class FakeTrading:
 
     async def get_symbol_position(self, keys: ApiKeyPair, symbol: str) -> SymbolPosition:
         self._call("get_symbol_position", symbol)
+        if self.position_error is not None:
+            raise self.position_error
         return self.positions.get(symbol, SymbolPosition(symbol=symbol, position=None, leverage=Decimal(10)))
 
     async def place_order(self, keys: ApiKeyPair, order: OrderRequest) -> PlacedOrder:
@@ -760,6 +772,8 @@ class FakeTrading:
         self.placing.set()
         if self.hold_place is not None:
             await self.hold_place.wait()
+        if self.during_place is not None:
+            self.during_place()
         if self.place_error is not None:
             raise self.place_error
         if self.after_place is not None:

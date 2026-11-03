@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Final
 
 import anyio
+import anyio.lowlevel
 import structlog
 
 from guarded_exchange.application.credentials import RequireTradingCredential
@@ -40,7 +41,15 @@ from guarded_exchange.domain.account import SymbolPosition
 from guarded_exchange.domain.actions import OrderKind, PlaceOrder, parse_place_order
 from guarded_exchange.domain.audit import AuditEvent, AuditEventType, ClientDescription, JsonValue
 from guarded_exchange.domain.credentials import ApiKeyPair, key_replaced_or_deleted
-from guarded_exchange.domain.errors import DomainError, ExchangeUnavailable, OutcomeUnknown, PermissionDenied
+from guarded_exchange.domain.errors import (
+    DomainError,
+    ExchangeUnavailable,
+    InstrumentRuleViolation,
+    InvalidParams,
+    OutcomeUnknown,
+    PermissionDenied,
+    PositionNotFound,
+)
 from guarded_exchange.domain.instruments import Category, InstrumentRules, require_supported_quote
 from guarded_exchange.domain.limits import (
     check_limits,
@@ -64,6 +73,9 @@ log = structlog.get_logger(__name__)
 
 AGENT_ACTOR: Final = "mcp:agent"
 """The journal's actor for actions an AI agent asked for (the user is the chain)."""
+
+_INPUT_ERRORS: Final = (InvalidParams, InstrumentRuleViolation, PositionNotFound)
+"""Errors in the request itself: answered before the decision and not journaled (PLAN, ticket 011 (5))."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +176,13 @@ class SubmitPlaceOrder:
         except DomainError as refusal:  # FR-36: every attempt of a known user, refused ones too
             await self._journal_early_refusal(user, action, refusal, client)
             raise
-        market = await self._read_market(action, cleared.keys)
+        try:
+            market = await self._read_market(action, cleared.keys)
+        except _INPUT_ERRORS:
+            raise
+        except DomainError as refusal:  # the exchange could not be read: still an attempt (FR-36)
+            await self._journal_early_refusal(user, action, refusal, client)
+            raise
         # Early plan: rule violations (tick, minimums, status) are input errors, answered before
         # anything is decided or journaled. The decision below plans again with the fresh policy.
         self._plan(action, market, policy)
@@ -177,7 +195,12 @@ class SubmitPlaceOrder:
             environment=user.environment,
             client=client,
         )
-        decided = await self._decide(attempt, action, market)
+        # A cancellation that arrived before the decision is honoured here; from now on a committed
+        # attempt must be followed by the send and the outcome, so the decision is shielded too
+        # (its transaction is short and bounded by SQLite's busy_timeout).
+        await anyio.lowlevel.checkpoint_if_cancelled()
+        with anyio.CancelScope(shield=True):
+            decided = await self._decide(attempt, action, market)
         if isinstance(decided, DomainError):
             raise decided
         return await self._send(attempt, decided, cleared.keys)
@@ -301,16 +324,17 @@ class SubmitPlaceOrder:
             try:
                 placed = await self._trading.place_order(keys, request)
             except OutcomeUnknown as exc:
-                await self._journal_outcome(attempt, _failure("unknown", exc))
+                await self._try_journal_outcome(attempt, _failure("unknown", exc))
                 raise self._unknown(attempt, exc) from exc
             except ExchangeUnavailable as exc:  # the adapter raises it only before anything was sent
-                await self._journal_outcome(attempt, _failure("not_sent", exc))
+                await self._try_journal_outcome(attempt, _failure("not_sent", exc))
                 raise
             except DomainError as exc:
-                await self._journal_outcome(attempt, _failure("rejected", exc))
+                await self._try_journal_outcome(attempt, _failure("rejected", exc))
                 raise
             except BaseException as exc:  # a bug or cancellation: the order may have been sent
-                await self._journal_outcome(attempt, {"status": "unknown", "error_type": type(exc).__name__})
+                outcome: dict[str, JsonValue] = {"status": "unknown", "error_type": type(exc).__name__}
+                await self._try_journal_outcome(attempt, outcome)
                 raise
             # The exchange accepted the order: from here on nothing may turn into an error the agent
             # could read as "failed" and retry (a second order). Worst case: accepted, fill unknown.
@@ -336,6 +360,19 @@ class SubmitPlaceOrder:
             )
         except DomainError:
             return None
+
+    async def _try_journal_outcome(self, attempt: _Attempt, outcome: Mapping[str, JsonValue]) -> None:
+        """Journal a failed send; a journal failure must not replace the send's own error (an
+        ``internal_error`` instead of ``outcome_unknown`` could make the agent place the order again)."""
+        try:
+            await self._journal_outcome(attempt, outcome)
+        except Exception:
+            log.exception(
+                "order_outcome_not_recorded",
+                action_id=attempt.action_id,
+                client_order_id=attempt.client_order_id,
+                status=outcome.get("status"),
+            )
 
     async def _journal_outcome(self, attempt: _Attempt, outcome: Mapping[str, JsonValue]) -> None:
         payload: dict[str, JsonValue] = {

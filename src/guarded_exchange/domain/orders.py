@@ -32,11 +32,16 @@ from guarded_exchange.domain.actions import PlaceOrder
 from guarded_exchange.domain.audit import canonical_decimal
 from guarded_exchange.domain.errors import ExchangeUnavailable, InstrumentRuleViolation, LimitExceeded
 from guarded_exchange.domain.instruments import Category, InstrumentRules, InstrumentStatus
-from guarded_exchange.domain.money import is_multiple, neighbours, round_down, round_up
+from guarded_exchange.domain.money import (
+    exact_product,
+    is_multiple,
+    neighbours,
+    round_down,
+    round_up,
+    shift_by_pct,
+)
 from guarded_exchange.domain.policy import MAX_SLIPPAGE_PCT
 from guarded_exchange.domain.risk import RiskDirection, classify, reduce_only_qty
-
-_HUNDRED: Final = Decimal(100)
 
 REDUCING_STATUSES: Final = frozenset({InstrumentStatus.TRADING, InstrumentStatus.SETTLING})
 """A risk-reducing order may still go to an instrument being delisted (settling): a position there
@@ -117,8 +122,8 @@ def worst_price(best: Decimal, side: OrderSide, slippage_pct: Decimal, tick: Dec
             details={"limit": "slippage_pct", "allowed": _s(MAX_SLIPPAGE_PCT)},
         )
     if side is OrderSide.BUY:
-        return round_down(best * (1 + slippage_pct / _HUNDRED), tick)
-    return round_up(best * (1 - slippage_pct / _HUNDRED), tick)
+        return round_down(shift_by_pct(best, slippage_pct), tick)
+    return round_up(shift_by_pct(best, -slippage_pct), tick)
 
 
 def plan_order(
@@ -148,9 +153,9 @@ def plan_order(
             qty_adjustment=adjustment,
             price=price,
             time_in_force=OrderTimeInForce.GTC,
-            notional=qty * price,
+            notional=exact_product(qty, price),
             notional_price=price,
-            order_value=qty * price,
+            order_value=exact_product(qty, price),
         )
     else:
         best_price = _best(action, best)
@@ -165,9 +170,9 @@ def plan_order(
             qty_adjustment=adjustment,
             price=price,
             time_in_force=OrderTimeInForce.IOC,
-            notional=qty * notional_price,
+            notional=exact_product(qty, notional_price),
             notional_price=notional_price,
-            order_value=qty * price,
+            order_value=exact_product(qty, price),
             best_price=best_price,
             worst_price=worst,
             slippage_pct=slippage_pct,

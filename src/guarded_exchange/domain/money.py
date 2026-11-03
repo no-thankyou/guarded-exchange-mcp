@@ -4,7 +4,8 @@ Never through ``float``. A quantity that is not a multiple of the instrument's s
 **down** (the order never grows); a price that is not a multiple of the tick is an error, but the
 two nearest valid prices are offered (``neighbours``). Rounding a computed price (the worst price
 of a market order, ADR-010) goes to the safe side: ``round_down`` for a buy, ``round_up`` for a sell.
-Step arithmetic runs in its own decimal context, independent of the caller's precision.
+Step arithmetic and the products of amounts (``exact_product``, ``shift_by_pct``) run in their own
+decimal context, independent of the caller's precision.
 """
 
 import re
@@ -21,8 +22,10 @@ MAX_SIGNIFICANT_DIGITS: Final = 28
 """Decimal's default precision: an amount never needs more."""
 
 _PRECISION: Final = 80
-"""Working precision of step arithmetic: quotient and product of two amounts of at most 38 digits
-each (the pattern's bound) stay exact."""
+"""Working precision of step arithmetic and of products: quotient and product of two amounts of at
+most 38 digits each (the pattern's bound) stay exact."""
+
+_HUNDRED: Final = Decimal(100)
 
 _AMOUNT_RE: Final = re.compile(AMOUNT_PATTERN)
 
@@ -91,3 +94,17 @@ def is_multiple(value: Decimal, step: Decimal) -> bool:
 def neighbours(value: Decimal, step: Decimal) -> tuple[Decimal, Decimal]:
     """The nearest multiples of ``step`` below and above ``value`` (equal if ``value`` is one)."""
     return round_down(value, step), round_up(value, step)
+
+
+def exact_product(a: Decimal, b: Decimal) -> Decimal:
+    """``a x b`` without rounding by the caller's context (e.g. ``qty x price``)."""
+    with localcontext() as ctx:
+        ctx.prec = _PRECISION
+        return a * b
+
+
+def shift_by_pct(value: Decimal, pct: Decimal) -> Decimal:
+    """``value x (1 + pct / 100)`` without rounding by the caller's context; ``pct`` may be negative."""
+    with localcontext() as ctx:
+        ctx.prec = _PRECISION
+        return value * (1 + pct / _HUNDRED)

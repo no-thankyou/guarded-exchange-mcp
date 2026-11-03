@@ -79,8 +79,21 @@ def error_for_ret_code(ret_code: int, ret_msg: str, *, retry_after_s: float | No
     )
 
 
-UNKNOWN_OUTCOME_RET_CODES: Final = frozenset({10000, 10016, 170146})
-"""Server-side errors after which an order may still exist (ADR-014): never "failed"."""
+UNKNOWN_OUTCOME_RET_CODES: Final = frozenset(
+    {
+        10000,  # Server Timeout
+        10016,  # Server error
+        3400214,  # Server error, please try again later (UTA)
+        170001,  # Internal error (spot)
+        170007,  # Timeout waiting for response from backend server (spot)
+        170032,  # Network error. Please try again later (spot)
+        170146,  # Order creation timeout (spot)
+        170234,  # System Error (spot)
+    }
+)
+"""Server-side errors and timeouts after which an order may still exist (ADR-014): never "failed".
+Checked against https://bybit-exchange.github.io/docs/v5/error on 2026-11-03. An unlisted code is
+still a definite refusal in v1 (ticket 012 notes: consider unknown by default for a mutating POST)."""
 DUPLICATE_CLIENT_ID_RET_CODES: Final = frozenset({110072, 170141})
 """``orderLinkId`` already used (spike 004: also after cancel or fill): the order may be ours."""
 PRICE_BAND_RET_CODES: Final = frozenset({110121, 170193})
