@@ -113,6 +113,8 @@ async def test_stdio_server_answers_and_keeps_stdout_protocol_only(
         "get_balances",
         "get_positions",
         "get_open_orders",
+        "get_order_history",
+        "get_trades",
         "get_my_policy",
     ]
     # FR-2/FR-28: the local user has no exchange key yet -> a clear refusal, nothing sent to the exchange

@@ -14,12 +14,13 @@ from mcp.server.auth.settings import AuthSettings
 
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
+from guarded_exchange.application.read_history import GetOrderHistory, GetTrades
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.domain.policy import Permission
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, PrincipalProvider, ToolGate
 from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
-from guarded_exchange.interface.mcp.tools import account, market, policy, trading
+from guarded_exchange.interface.mcp.tools import account, history, market, policy, trading
 
 SERVER_NAME = "guarded-exchange"
 INSTRUCTIONS = (
@@ -39,6 +40,8 @@ class UseCases:
     get_instrument_rules: GetInstrumentRules
     get_balances: GetBalances
     get_positions: GetPositions
+    get_order_history: GetOrderHistory
+    get_trades: GetTrades
     get_open_orders: GetOpenOrders
     read_policy: ReadPolicy
     authorize: AuthorizeAccess
@@ -76,6 +79,12 @@ def create_server(
         get_balances=use_cases.get_balances,
         get_positions=use_cases.get_positions,
         get_open_orders=use_cases.get_open_orders,
+        principal=principal,
+    )
+    history.register(
+        mcp,
+        get_order_history=use_cases.get_order_history,
+        get_trades=use_cases.get_trades,
         principal=principal,
     )
     policy.register(mcp, use_cases.read_policy, principal)

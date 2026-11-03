@@ -14,6 +14,7 @@ from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy
 from guarded_exchange.application.ports import UnitOfWorkFactory
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
+from guarded_exchange.application.read_history import GetOrderHistory, GetTrades
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.domain.credentials import EXCHANGE_BYBIT
@@ -31,6 +32,7 @@ from tests.fakes import (
     InMemoryDatabase,
     SequentialIds,
 )
+from tests.fakes_history import FakeHistory
 
 
 def use_cases(
@@ -57,6 +59,8 @@ def use_cases(
         get_instrument_rules=GetInstrumentRules(rules),
         get_balances=GetBalances(read_key, account),
         get_positions=GetPositions(read_key, account),
+        get_order_history=GetOrderHistory(read_key, FakeHistory(), clock),
+        get_trades=GetTrades(read_key, FakeHistory(), clock),
         get_open_orders=GetOpenOrders(read_key, account),
         read_policy=ReadPolicy(db),
         authorize=AuthorizeAccess(db),

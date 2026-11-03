@@ -52,6 +52,7 @@ from guarded_exchange.application.policy import (
 )
 from guarded_exchange.application.ports import Authenticator, CredentialCipher, UnitOfWorkFactory
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
+from guarded_exchange.application.read_history import GetOrderHistory, GetTrades
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.config import ConfigError, Settings, load_settings
@@ -135,6 +136,8 @@ def build_use_cases(
         get_instrument_rules=GetInstrumentRules(rules),
         get_balances=GetBalances(read_key, exchange),
         get_positions=GetPositions(read_key, exchange),
+        get_order_history=GetOrderHistory(read_key, exchange, clock),
+        get_trades=GetTrades(read_key, exchange, clock),
         get_open_orders=GetOpenOrders(read_key, exchange),
         read_policy=ReadPolicy(uow),
         authorize=AuthorizeAccess(uow),

@@ -349,12 +349,18 @@ async def test_spot_open_orders_are_requested_without_settle_coin_and_mapped() -
 
 
 async def test_statuses_and_kinds_this_version_does_not_know_are_unknown_not_exchange_text() -> None:
-    body = _with_items(ORDER_FILLED, stopOrderType="BrandNewKind", timeInForce="RPI", orderType="Iceberg")
+    body = _with_items(
+        ORDER_FILLED,
+        orderStatus="BrandNewStatus",
+        stopOrderType="BrandNewKind",
+        timeInForce="RPI",
+        orderType="Iceberg",
+    )
     client, _ = _client(body)
 
     [order] = (await client.get_open_orders(KEYS, Category.LINEAR, symbol="BTCUSDT", limit=5)).items
 
-    assert order.status is OrderStatus.UNKNOWN  # "Filled" is not an open status
+    assert order.status is OrderStatus.UNKNOWN
     assert order.conditional is ConditionalKind.OTHER
     assert order.time_in_force is TimeInForce.UNKNOWN
     assert order.order_type is OrderType.UNKNOWN

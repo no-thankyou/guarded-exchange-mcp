@@ -8,6 +8,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
+from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -37,6 +38,7 @@ from guarded_exchange.domain.errors import (
     OutcomeUnknown,
     UnsupportedPositionMode,
 )
+from guarded_exchange.domain.history import ExecutionKind, HistoryPage, Trade
 from guarded_exchange.domain.instruments import Category, Instrument, InstrumentRules, InstrumentStatus
 from guarded_exchange.domain.market import (
     Candle,
@@ -699,6 +701,7 @@ class _OrderDTO(BaseModel):
     stop_loss: str = Field(default="", alias="stopLoss")
     position_idx: int = Field(default=_ONE_WAY, alias="positionIdx")
     market_unit: str = Field(default="", alias="marketUnit")
+    reject_reason: str = Field(default="", alias="rejectReason")
     created_time: str = Field(alias="createdTime")
     updated_time: str = Field(default="", alias="updatedTime")
 
@@ -719,7 +722,14 @@ _ORDER_STATUSES: Final = {
     "New": OrderStatus.NEW,
     "PartiallyFilled": OrderStatus.PARTIALLY_FILLED,
     "Untriggered": OrderStatus.UNTRIGGERED,
+    "Filled": OrderStatus.FILLED,
+    "Cancelled": OrderStatus.CANCELLED,
+    "PartiallyFilledCanceled": OrderStatus.PARTIALLY_FILLED_CANCELLED,
+    "Rejected": OrderStatus.REJECTED,
+    "Triggered": OrderStatus.TRIGGERED,
+    "Deactivated": OrderStatus.DEACTIVATED,
 }
+"""https://bybit-exchange.github.io/docs/v5/enum#orderstatus (checked 2026-11-03)."""
 _TIME_IN_FORCE: Final = {
     "GTC": TimeInForce.GTC,
     "IOC": TimeInForce.IOC,
@@ -765,6 +775,176 @@ def open_orders_from_result(
     return Page(items=orders, has_more=rows > limit or full_last_page, omitted=omitted)
 
 
+# --- order history and executions (ticket 010) ----------------------------------------------
+
+ORDER_HISTORY_PAGE_MAX: Final = 50
+"""Bybit's maximum ``limit`` for ``order/history`` (``execution/list`` allows 100; we ask for at most 50)."""
+
+_NO_ERROR: Final = "EC_NoError"
+_EXCHANGE_CURSOR_RE: Final = re.compile(r"^(?:[A-Za-z0-9_.~-]|%[0-9A-Fa-f]{2}){1,512}$")
+_UNESCAPED_IN_CURSOR: Final = "%-._~"
+
+
+def wire_exchange_cursor(token: str) -> str:
+    """The exchange's page cursor as it goes into the query string: sent verbatim (Bybit returns
+    it percent-encoded and its SDK sends it back unencoded), so only unreserved characters and
+    ``%XX`` escapes pass. ``&``, ``=``, ``#`` and the like cannot reach the query: no parameter
+    can be smuggled in through a cursor."""
+    if not _EXCHANGE_CURSOR_RE.fullmatch(token):
+        raise InvalidParams(
+            "cursor is not a cursor this tool returned",
+            next_step="Pass next_cursor exactly as returned, or call again without cursor.",
+            details={"field": "cursor", "reason": "invalid_cursor"},
+        )
+    return token
+
+
+def _next_exchange_cursor(raw: str, *, rows: int, limit: int) -> str | None:
+    """The next page's cursor, ``None`` on the last page. Bybit sends a cursor on the last page
+    too, so a page shorter than ``limit`` is the last one whatever the cursor says. Characters
+    outside the cursor alphabet are percent-encoded (the exchange decodes the query once, so the
+    value it gets back is the same)."""
+    raw = raw.strip()
+    if not raw or rows < limit:
+        return None
+    token = quote(raw, safe=_UNESCAPED_IN_CURSOR)
+    if not _EXCHANGE_CURSOR_RE.fullmatch(token):
+        raise unavailable("unexpected page cursor")
+    return token
+
+
+def order_history_from_result(
+    result: dict[str, Any], *, category: Category, symbol: str | None, limit: int
+) -> HistoryPage[Order]:
+    """One page of ``GET /v5/order/history``, newest first.
+
+    https://bybit-exchange.github.io/docs/v5/order/order-list (checked 2026-11-03). Rows v1 cannot
+    represent - a symbol outside the plain pattern (dated futures) or a hedge-mode order - are
+    counted in ``omitted``: past hedge-mode orders do not make the whole history unreadable.
+    """
+    parsed = _validated(_OrdersResultDTO, result)
+    if parsed is None:
+        raise unavailable("unexpected order/history format")
+    if symbol and any(o.symbol != symbol for o in parsed.items):
+        raise unavailable("order/history returned another symbol")
+    if len(parsed.items) > limit:
+        raise unavailable("order/history returned more rows than asked")
+    supported = [
+        o
+        for o in parsed.items
+        if _SYMBOL_RE.fullmatch(o.symbol) and (category is Category.SPOT or o.position_idx == _ONE_WAY)
+    ]
+    if not all(_ORDER_ID_RE.fullmatch(o.order_id) for o in supported):
+        raise unavailable("unexpected order id in order/history")
+    try:
+        orders = tuple(_order(o, category) for o in supported)
+    except (InvalidOperation, ValueError) as exc:
+        raise unavailable("inconsistent order/history") from exc
+    rows = len(parsed.items)
+    return HistoryPage(
+        items=orders,
+        next_exchange_cursor=_next_exchange_cursor(parsed.next_page_cursor, rows=rows, limit=limit),
+        omitted=rows - len(supported),
+    )
+
+
+class _ExecutionDTO(BaseModel):
+    """One item of ``GET /v5/execution/list``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str
+    order_id: str = Field(alias="orderId")
+    order_link_id: str = Field(default="", alias="orderLinkId")
+    side: str
+    exec_id: str = Field(alias="execId")
+    exec_price: str = Field(alias="execPrice")
+    exec_qty: str = Field(alias="execQty")
+    exec_value: str = Field(default="", alias="execValue")
+    exec_fee: str = Field(default="", alias="execFee")
+    fee_currency: str = Field(default="", alias="feeCurrency")
+    fee_rate: str = Field(default="", alias="feeRate")
+    exec_type: str = Field(default="", alias="execType")
+    is_maker: bool | None = Field(default=None, alias="isMaker")
+    closed_size: str = Field(default="", alias="closedSize")
+    exec_time: str = Field(alias="execTime")
+
+
+class _ExecutionsResultDTO(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[_ExecutionDTO] = Field(alias="list")
+    next_page_cursor: str = Field(default="", alias="nextPageCursor")
+
+
+_EXECUTION_KINDS: Final = {
+    "Trade": ExecutionKind.TRADE,
+    "BustTrade": ExecutionKind.LIQUIDATION,
+    "AdlTrade": ExecutionKind.AUTO_DELEVERAGE,
+    "Funding": ExecutionKind.FUNDING,
+    "Delivery": ExecutionKind.SETTLEMENT,
+    "Settle": ExecutionKind.SETTLEMENT,
+    "BlockTrade": ExecutionKind.BLOCK_TRADE,
+}
+"""https://bybit-exchange.github.io/docs/v5/enum#exectype; any other value is ``other``."""
+
+
+def trades_from_result(
+    result: dict[str, Any], *, category: Category, symbol: str | None, limit: int
+) -> HistoryPage[Trade]:
+    """One page of ``GET /v5/execution/list``, newest first.
+
+    https://bybit-exchange.github.io/docs/v5/order/execution (checked 2026-11-03). A row with an
+    unsupported symbol or an unknown side is counted in ``omitted``, its text is not shown.
+    """
+    parsed = _validated(_ExecutionsResultDTO, result)
+    if parsed is None:
+        raise unavailable("unexpected execution/list format")
+    if symbol and any(e.symbol != symbol for e in parsed.items):
+        raise unavailable("execution/list returned another symbol")
+    if len(parsed.items) > limit:
+        raise unavailable("execution/list returned more rows than asked")
+    supported = [e for e in parsed.items if _SYMBOL_RE.fullmatch(e.symbol) and e.side in _ORDER_SIDES]
+    if not all(_ORDER_ID_RE.fullmatch(e.order_id) and _ORDER_ID_RE.fullmatch(e.exec_id) for e in supported):
+        raise unavailable("unexpected id in execution/list")
+    try:
+        trades = tuple(_trade(e, category) for e in supported)
+    except (InvalidOperation, ValueError) as exc:
+        raise unavailable("inconsistent execution/list") from exc
+    rows = len(parsed.items)
+    return HistoryPage(
+        items=trades,
+        next_exchange_cursor=_next_exchange_cursor(parsed.next_page_cursor, rows=rows, limit=limit),
+        omitted=rows - len(supported),
+    )
+
+
+def _trade(item: _ExecutionDTO, category: Category) -> Trade:
+    executed_at = _ts(_int(item.exec_time))
+    if executed_at is None:
+        raise ValueError("execution without a time")
+    fee_currency = item.fee_currency.strip()
+    return Trade(
+        trade_id=item.exec_id,
+        order_id=item.order_id,
+        symbol=item.symbol,
+        category=category,
+        side=_ORDER_SIDES[item.side],
+        kind=_EXECUTION_KINDS.get(item.exec_type.strip(), ExecutionKind.OTHER),
+        price=_required_dec(item.exec_price),
+        qty=_required_dec(item.exec_qty),
+        value=_dec(item.exec_value),
+        fee=_dec(item.exec_fee),
+        fee_currency=fee_currency if _COIN_RE.fullmatch(fee_currency) else None,
+        fee_rate=_dec(item.fee_rate),
+        is_maker=item.is_maker,
+        closed_size=_positive_or_none(item.closed_size) if category is Category.LINEAR else None,
+        executed_at=executed_at,
+        origin=order_origin(item.order_link_id),
+        client_order_id=_untrusted(item.order_link_id),
+    )
+
+
 def _order(item: _OrderDTO, category: Category) -> Order:
     side = _ORDER_SIDES.get(item.side)
     created_at = _ts(_int(item.created_time))
@@ -796,8 +976,14 @@ def _order(item: _OrderDTO, category: Category) -> Order:
         created_at=created_at,
         updated_at=_ts(_int(item.updated_time)),
         origin=order_origin(item.order_link_id),
-        client_order_id=UntrustedText(link_id[:_MAX_CLIENT_ORDER_ID]) if link_id else None,
+        client_order_id=_untrusted(link_id),
+        reject_reason=_untrusted("" if item.reject_reason.strip() == _NO_ERROR else item.reject_reason),
     )
+
+
+def _untrusted(raw: str) -> UntrustedText | None:
+    text = raw.strip()
+    return UntrustedText(text[:_MAX_CLIENT_ORDER_ID]) if text else None
 
 
 _MARKET_UNITS: Final = {"baseCoin": QtyUnit.BASE, "quoteCoin": QtyUnit.QUOTE}
