@@ -1,10 +1,145 @@
 # guarded-exchange-mcp
 
-An MCP server that gives AI agents guarded access to a crypto exchange (Bybit V5): least-privilege permissions, risk limits, human confirmation of risky actions in a channel the model does not control, tenant isolation and a tamper-evident audit log.
+A guarded [MCP](https://modelcontextprotocol.io) server that lets an AI agent trade on **Bybit V5 Demo Trading** (test environment only in v1) without letting the model decide alone: least-privilege permissions, risk limits, a kill switch, human confirmation in a channel the model does not control, idempotent order submission and an append-only audit journal.
 
-> Status: early skeleton. Read-only tools work end to end: market data (`get_ticker`, `get_orderbook`, `get_candles`, `get_instrument_rules`), the user's account (`get_balances`, `get_positions`, `get_open_orders`), its order and trade history (`get_order_history`, `get_trades`) and `get_my_policy`; the first trading tool, `place_order`, works on the test environment with risk limits, a journal, idempotency keys and reconnaissance of unknown outcomes, with human confirmation in the CLI (off unless the admin enables it; otherwise an action whose policy requires confirmation is refused); a kill switch (`activate_kill_switch` for the agent, `kill-switch on|off` and `admin kill-switch on|off` in the CLI) stops every risk-increasing action; local storage (SQLite, master key, local user, append-only journal) is initialised by `guarded-exchange init`; the policy (admin ceiling, user tightening) and exchange API keys (encrypted, permission-checked) are managed from the CLI; a remote multi-user mode serves the same tools over Streamable HTTP with per-user bearer tokens. Requirements live in [`docs/SPEC.md`](docs/SPEC.md), the design in [`docs/PLAN.md`](docs/PLAN.md), work items in [`docs/tickets/`](docs/tickets/).
+> Portfolio / demo project. v1 is testnet-only, single process per database. Requirements: [`docs/SPEC.md`](docs/SPEC.md), design: [`docs/PLAN.md`](docs/PLAN.md), work items: [`docs/tickets/`](docs/tickets/).
 
-## How to run the skeleton
+<!-- PENDING (owner): GIF demo, recorded by the project owner following "Demo script" below. Embed it here as ![demo](docs/demo.gif). -->
+
+## Quick start (one command, no Docker)
+
+Requirements: [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 if missing), Linux or macOS. No exchange keys are needed for market data.
+
+```bash
+git clone <this repo> && cd guarded-exchange-mcp
+uv run guarded-exchange init     # syncs dependencies, creates the database, master key and local user
+```
+
+Then connect a client (the server speaks MCP over stdio):
+
+```bash
+claude mcp add guarded-exchange -- uv run --directory "$(pwd)" guarded-exchange serve
+```
+
+Ask the agent for the `BTCUSDT` ticker. Trading needs a Bybit **demo** API key (`guarded-exchange keys add`, see [Exchange API keys](#exchange-api-keys)) and a policy with the `trade` profile (see [Policy](#policy)). Everything else is described in the reference sections below.
+
+## How it works
+
+```
+Agent (untrusted model) --MCP--> interface/mcp  (thin tools, per-user tool filter)
+                                      |
+                                 application   (use cases; ONE trading path: ActionPath)
+                                      |
+                     domain (rules, Decimal money)     ports (Protocols)
+                                      |
+                           infrastructure: Bybit adapter, SQLite, crypto, clock
+
+Human --CLI or client UI form--> confirmations (never an MCP tool)
+```
+
+- **Layers**: `domain / application / ports / infrastructure / interface`, dependencies point inwards, enforced by `import-linter` in CI (`uv run lint-imports`). Details in [Architecture](#architecture).
+- **Single trading path (`ActionPath`)**: every state-changing tool (`place_order`, `cancel_order`, `amend_order`, `cancel_all_orders`, `set_trading_stop`, `close_position`, `set_leverage`) goes through the same sequence: kill switch, policy and limits, instrument rules, confirmation, journal, exchange. There is no second way to reach the exchange.
+- **Idempotency and unknown outcomes**: every order carries an idempotency key; a repeated call returns the first answer, a different payload under the same key conflicts, and a timeout is resolved by looking the order up on the exchange instead of blindly resending.
+- **Kill switch**: the agent can only turn it **on** (`activate_kill_switch`); turning it off is a CLI-only action. While on, every risk-increasing action is refused; reducing risk still works. See [Kill switch](#kill-switch).
+- **Confirmations**: a risky action is parked as `pending`. The human approves it either in the client's own UI (MCP 2026-07-28 MRTR form / elicitation, on testnet) or via the CLI (`guarded-exchange confirm approve`, only if the admin enabled it). **No MCP tool approves anything.** See [Human confirmation](#human-confirmation).
+- **Audit**: an append-only journal in SQLite (triggers forbid UPDATE and DELETE). Hash-chain tamper evidence is v2.
+
+## Threat model
+
+The model is **untrusted, always**. Everything the exchange returns (e.g. client order ids) is delivered as untrusted text and never interpreted.
+
+| Threat | Mitigation |
+|---|---|
+| Model tries to confirm its own action (via tool calls or text) | No approving tool exists; confirmation comes only from the client UI form or the CLI. Adversarial test with a hostile "agent": [`tests/e2e/test_ac4_adversarial.py`](tests/e2e/test_ac4_adversarial.py) |
+| Prompt injection through exchange data | Exchange text is returned as untrusted data; a risky action still needs human confirmation and passes policy limits |
+| Model over-trades (size, leverage, instrument) | Per-user policy: admin ceiling, which the user may only tighten; `get_my_policy` is read-only for the agent |
+| Duplicate orders from retries and timeouts | Idempotency keys and reconnaissance of unknown outcomes |
+| Runaway agent | Kill switch the agent can enable but not disable |
+| Leaked secrets | API keys encrypted at rest (AES-256-GCM, HKDF from a master key file with mode `0600`), never in logs, output or the journal |
+| Switching to real money | Trading is testnet-only in v1 |
+
+**Honest boundary.** An agent with **shell access under the same OS account** is outside the guarantees: it can read the master key, run the admin CLI (including enabling CLI approval) or call the exchange API directly. Docker is not a security boundary against such an agent, and `0600` files only protect against accidental reads. The AC-4 guarantee is a guarantee of the **MCP surface**: a model without shell (e.g. Claude Desktop, or Claude Code with deny rules for the data directory, `docker` and the CLI) cannot execute a confirmation-gated action without a human. This is why CLI approval is **off by default** (`GX_CONFIRM_CLI_ENABLED=false`). A custom client that auto-answers the UI form is also outside the guarantee.
+
+## Supported clients
+
+Checked by hand in spike 003 ([`spikes/003/README.md`](spikes/003/README.md)):
+
+| Client | Local stdio | UI confirmation (MRTR form) | Status |
+|---|---|---|---|
+| Claude Code 2.1.312 (Linux, 2026-10-28) | yes | yes: form drawn, accept / decline / cancel distinguished (tick the box with Space, then Enter) | verified in the spike |
+| Claude Desktop | per vendor docs | not verified (no Linux client); use the CLI channel | **not verified** |
+| Cursor, VS Code Copilot, ChatGPT | not checked | not checked | **not verified** |
+| `guarded-agent` (bundled console agent) | yes | yes, answered by the human in the console | covered by [`tests/e2e/test_agent_demo.py`](tests/e2e/test_agent_demo.py) |
+
+A client that does not declare form elicitation gets no UI form: the action stays `pending` and can be approved in the CLI if the admin enabled it; otherwise the call fails closed. The UI channel works only on protocol 2026-07-28 (MRTR); there is no legacy push branch in v1.
+
+## Limitations
+
+- Testnet (Bybit Demo Trading) only; mainnet is not reachable in v1.
+- **One server process per database** (SQLite); starting a second one is unsupported. Rate limits are only what the exchange reports (`rate_limited` with `retry_after_s`); there are no per-user buckets yet.
+- Spot orders under the kill switch are refused entirely (a spot sell is not modelled as risk reduction).
+- No limit on the number of actions that need no confirmation (FR-46): if an admin loosens confirmations, an agent can split a large order into small ones.
+- The journal is append-only but **not tamper-evident** against someone with write access to the file (no HMAC chain or external checkpoints yet).
+- External confirmation channel: CLI only, with the agent-with-shell boundary above.
+- Remote mode (Streamable HTTP) uses static bearer tokens, not OAuth; two-user isolation and access revocation with pending cancellation are v2.
+- Tested on Linux; Windows is out of scope (`fcntl.flock`).
+
+## Roadmap (v2)
+
+Deferred tickets (status `DEFERRED` in [`docs/tickets/`](docs/tickets/)):
+
+- Telegram confirmation channel and pairing (018)
+- Several stdio processes with leader election and fencing (019)
+- Rate limits at three levels, including per-user buckets (022)
+- Limit on actions without confirmation (023, FR-46)
+- Journal HMAC chain and `audit verify` (024); checkpoints and journal reading tools (025)
+- Access revocation, mainnet behind an explicit flag, two-user isolation (027)
+- Postgres and docker-compose (028); Docker run, `doctor`, benchmark (032)
+- Tool-description experiment: change descriptions and compare eval metrics (031)
+
+## Evals
+
+`evals/` is a tool-selection harness: 43 cases (Russian and English, 19 dangerous) run against the server **in-process on a fake exchange**; the **first state-changing decision** of the model is scored against a deterministic expectation (`call` with args, `clarify` or `refuse`). The run is repeated `--runs` times and stops at a hard cost budget (default $0.50).
+
+```bash
+uv run python -m evals --provider fake --runs 1                              # offline, $0, writes evals/report.md and .json
+ANTHROPIC_API_KEY=... uv run python -m evals --provider anthropic --runs 3   # real model
+OPENAI_API_KEY=...    uv run python -m evals --provider openai --runs 3
+```
+
+The `fake` provider is a scripted stand-in that checks the harness itself, not a model: its numbers say nothing about real tool selection.
+
+### Results with a real model
+
+> **PLACEHOLDER (to be filled by the project owner):** run `uv run python -m evals --provider anthropic --runs 3` (optionally also `--provider openai`), then paste the model name, date, number of runs, cost and the metrics table from `evals/report.md` here. The tool-description before/after experiment (ticket 031) is v2.
+
+## Acceptance criteria
+
+| AC | Status | Evidence |
+|---|---|---|
+| AC-1 Claude Code/Desktop scenario "show positions, set a stop 3% below entry" with human confirmation, journaled | automated part done; **manual client check PENDING (owner)** | [`tests/e2e/test_mcp_client_ui.py`](tests/e2e/test_mcp_client_ui.py), [`tests/e2e/test_mcp_confirmation.py`](tests/e2e/test_mcp_confirmation.py), [`spikes/003/README.md`](spikes/003/README.md) |
+| AC-2 Two users with different policies, isolated; read-only user cannot trade | partial in v1 (read-only user); isolation and revocation are v2 | [`tests/e2e/test_mcp_policy.py`](tests/e2e/test_mcp_policy.py), [`tests/integration/test_http_auth.py`](tests/integration/test_http_auth.py) |
+| AC-3 Every in-scope FR covered by an automated test, CI green without network | done (FR-46 and FR-50 are v2) | [`docs/traceability.md`](docs/traceability.md), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`tests/unit/test_network_guard.py`](tests/unit/test_network_guard.py) |
+| AC-4 The model cannot execute a confirmation-gated action without a human | done | [`tests/e2e/test_ac4_adversarial.py`](tests/e2e/test_ac4_adversarial.py) |
+| AC-5 Agent client runs the demo scenario with console confirmation | done | [`tests/e2e/test_agent_demo.py`](tests/e2e/test_agent_demo.py), [`agent/guarded_agent/`](agent/guarded_agent/) |
+| AC-6 Evals report published | harness done; **real-model report PENDING (owner)**, see [Evals](#evals) | [`evals/`](evals/), [`tests/unit/evals/test_evals.py`](tests/unit/evals/test_evals.py) |
+| AC-7 English README, GIF demo, one-command start | README and start done; **GIF PENDING (owner)** | this file |
+
+## Demo script (for recording the GIF)
+
+1. `uv run guarded-exchange init`, add a Bybit demo key (`uv run guarded-exchange keys add`), set the policy: `uv run guarded-exchange admin policy set-ceiling --profile trade --allow linear:BTCUSDT`.
+2. Start Claude Code with the server connected (see Quick start) or run `uv run guarded-agent`.
+3. Prompt: "Show my positions." (read-only call, no confirmation).
+4. Prompt: "Set a stop loss 3% below the entry of my BTCUSDT position." The confirmation form shows what will be executed; tick the box (Space), Enter.
+5. Show that the stop is set (ask for positions again).
+6. Prompt: "Place a market buy of BTCUSDT" and decline the form: nothing is sent.
+7. Ask the agent to activate the kill switch, then try a new order: refused with `kill_switch_active`. Turn it off only in the CLI: `uv run guarded-exchange kill-switch off`.
+
+---
+
+# Reference
+
+## Setup details
 
 Requirements: [uv](https://docs.astral.sh/uv/) and Python 3.12 (uv installs it if missing). Linux or macOS: `init` serialises itself with `fcntl.flock`, so Windows is out of scope (use the Docker image or WSL).
 
