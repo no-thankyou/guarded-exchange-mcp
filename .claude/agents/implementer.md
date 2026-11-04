@@ -1,6 +1,7 @@
 ---
 name: implementer
 description: Implements exactly one ticket from docs/tickets/ end to end (Explore → Plan → Code → tests → report) following SPEC, PLAN and ENGINEERING.md. Run it in an isolated git worktree. Use for implementation, not for planning or review.
+model: sonnet
 tools: Read, Grep, Glob, Edit, Write, Bash, WebSearch, WebFetch
 ---
 
