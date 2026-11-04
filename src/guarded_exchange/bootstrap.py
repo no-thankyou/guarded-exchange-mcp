@@ -369,15 +369,32 @@ async def app_server(
             )
 
 
+_EXECUTOR_GRACE_S: Final = 5.0
+
+
 @asynccontextmanager
 async def _executing(executor: ConfirmedActionExecutor) -> AsyncIterator[None]:
-    """Run the executor beside the server. On the way out it is cancelled; an execution that already
-    took its CAS finishes first (its send and outcome are shielded)."""
+    """Run the executor beside the server. On the way out it is asked to stop and gets up to
+    ``_EXECUTOR_GRACE_S`` (shielded) to end its current pass: cancelling a pass inside an aiosqlite call
+    would leave the worker thread posting to a closed loop and the process hanging. Only after the grace
+    is it cancelled."""
+    stop = anyio.Event()
+    finished = anyio.Event()
+
+    async def run() -> None:
+        try:
+            await executor.run(stop)
+        finally:
+            finished.set()
+
     async with anyio.create_task_group() as tasks:
-        tasks.start_soon(executor.run)
+        tasks.start_soon(run)
         try:
             yield
         finally:
+            stop.set()
+            with anyio.CancelScope(deadline=anyio.current_time() + _EXECUTOR_GRACE_S, shield=True):
+                await finished.wait()
             tasks.cancel_scope.cancel()
 
 

@@ -58,21 +58,25 @@ class ExecuteConfirmed:
         self._uow = uow
         self._clock = clock
         self._paths = paths
-        self.running: set[str] = set()
-        """Confirmations this process is executing right now: not reconciled behind its back."""
+        self.running: dict[str, int] = {}
+        """Confirmations this process is executing right now (a count: a call that lost the CAS must not
+        drop the winner's mark): not reconciled behind its back."""
 
     async def __call__(self, pending: PendingConfirmation) -> None:
         path = self._paths.get(pending.tool)
         if path is None:
             await self._fail_unsupported(pending)
             return
-        self.running.add(pending.id)
+        self.running[pending.id] = self.running.get(pending.id, 0) + 1
         try:
             await path.run_confirmed(pending)
         except Exception:
             log.exception("confirmed_action_failed_to_run", confirmation_id=pending.id)
         finally:
-            self.running.discard(pending.id)
+            if self.running[pending.id] <= 1:
+                del self.running[pending.id]
+            else:
+                self.running[pending.id] -= 1
 
     async def _fail_unsupported(self, pending: PendingConfirmation) -> None:
         """Fail closed: a tool with no registered path is never executed."""
@@ -122,14 +126,22 @@ class ConfirmedActionExecutor:
         self._scan_interval_s = scan_interval_s
         self._execute_confirmed = execute or ExecuteConfirmed(uow, clock, paths)
 
-    async def run(self) -> None:
-        """Scan until cancelled. A failing pass is logged and the next one tries again."""
-        while True:
+    async def run(self, stop: anyio.Event | None = None) -> None:
+        """Scan until ``stop`` is set (or the task is cancelled). A failing pass is logged and the next
+        one tries again.
+
+        ``stop`` is the graceful way out: it is only looked at between passes, so a pass is never cut
+        in the middle of a database call (cancelling an aiosqlite call mid-way leaves its worker thread
+        posting to a closed event loop, and the process then never exits).
+        """
+        stop = stop or anyio.Event()
+        while not stop.is_set():
             try:
                 await self.run_once()
             except Exception:
                 log.exception("confirmed_executor_pass_failed")
-            await anyio.sleep(self._scan_interval_s)
+            with anyio.move_on_after(self._scan_interval_s):
+                await stop.wait()
 
     async def run_once(self) -> None:
         await self._expire_waiting()
