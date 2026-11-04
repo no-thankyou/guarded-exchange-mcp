@@ -51,7 +51,9 @@ class GuardedMCPServer(MCPServer[Any]):
     ) -> None:
         """``request_state_key``: the key that seals ``requestState`` of the confirmation form (D-5). From the
         master key, so a restart between the two rounds keeps the form valid; ``None`` (tests, tools): a
-        process-local key. The audience is fixed so renaming the server does not break states in flight."""
+        process-local key. The audience is fixed so renaming the server does not break states in flight.
+        The SDK's state TTL (600 s) equals the largest confirmation lifetime the policy allows, so a sealed
+        state never outlives its pending."""
         security = (
             None
             if request_state_key is None

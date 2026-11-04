@@ -430,6 +430,10 @@ async def test_the_form_answer_after_the_expiry_executes_nothing() -> None:
 
     assert _structured(result)["code"] == "confirmation_expired"
     assert setup.actions.stops == []
+    (pending,) = setup.pendings()
+    assert pending.status is ConfirmationStatus.EXPIRED  # written by the UI path itself, journaled
+    (decision,) = setup.decisions()
+    assert (decision.payload["status"], decision.payload["channel"]) == ("expired", "system")
 
 
 # --- one execution path: the UI and the CLI race (D-2) -----------------------------------------

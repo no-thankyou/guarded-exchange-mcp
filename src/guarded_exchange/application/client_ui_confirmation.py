@@ -54,6 +54,14 @@ _TARGET = {
 }
 
 
+def _not_trusted() -> ConfirmationChannelUnavailable:
+    return ConfirmationChannelUnavailable(
+        "this policy does not accept confirmations from the AI client's own UI",
+        next_step="Do not retry. Tell the user to decide with `guarded-exchange confirm`.",
+        details={"reason": "client_ui_not_trusted"},
+    )
+
+
 class ClientUiConfirmation:
     def __init__(
         self,
@@ -74,9 +82,18 @@ class ClientUiConfirmation:
     async def current(
         self, user_id: str | None, tool: ActionKind, pending_id: str, terms_digest: str
     ) -> PendingConfirmation:
-        """The bound pending as it stands now (for a state-only retry: ask the same question again)."""
+        """The bound pending as it stands now (for a state-only retry: ask the same question again). Refused
+        like a decision when the policy no longer trusts the client's UI; a pending past its expiry reads
+        as ``expired``."""
         async with self._uow(write=False) as uow:
-            return await self._bound(uow, user_id, tool, pending_id, terms_digest)
+            pending = await self._bound(uow, user_id, tool, pending_id, terms_digest)
+            user = await active_principal(uow, user_id)
+            if user is None:
+                raise no_access()
+            policy = (await load_policy_view(uow, user)).effective
+        if pending.status is ConfirmationStatus.PENDING and not self._support.client_ui_trusted(policy):
+            raise _not_trusted()
+        return replace(pending, status=pending.status_at(self._clock.now()))
 
     async def decide(
         self,
@@ -104,11 +121,7 @@ class ClientUiConfirmation:
                 return replace(pending, status=pending.status_at(now))
             if not self._support.client_ui_trusted(policy):
                 # Not a decision: the pending stays for a channel the policy does trust (FR-42, D-6).
-                raise ConfirmationChannelUnavailable(
-                    "this policy does not accept confirmations from the AI client's own UI",
-                    next_step="Do not retry. Tell the user to decide with `guarded-exchange confirm`.",
-                    details={"reason": "client_ui_not_trusted"},
-                )
+                raise _not_trusted()
             if pending.expired(now):
                 await expire_waiting(uow, pending, now)
                 return replace(pending, status=ConfirmationStatus.EXPIRED)

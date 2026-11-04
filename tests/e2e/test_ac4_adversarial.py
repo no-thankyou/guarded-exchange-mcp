@@ -19,9 +19,12 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, ElicitResult, Implementation, InputRequiredResult
 
 from guarded_exchange.application.client_ui_confirmation import ClientUiConfirmation
+from guarded_exchange.application.policy import SetCeiling
 from guarded_exchange.application.resolve_confirmation import ResolveConfirmation
+from guarded_exchange.domain.actions import ALL_ACTION_KINDS
 from guarded_exchange.domain.confirmation import ConfirmationStatus
-from guarded_exchange.domain.policy import default_ceiling
+from guarded_exchange.domain.instruments import Category
+from guarded_exchange.domain.policy import InstrumentRef, PolicyPatch, Profile, default_ceiling
 from guarded_exchange.domain.users import Environment
 from guarded_exchange.interface.mcp.access import fixed_principal
 from guarded_exchange.interface.mcp.server import create_server
@@ -301,18 +304,26 @@ async def test_the_state_of_one_users_form_does_not_work_for_another_user() -> N
     setup = Setup()
     await setup.grant()
     mallory = setup.db.add_user("mallory")
+    # Mallory is a full trader whose policy trusts the UI: only the binding to the pending stops her.
+    patch = PolicyPatch(
+        profile=Profile.TRADE,
+        allowlist=frozenset({InstrumentRef(Category.LINEAR, "BTCUSDT")}),
+        confirm_actions=ALL_ACTION_KINDS,
+    )
+    await SetCeiling(setup.db, setup.clock)(mallory.name, patch)
     async with Client(setup.server(), elicitation_callback=Human(ACCEPT)) as client:
         sealed = (await _first(client)).request_state
-    their_server = create_server(
-        setup.cases, principal=fixed_principal(mallory.id), request_state_key=setup.key
-    )
+    principal = fixed_principal(mallory.id)
+    their_server = create_server(setup.cases, principal=principal, request_state_key=setup.key)
     async with Client(their_server, elicitation_callback=Human(ACCEPT)) as client:
         result = await client.session.call_tool(
             "set_trading_stop", STOP, input_responses=ANSWERS, request_state=sealed
         )
 
     assert isinstance(result, CallToolResult)
-    assert result.is_error is True
+    assert (result.structured_content or {})["code"] == "not_found"
+    (pending,) = setup.pendings()
+    assert pending.status is ConfirmationStatus.PENDING
     _untouched(setup)
 
 
