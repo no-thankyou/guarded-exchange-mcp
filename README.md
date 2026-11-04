@@ -170,6 +170,17 @@ Environment variables with the `GX_` prefix. A dotenv file is read only when giv
 | `GX_HTTP_ALLOWED_HOSTS` | `["127.0.0.1:*", "localhost:*", "[::1]:*"]` | JSON list of accepted `Host` headers (`host:*` = any port) |
 | `GX_HTTP_ALLOWED_ORIGINS` | `["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]` | JSON list of accepted `Origin` headers (browsers) |
 
+### Agent client and tool-selection evals
+
+`guarded-agent` is a small console agent (package `agent/guarded_agent`, talks to the server only over MCP). It works with Anthropic (`claude-haiku-5-5`, default) or OpenAI (`gpt-6-luna`, Responses API); a confirmation form the server sends is answered by the human in the console, never by the model. Evals (`evals/`) run 43 cases (ru/en, 19 dangerous) against the server in-process on fakes and score the first changing tool call; the run stops at a hard budget (default $0.50).
+
+```bash
+ANTHROPIC_API_KEY=... uv run guarded-agent                     # spawns the stdio server (`init` it first)
+OPENAI_API_KEY=... uv run guarded-agent --provider openai --url http://127.0.0.1:8000/mcp   # GX_TOKEN for bearer
+uv run python -m evals --provider fake --runs 1                # offline smoke run, $0
+ANTHROPIC_API_KEY=... uv run python -m evals --provider anthropic --runs 3   # real run -> evals/report.md|json
+```
+
 ## Development
 
 ```bash
