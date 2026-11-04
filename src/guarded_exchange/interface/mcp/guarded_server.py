@@ -24,7 +24,7 @@ import structlog
 from mcp.server import MCPServer
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings
-from mcp.server.mcpserver import Context
+from mcp.server.mcpserver import Context, RequestStateSecurity
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, InputRequiredResult, Tool
 from pydantic import ValidationError
@@ -33,6 +33,8 @@ from guarded_exchange.interface.mcp.access import ToolGate
 from guarded_exchange.interface.mcp.errors import argument_name, invalid_arguments_result
 
 log = structlog.get_logger(__name__)
+
+REQUEST_STATE_AUDIENCE = "guarded-exchange"
 
 
 class GuardedMCPServer(MCPServer[Any]):
@@ -45,9 +47,25 @@ class GuardedMCPServer(MCPServer[Any]):
         version: str,
         token_verifier: TokenVerifier | None = None,
         auth: AuthSettings | None = None,
+        request_state_key: bytes | None = None,
     ) -> None:
+        """``request_state_key``: the key that seals ``requestState`` of the confirmation form (D-5). From the
+        master key, so a restart between the two rounds keeps the form valid; ``None`` (tests, tools): a
+        process-local key. The audience is fixed so renaming the server does not break states in flight.
+        The SDK's state TTL (600 s) equals the largest confirmation lifetime the policy allows, so a sealed
+        state never outlives its pending."""
+        security = (
+            None
+            if request_state_key is None
+            else RequestStateSecurity(keys=[request_state_key], audience=REQUEST_STATE_AUDIENCE)
+        )
         super().__init__(
-            name, instructions=instructions, version=version, token_verifier=token_verifier, auth=auth
+            name,
+            instructions=instructions,
+            version=version,
+            token_verifier=token_verifier,
+            auth=auth,
+            request_state_security=security,
         )
         self._gate = gate
 

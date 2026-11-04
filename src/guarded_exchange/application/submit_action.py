@@ -714,10 +714,12 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
             )
             earlier = await earlier_pending(uow, attempt.user_id, key, digest, self._clock.now())
             if earlier is not None:
-                return ConfirmationPending(earlier, created=False)
+                return ConfirmationPending(
+                    earlier, created=False, ask_client_ui=support.client_ui_usable(policy)
+                )
         if not requires_confirmation(policy, action.kind, notional):
             return plan
-        if support is None or not support.channel_available:
+        if support is None or not support.channel_available(policy):
             raise no_confirmation_channel(action.kind)  # fail closed, nothing is parked
         request = PendingRequest(
             pending_id=attempt.action_id,
@@ -731,7 +733,9 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
             idempotency_key=key,
             client=attempt.client,
         )
-        return await open_pending(uow, request, policy, self._clock.now(), actor=self._actor)
+        parked = await open_pending(uow, request, policy, self._clock.now(), actor=self._actor)
+        parked.ask_client_ui = support.client_ui_usable(policy)
+        return parked
 
     # --- sending and the outcome ----------------------------------------------------------------
 

@@ -2,7 +2,7 @@
 
 import time
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 
 import structlog
 from mcp.types import CallToolResult, TextContent
@@ -24,12 +24,28 @@ def success_result(output: BaseModel) -> CallToolResult:
     )
 
 
+def pending_answer(parked: ConfirmationPending) -> CallToolResult:
+    # Not an error (FR-47 (b)): the action waits for the user. Any trading tool can end here.
+    return success_result(ConfirmationOut.from_domain(parked.pending, already_waiting=not parked.created))
+
+
 async def run_tool(tool: str, mcp_request_id: str | None, call: Awaitable[BaseModel]) -> CallToolResult:
     """Await ``call`` with a fresh ``request_id`` bound to every log line, map domain errors.
 
     Any other exception is a bug: its traceback goes to the log and the model gets
     ``code=internal_error`` with the ``request_id`` only, never the exception text.
     """
+    return await run_tool_or(tool, mcp_request_id, call, pending_answer)
+
+
+async def run_tool_or[T](
+    tool: str,
+    mcp_request_id: str | None,
+    call: Awaitable[BaseModel],
+    on_pending: Callable[[ConfirmationPending], CallToolResult | T],
+) -> CallToolResult | T:
+    """``run_tool`` where a parked action may be answered differently (the client-UI channel asks the
+    human in the same call, FR-47 (a)); ``on_pending`` makes that answer."""
     request_id = uuid.uuid4().hex
     started = time.perf_counter()
     with structlog.contextvars.bound_contextvars(
@@ -38,11 +54,8 @@ async def run_tool(tool: str, mcp_request_id: str | None, call: Awaitable[BaseMo
         try:
             output = await call
         except ConfirmationPending as parked:
-            # Not an error (FR-47 (b)): the action waits for the user. Any trading tool can end here.
             log.info("tool_pending_confirmation", confirmation_id=parked.pending.id, duration_ms=_ms(started))
-            return success_result(
-                ConfirmationOut.from_domain(parked.pending, already_waiting=not parked.created)
-            )
+            return on_pending(parked)
         except DomainError as exc:
             log.info("tool_error", code=exc.code, duration_ms=_ms(started))
             return error_result(exc)

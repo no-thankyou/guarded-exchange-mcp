@@ -83,6 +83,8 @@ class DecisionChannel(StrEnum):
     """Where a decision came from; always journaled (FR-42)."""
 
     CLI = "cli"
+    CLIENT_UI = "client_ui"
+    """The form in the AI client's own UI (MRTR, FR-47 (a)); trusted only where the policy says so (FR-42)."""
     AGENT = "mcp:agent"
     """The agent withdrew its own request (``cancel_confirmation``): never an approval."""
     SYSTEM = "system"

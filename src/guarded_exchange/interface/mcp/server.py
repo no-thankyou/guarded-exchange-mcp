@@ -12,6 +12,7 @@ from mcp.server import MCPServer
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 
+from guarded_exchange.application.client_ui_confirmation import ClientUiConfirmation
 from guarded_exchange.application.kill_switch import ActivateKillSwitch
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
@@ -20,6 +21,7 @@ from guarded_exchange.application.read_market import GetCandles, GetInstrumentRu
 from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.domain.policy import Permission
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, PrincipalProvider, ToolGate
+from guarded_exchange.interface.mcp.confirm_ui import ClientUiChannel
 from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
 from guarded_exchange.interface.mcp.tools import (
     account,
@@ -64,6 +66,8 @@ class UseCases:
     order_changes: OrderChangeUseCases
     confirmations: ConfirmationUseCases
     position_actions: PositionActionUseCases
+    client_ui: ClientUiConfirmation | None = None
+    """The client-UI confirmation channel; ``None``: off (ticket 020)."""
 
 
 def create_server(
@@ -74,6 +78,7 @@ def create_server(
     tool_permissions: Mapping[str, Permission] = TOOL_PERMISSIONS,
     token_verifier: TokenVerifier | None = None,
     auth: AuthSettings | None = None,
+    request_state_key: bytes | None = None,
 ) -> GuardedMCPServer:
     """``token_verifier``/``auth`` only for the remote mode (``http.create_http_server``)."""
     gate = ToolGate(use_cases.authorize, principal, tool_permissions)
@@ -84,7 +89,9 @@ def create_server(
         version=version,
         token_verifier=token_verifier,
         auth=auth,
+        request_state_key=request_state_key,
     )
+    client_ui = ClientUiChannel(use_cases.client_ui, principal)
     market.register(
         mcp,
         get_ticker=use_cases.get_ticker,
@@ -106,11 +113,13 @@ def create_server(
         principal=principal,
     )
     policy.register(mcp, use_cases.read_policy, principal)
-    trading.register(mcp, place_order=use_cases.place_order, principal=principal)
+    trading.register(mcp, client_ui=client_ui, place_order=use_cases.place_order, principal=principal)
     kill_switch.register(mcp, activate_kill_switch=use_cases.activate_kill_switch, principal=principal)
-    order_changes.register(mcp, use_cases=use_cases.order_changes, principal=principal)
+    order_changes.register(mcp, client_ui=client_ui, use_cases=use_cases.order_changes, principal=principal)
     confirmations.register(mcp, use_cases=use_cases.confirmations, principal=principal)
-    position_actions.register(mcp, use_cases=use_cases.position_actions, principal=principal)
+    position_actions.register(
+        mcp, client_ui=client_ui, use_cases=use_cases.position_actions, principal=principal
+    )
     return mcp
 
 
