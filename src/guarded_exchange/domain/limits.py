@@ -15,6 +15,7 @@ from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.order_changes import AmendPlan
 from guarded_exchange.domain.orders import OrderPlan
 from guarded_exchange.domain.policy import EffectivePolicy, InstrumentRef
+from guarded_exchange.domain.position_actions import LeveragePlan
 from guarded_exchange.domain.risk import RiskDirection
 from guarded_exchange.domain.users import Environment
 
@@ -69,6 +70,37 @@ def check_amend_limits(plan: AmendPlan, policy: EffectivePolicy, *, leverage: De
     )
 
 
+def check_leverage_limits(plan: LeveragePlan, policy: EffectivePolicy) -> None:
+    """A leverage increase faces the allowlist and the policy's maximum leverage (FR-14, FR-15, FR-43);
+    lowering it faces nothing."""
+    if plan.risk is RiskDirection.REDUCES:
+        return
+    action = plan.action
+    _check_allowlist(InstrumentRef(action.category, action.symbol), policy)
+    if action.leverage > policy.max_leverage:
+        raise LimitExceeded(
+            f"leverage x{canonical_decimal(action.leverage)} is above your limit of "
+            f"x{canonical_decimal(policy.max_leverage)}",
+            next_step="Do not retry with a higher value. Use a leverage within the limit, or tell the user; "
+            "only the admin can change the limit, outside the chat.",
+            details={
+                "limit": "max_leverage",
+                "allowed": canonical_decimal(policy.max_leverage),
+                "leverage": canonical_decimal(action.leverage),
+            },
+        )
+
+
+def _check_allowlist(ref: InstrumentRef, policy: EffectivePolicy) -> None:
+    if ref not in policy.allowlist:
+        allowed = ", ".join(str(item) for item in sorted(policy.allowlist)) or "none"
+        raise LimitExceeded(
+            f"{ref} is not in your allowed instruments ({allowed})",
+            next_step=_ADMIN_ONLY,
+            details={"limit": "allowlist", "instrument": str(ref)},
+        )
+
+
 def _check_increasing(
     ref: InstrumentRef,
     policy: EffectivePolicy,
@@ -78,13 +110,7 @@ def _check_increasing(
     price_basis: str,
     leverage: Decimal | None,
 ) -> None:
-    if ref not in policy.allowlist:
-        allowed = ", ".join(str(item) for item in sorted(policy.allowlist)) or "none"
-        raise LimitExceeded(
-            f"{ref} is not in your allowed instruments ({allowed})",
-            next_step=_ADMIN_ONLY,
-            details={"limit": "allowlist", "instrument": str(ref)},
-        )
+    _check_allowlist(ref, policy)
     maximum = policy.max_order_notional_usdt
     if notional > maximum:
         raise LimitExceeded(

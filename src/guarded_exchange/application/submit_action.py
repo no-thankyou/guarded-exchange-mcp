@@ -188,6 +188,10 @@ class _Market:
     symbol_position: SymbolPosition | None
 
 
+MarketView = _Market
+"""The market data of a ``place_order``-style decision, for actions that reuse its planning (ticket 014)."""
+
+
 @dataclass(frozen=True, slots=True)
 class _Claims:
     """The records a call holds. ``primary`` fences the call (its key, or its fingerprint without a

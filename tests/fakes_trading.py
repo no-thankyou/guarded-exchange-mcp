@@ -13,11 +13,12 @@ from guarded_exchange.domain.account import (
     OrderSide,
     OrderStatus,
     Page,
+    SymbolPosition,
 )
 from guarded_exchange.domain.credentials import ApiKeyPair
 from guarded_exchange.domain.instruments import Category
 from guarded_exchange.domain.order_changes import OrderAmendment
-from tests.fakes import InMemoryDatabase, make_order
+from tests.fakes import FakeTrading, InMemoryDatabase, make_order
 
 
 def plain_order(
@@ -157,3 +158,51 @@ class FakeOrderChanges:
         self.calls.append(call)
         if self.db is not None and self.db.open_transactions:
             self.calls_in_transaction += 1
+
+
+@dataclass
+class FakePositionActions:
+    """``PositionActions`` over a ``FakeTrading``'s positions: an accepted change is applied to the stored
+    position the way the exchange would, unless ``apply`` is false (accepted but not visible yet);
+    ``error`` makes the call raise (``apply_after_error``: the change happened anyway)."""
+
+    trading: FakeTrading
+    error: Exception | None = None
+    apply: bool = True
+    apply_after_error: bool = False
+    leverages: list[tuple[str, Decimal]] = field(default_factory=list)
+    stops: list[tuple[str, Decimal | None, Decimal | None]] = field(default_factory=list)
+    on_send: Callable[[], None] | None = None
+
+    async def set_leverage(self, keys: ApiKeyPair, symbol: str, leverage: Decimal) -> None:
+        self._sending("set_leverage", symbol)
+        self.leverages.append((symbol, leverage))
+        if self.apply and (self.error is None or self.apply_after_error):
+            state = self.trading.positions.get(symbol) or SymbolPosition(symbol, None, Decimal(10))
+            position = None if state.position is None else replace(state.position, leverage=leverage)
+            self.trading.positions[symbol] = replace(state, position=position, leverage=leverage)
+        if self.error is not None:
+            raise self.error
+
+    async def set_trading_stop(
+        self, keys: ApiKeyPair, symbol: str, take_profit: Decimal | None, stop_loss: Decimal | None
+    ) -> None:
+        self._sending("set_trading_stop", symbol)
+        self.stops.append((symbol, take_profit, stop_loss))
+        state = self.trading.positions.get(symbol)
+        if self.apply and (self.error is None or self.apply_after_error) and state and state.position:
+            position = replace(
+                state.position,
+                take_profit=state.position.take_profit if take_profit is None else take_profit,
+                stop_loss=state.position.stop_loss if stop_loss is None else stop_loss,
+            )
+            self.trading.positions[symbol] = replace(state, position=position)
+        if self.error is not None:
+            raise self.error
+
+    def _sending(self, *call: object) -> None:
+        self.trading.calls.append(call)
+        if self.trading.db is not None:
+            self.trading.audit_at_send.append([r.event_type for r in self.trading.db.all_audit()])
+        if self.on_send is not None:
+            self.on_send()

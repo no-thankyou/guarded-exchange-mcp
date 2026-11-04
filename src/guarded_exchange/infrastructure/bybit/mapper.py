@@ -1201,6 +1201,30 @@ def order_amend_body(amendment: OrderAmendment) -> dict[str, str | int | bool]:
     return body
 
 
+def set_leverage_body(symbol: str, leverage: Decimal) -> dict[str, str | int | bool]:
+    """``POST /v5/position/set-leverage``: one-way mode, so buy and sell leverage are the same."""
+    wire = _wire_decimal(leverage)
+    return {"category": "linear", "symbol": symbol, "buyLeverage": wire, "sellLeverage": wire}
+
+
+def trading_stop_body(
+    symbol: str, take_profit: Decimal | None, stop_loss: Decimal | None
+) -> dict[str, str | int | bool]:
+    """``POST /v5/position/trading-stop``: whole-position levels (``tpslMode=Full``), one-way mode,
+    only the levels being set (an omitted level stays as it is; ``"0"`` would remove it)."""
+    body: dict[str, str | int | bool] = {
+        "category": "linear",
+        "symbol": symbol,
+        "tpslMode": "Full",
+        "positionIdx": _ONE_WAY,
+    }
+    if take_profit is not None:
+        body["takeProfit"] = _wire_decimal(take_profit)
+    if stop_loss is not None:
+        body["stopLoss"] = _wire_decimal(stop_loss)
+    return body
+
+
 def require_changed_order(result: dict[str, Any], *, order_id: str) -> None:
     """``order/cancel`` and ``order/amend`` answer ``{orderId, orderLinkId}`` of the order they accepted
     the request for. Anything else after a successful ``retCode`` is ``OutcomeUnknown``: the exchange
