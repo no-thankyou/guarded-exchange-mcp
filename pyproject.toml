@@ -21,8 +21,13 @@ dependencies = [
 
 [project.scripts]
 guarded-exchange = "guarded_exchange.bootstrap:cli"
+guarded-agent = "guarded_agent.cli:main"
 
 [dependency-groups]
+agent = [
+    "anthropic>=2.3.0,<3",
+    "openai>=3.39.0,<4",
+]
 dev = [
     "ruff>=0.17.3",
     "mypy>=2.4.0",
@@ -40,12 +45,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/guarded_exchange"]
+packages = ["src/guarded_exchange", "agent/guarded_agent"]
+
+[tool.uv]
+default-groups = ["dev", "agent"]  # the agent client and evals (ADR-016) need the LLM SDKs
 
 [tool.ruff]
 line-length = 110
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "agent", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "N", "ASYNC", "S", "PT", "TID", "DTZ", "PL", "C4"]
@@ -58,19 +66,23 @@ ignore = [
 "tests/**" = ["S101", "PLR2004", "S603", "S607"]
 "spikes/**" = ["S101", "PLR2004", "PT018"]  # throwaway experiments run with pytest, not shipped
 
+[tool.ruff.lint.isort]
+known-first-party = ["evals", "tests"]
+
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
 [tool.mypy]
 strict = true
 python_version = "3.12"
-mypy_path = "src"
-files = ["src", "tests", "spikes"]
+mypy_path = "src:agent"
+files = ["src", "agent", "evals", "tests", "spikes"]
 plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 minversion = "9.0"
 testpaths = ["tests"]
+pythonpath = ["."]  # evals/ is a dev package next to tests/
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers -m 'not testnet'"
@@ -88,7 +100,7 @@ show_missing = true
 skip_covered = true
 
 [tool.importlinter]
-root_package = "guarded_exchange"
+root_packages = ["guarded_exchange", "guarded_agent"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -128,3 +140,9 @@ source_modules = ["guarded_exchange.application"]
 forbidden_modules = [
     "mcp", "mcp_types", "httpx2", "pydantic_settings", "typer", "sqlalchemy", "alembic", "aiosqlite", "cryptography",
 ]
+
+[[tool.importlinter.contracts]]
+name = "The agent client talks to the server only over MCP (ADR-016)"
+type = "forbidden"
+source_modules = ["guarded_agent"]
+forbidden_modules = ["guarded_exchange"]
