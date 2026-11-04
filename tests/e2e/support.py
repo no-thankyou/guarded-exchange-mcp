@@ -19,6 +19,11 @@ from guarded_exchange.application.order_changes import (
 )
 from guarded_exchange.application.policy import AuthorizeAccess, ReadPolicy
 from guarded_exchange.application.ports import UnitOfWorkFactory
+from guarded_exchange.application.position_actions import (
+    SubmitClosePosition,
+    SubmitSetLeverage,
+    SubmitSetTradingStop,
+)
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
 from guarded_exchange.application.read_history import GetOrderHistory, GetTrades
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
@@ -29,6 +34,7 @@ from guarded_exchange.domain.users import Environment
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, fixed_principal
 from guarded_exchange.interface.mcp.server import UseCases, create_server
 from guarded_exchange.interface.mcp.tools.order_changes import OrderChangeUseCases
+from guarded_exchange.interface.mcp.tools.position_actions import PositionActionUseCases
 from tests.fakes import (
     FakeAccount,
     FakeCipher,
@@ -40,7 +46,7 @@ from tests.fakes import (
     SequentialIds,
 )
 from tests.fakes_history import FakeHistory
-from tests.fakes_trading import FakeOrderChanges
+from tests.fakes_trading import FakeOrderChanges, FakePositionActions
 
 
 def use_cases(
@@ -53,6 +59,7 @@ def use_cases(
     trading: FakeTrading | None = None,
     key_reader: FakeKeyReader | None = None,
     changes: FakeOrderChanges | None = None,
+    position_actions: FakePositionActions | None = None,
 ) -> UseCases:
     """The MCP use cases wired to fakes, as the composition root wires the real adapters."""
     exchange, clock, account = exchange or FakeExchange(), clock or FakeClock(), account or FakeAccount()
@@ -85,6 +92,36 @@ def use_cases(
         ),
         activate_kill_switch=ActivateKillSwitch(db, clock),
         order_changes=order_change_use_cases(db, cipher, recheck, rules, clock, trading, changes),
+        position_actions=position_action_use_cases(
+            db, exchange, cipher, recheck, rules, clock, trading or FakeTrading(), position_actions
+        ),
+    )
+
+
+def position_action_use_cases(  # noqa: PLR0917 - the fakes the composition root would wire
+    db: UnitOfWorkFactory,
+    exchange: FakeExchange,
+    cipher: FakeCipher,
+    recheck: RecheckCredential,
+    rules: InstrumentRulesCache,
+    clock: FakeClock,
+    trading: FakeTrading,
+    actions: FakePositionActions | None,
+) -> PositionActionUseCases:
+    scope: dict[str, Any] = {"exchange": EXCHANGE_BYBIT, "environment": Environment.TESTNET}
+    credentials = RequireTradingCredential(db, cipher, recheck, clock, **scope)
+    common: dict[str, Any] = {
+        "trading": trading,
+        "clock": clock,
+        "ids": SequentialIds("pos"),
+        "reconnaissance_delay_s": 0,
+        **scope,
+    }
+    fake = actions or FakePositionActions(trading)
+    return PositionActionUseCases(
+        set_trading_stop=SubmitSetTradingStop(db, credentials, rules, actions=fake, **common),
+        close_position=SubmitClosePosition(db, credentials, rules, market=exchange, **common),
+        set_leverage=SubmitSetLeverage(db, credentials, actions=fake, **common),
     )
 
 
@@ -124,11 +161,21 @@ def server_for(
     clock: FakeClock | None = None,
     tool_permissions: Mapping[str, Permission] = TOOL_PERMISSIONS,
     changes: FakeOrderChanges | None = None,
+    position_actions: FakePositionActions | None = None,
 ) -> MCPServer[Any]:
     """The production server for principal ``user_id`` (``None``: nobody resolved)."""
     principal = fixed_principal(user_id) if user_id is not None else (lambda: None)
     return create_server(
-        use_cases(db, exchange, clock, account=account, cipher=cipher, trading=trading, changes=changes),
+        use_cases(
+            db,
+            exchange,
+            clock,
+            account=account,
+            cipher=cipher,
+            trading=trading,
+            changes=changes,
+            position_actions=position_actions,
+        ),
         principal=principal,
         tool_permissions=tool_permissions,
     )

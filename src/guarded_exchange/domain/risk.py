@@ -45,6 +45,11 @@ def classify_amend(
     return RiskDirection.REDUCES
 
 
+def classify_leverage(current: Decimal | None, new: Decimal) -> RiskDirection:
+    """FR-43: a higher leverage increases risk; so does one whose starting point is unknown (strict)."""
+    return RiskDirection.INCREASES if current is None or new > current else RiskDirection.REDUCES
+
+
 _REDUCING_SIDE = {PositionSide.LONG: OrderSide.SELL, PositionSide.SHORT: OrderSide.BUY}
 
 
