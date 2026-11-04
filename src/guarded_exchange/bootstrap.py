@@ -1,8 +1,8 @@
 """Composition root: the only module that reads configuration and wires adapters to use cases."""
 
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version
@@ -29,10 +29,12 @@ from guarded_exchange.application.auth import (
     PrincipalUnavailable,
     ResolveLocalPrincipal,
 )
+from guarded_exchange.application.confirmation import ConfirmationSupport
 from guarded_exchange.application.credentials import (
     AddCredential,
     DeleteCredential,
     ListCredentials,
+    OpenCredentialKeys,
     ReadCredential,
     RecheckActiveCredentials,
     RecheckCredential,
@@ -40,6 +42,7 @@ from guarded_exchange.application.credentials import (
     RequireTradingCredential,
     StoredCredential,
 )
+from guarded_exchange.application.execute_confirmed import ConfirmablePath, ConfirmedActionExecutor
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.kill_switch import ActivateKillSwitch, KillSwitchChange, SetKillSwitch
 from guarded_exchange.application.order_changes import (
@@ -65,8 +68,17 @@ from guarded_exchange.application.position_actions import (
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
 from guarded_exchange.application.read_history import GetOrderHistory, GetTrades
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
+from guarded_exchange.application.resolve_confirmation import (
+    CancelConfirmation,
+    GetConfirmationStatus,
+    ListConfirmations,
+    ResolveConfirmation,
+    ShowConfirmation,
+)
 from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.config import ConfigError, Settings, load_settings
+from guarded_exchange.domain.actions import ActionKind
+from guarded_exchange.domain.confirmation import PendingConfirmation
 from guarded_exchange.domain.credentials import EXCHANGE_BYBIT, ApiKeyPair, Credential
 from guarded_exchange.domain.errors import DomainError
 from guarded_exchange.domain.kill_switch import KillSwitchActor
@@ -88,6 +100,7 @@ from guarded_exchange.infrastructure.master_key import FileMasterKeyStore, Maste
 from guarded_exchange.infrastructure.tokens import SecretTokenGenerator
 from guarded_exchange.interface.cli.main import (
     AdminCommands,
+    ConfirmCommands,
     InitReport,
     KeyCommands,
     PolicyCommands,
@@ -98,6 +111,7 @@ from guarded_exchange.interface.mcp.access import PrincipalProvider, fixed_princ
 from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
 from guarded_exchange.interface.mcp.http import create_http_server, http_app, serve_http
 from guarded_exchange.interface.mcp.server import UseCases, create_server, serve_stdio
+from guarded_exchange.interface.mcp.tools.confirmations import ConfirmationUseCases
 from guarded_exchange.interface.mcp.tools.order_changes import OrderChangeUseCases
 from guarded_exchange.interface.mcp.tools.position_actions import PositionActionUseCases
 
@@ -134,6 +148,9 @@ def build_use_cases(
     exchange, clock = _bybit_client(settings, http), SystemClock()
     rules = InstrumentRulesCache(exchange, clock, ttl=timedelta(seconds=settings.instrument_rules_ttl_s))
     environment = settings.bybit_environment
+    confirmations = ConfirmationSupport(
+        cli_enabled=settings.confirm_cli_enabled, open_keys=OpenCredentialKeys(uow, cipher)
+    )
     read_key = ReadCredential(uow, cipher, clock, exchange=EXCHANGE_BYBIT, environment=environment)
     trade_key = RequireTradingCredential(
         uow,
@@ -167,15 +184,46 @@ def build_use_cases(
             environment=environment,
             send_deadline_s=settings.order_send_deadline_s,
             fill_read_deadline_s=settings.order_fill_read_deadline_s,
+            confirmations=confirmations,
         ),
         activate_kill_switch=ActivateKillSwitch(uow, clock),
         order_changes=_order_changes(
-            settings, uow, trade_key=trade_key, rules=rules, exchange=exchange, clock=clock
+            settings,
+            uow,
+            trade_key=trade_key,
+            rules=rules,
+            exchange=exchange,
+            clock=clock,
+            confirmations=confirmations,
+        ),
+        confirmations=ConfirmationUseCases(
+            get_status=GetConfirmationStatus(uow, clock), cancel=CancelConfirmation(uow, clock)
         ),
         position_actions=_position_actions(
-            settings, uow, trade_key=trade_key, rules=rules, exchange=exchange, clock=clock
+            settings,
+            uow,
+            trade_key=trade_key,
+            rules=rules,
+            exchange=exchange,
+            clock=clock,
+            confirmations=confirmations,
         ),
     )
+
+
+def confirmable_paths(use_cases: UseCases) -> Mapping[ActionKind, ConfirmablePath]:
+    """Every action that can be parked for a human, by kind: what the executor runs once it is approved.
+    A trading tool added to ``UseCases`` joins here to get confirmation (tickets 016, 017)."""
+    changes = use_cases.order_changes
+    return {
+        ActionKind.PLACE_ORDER: use_cases.place_order,
+        ActionKind.CANCEL_ORDER: changes.cancel_order,
+        ActionKind.AMEND_ORDER: changes.amend_order,
+        ActionKind.CANCEL_ALL_ORDERS: changes.cancel_all_orders,
+        ActionKind.SET_TRADING_STOP: use_cases.position_actions.set_trading_stop,
+        ActionKind.CLOSE_POSITION: use_cases.position_actions.close_position,
+        ActionKind.SET_LEVERAGE: use_cases.position_actions.set_leverage,
+    }
 
 
 def _order_changes(
@@ -186,6 +234,7 @@ def _order_changes(
     rules: InstrumentRulesCache,
     exchange: BybitClient,
     clock: SystemClock,
+    confirmations: ConfirmationSupport,
 ) -> OrderChangeUseCases:
     """Cancel, amend and cancel-all (ticket 013) on the same adapter and bounds as ``place_order``."""
     common: dict[str, Any] = {
@@ -196,6 +245,7 @@ def _order_changes(
         "environment": settings.bybit_environment,
         "send_deadline_s": settings.order_send_deadline_s,
         "read_back_deadline_s": settings.order_fill_read_deadline_s,
+        "confirmations": confirmations,
     }
     return OrderChangeUseCases(
         cancel_order=SubmitCancelOrder(uow, trade_key, **common),
@@ -212,6 +262,7 @@ def _position_actions(
     rules: InstrumentRulesCache,
     exchange: BybitClient,
     clock: SystemClock,
+    confirmations: ConfirmationSupport,
 ) -> PositionActionUseCases:
     """SL/TP, close and leverage (ticket 014) on the same adapter and bounds as ``place_order``."""
     common: dict[str, Any] = {
@@ -221,6 +272,7 @@ def _position_actions(
         "exchange": EXCHANGE_BYBIT,
         "environment": settings.bybit_environment,
         "send_deadline_s": settings.order_send_deadline_s,
+        "confirmations": confirmations,
     }
     return PositionActionUseCases(
         set_trading_stop=SubmitSetTradingStop(
@@ -263,6 +315,7 @@ async def app_server(
     principal: PrincipalProvider | None = None,
     authenticator: Authenticator | None = None,
     transport: httpx2.AsyncBaseTransport | None = None,
+    start_executor: bool = False,
 ) -> AsyncIterator[GuardedMCPServer]:
     """Build a fully wired server and close its resources on exit.
 
@@ -270,17 +323,35 @@ async def app_server(
     ``authenticator`` (remote mode: the bearer token of each HTTP request, ADR-004).
     ``cipher`` opens the users' exchange keys for account reads.
     ``transport`` is a test seam (``httpx2.MockTransport``); production passes ``None``.
+    ``start_executor``: also run the ``ConfirmedActionExecutor`` for as long as the server lives (the
+    serve commands do; it executes what a human approved, FR-47 (b)).
     """
     if (principal is None) == (authenticator is None):
         raise ValueError("pass exactly one of principal (stdio) or authenticator (http)")
-    async with _exchange_http(settings, transport) as http:
+    async with AsyncExitStack() as stack:
+        http = await stack.enter_async_context(_exchange_http(settings, transport))
         use_cases = build_use_cases(settings, http, uow, cipher)
+        if start_executor:
+            executor = ConfirmedActionExecutor(uow, SystemClock(), confirmable_paths(use_cases))
+            await stack.enter_async_context(_executing(executor))
         if authenticator is not None:
             yield create_http_server(
                 use_cases, authenticator, public_url=public_url(settings), version=_version()
             )
         elif principal is not None:
             yield create_server(use_cases, principal=principal, version=_version())
+
+
+@asynccontextmanager
+async def _executing(executor: ConfirmedActionExecutor) -> AsyncIterator[None]:
+    """Run the executor beside the server. On the way out it is cancelled; an execution that already
+    took its CAS finishes first (its send and outcome are shielded)."""
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(executor.run)
+        try:
+            yield
+        finally:
+            tasks.cancel_scope.cancel()
 
 
 @asynccontextmanager
@@ -450,7 +521,11 @@ async def _serve_stdio(settings: Settings, keyring: Keyring) -> None:
         principal = await ResolveLocalPrincipal(uow)(settings.local_user)
         structlog.get_logger(__name__).info("principal_resolved", user_id=principal.id, user=principal.name)
         async with app_server(
-            settings, uow=uow, cipher=AesGcmCredentialCipher(keyring), principal=fixed_principal(principal.id)
+            settings,
+            uow=uow,
+            cipher=AesGcmCredentialCipher(keyring),
+            principal=fixed_principal(principal.id),
+            start_executor=True,
         ) as mcp:
             await _serve_with_recheck(lambda: serve_stdio(mcp), settings, uow, keyring)
 
@@ -463,6 +538,7 @@ async def _serve_http(settings: Settings, keyring: Keyring) -> None:
             uow=uow,
             cipher=AesGcmCredentialCipher(keyring),
             authenticator=AuthenticateBearerToken(uow),
+            start_executor=True,
         ) as mcp,
     ):
         app = http_app(
@@ -565,6 +641,35 @@ def set_kill_switch(
     )
 
 
+# --- confirmations (CLI channel) ---------------------------------------------------------
+
+
+def list_confirmations(env_file: Path | None) -> Sequence[PendingConfirmation]:
+    return _with_storage(env_file, lambda uow, s: ListConfirmations(uow, SystemClock())())
+
+
+def show_confirmation(env_file: Path | None, pending_id: str) -> PendingConfirmation:
+    return _with_storage(env_file, lambda uow, s: ShowConfirmation(uow)(pending_id))
+
+
+def approve_confirmation(env_file: Path | None, pending_id: str) -> PendingConfirmation:
+    return _with_storage(
+        env_file,
+        lambda uow, s: ResolveConfirmation(uow, SystemClock(), cli_enabled=s.confirm_cli_enabled).approve(
+            pending_id
+        ),
+    )
+
+
+def reject_confirmation(env_file: Path | None, pending_id: str) -> PendingConfirmation:
+    return _with_storage(
+        env_file,
+        lambda uow, s: ResolveConfirmation(uow, SystemClock(), cli_enabled=s.confirm_cli_enabled).reject(
+            pending_id
+        ),
+    )
+
+
 # --- users and access tokens (remote mode) ------------------------------------------------
 
 
@@ -659,4 +764,10 @@ def cli() -> None:
             create_user=create_user, list_users=list_users, issue_token=issue_token, revoke_token=revoke_token
         ),
         KeyCommands(add=add_key, replace=replace_key, delete=delete_key, show=show_keys),
+        ConfirmCommands(
+            list=list_confirmations,
+            show=show_confirmation,
+            approve=approve_confirmation,
+            reject=reject_confirmation,
+        ),
     )()

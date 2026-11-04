@@ -286,7 +286,8 @@ async def test_the_tool_offers_an_idempotency_key_and_says_a_new_attempt_needs_a
     assert "idempotency_key" not in tool.input_schema["required"]
     assert "needs a new key" in (tool.description or "")
     assert tool.output_schema is not None
-    assert "result_source" in tool.output_schema["properties"]
+    assert "result_source" in tool.output_schema["$defs"]["PlaceOrderOut"]["properties"]
+    assert tool.output_schema["type"] == "object"  # FR-47 (b): or a pending confirmation
 
 
 @pytest.mark.req("FR-26", "FR-28")

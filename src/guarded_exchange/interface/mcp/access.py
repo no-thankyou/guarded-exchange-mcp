@@ -38,6 +38,8 @@ TOOL_PERMISSIONS: Final[Mapping[str, Permission]] = {
     "cancel_order": Permission.TRADE,
     "amend_order": Permission.TRADE,
     "cancel_all_orders": Permission.TRADE,
+    "get_confirmation_status": Permission.READ,
+    "cancel_confirmation": Permission.READ,  # withdraws the user's own request: never an approval
     "set_trading_stop": Permission.TRADE,
     "close_position": Permission.TRADE,
     "set_leverage": Permission.TRADE,

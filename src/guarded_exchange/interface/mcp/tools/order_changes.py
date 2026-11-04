@@ -23,6 +23,11 @@ from guarded_exchange.domain.order_changes import CANCEL_ALL_MAX
 from guarded_exchange.interface.mcp.access import PrincipalProvider
 from guarded_exchange.interface.mcp.results import run_tool
 from guarded_exchange.interface.mcp.schemas_order_changes import AmendOrderOut, CancelAllOut, CancelOrderOut
+from guarded_exchange.interface.mcp.schemas_responses import (
+    AmendOrderResponse,
+    CancelAllResponse,
+    CancelOrderResponse,
+)
 from guarded_exchange.interface.mcp.tools.market import CategoryArg, SymbolArg
 from guarded_exchange.interface.mcp.tools.trading import AmountStr, client_description
 
@@ -100,7 +105,7 @@ def register(mcp: MCPServer[Any], *, use_cases: OrderChangeUseCases, principal: 
         order_id: OrderIdArg,
         ctx: Context,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, CancelOrderOut]:
+    ) -> Annotated[CallToolResult, CancelOrderResponse]:
         async def call() -> CancelOrderOut:
             request = CancelOrderInput(symbol, category, order_id, idempotency_key)
             result = await use_cases.cancel_order(principal(), request, client_description(ctx))
@@ -119,7 +124,7 @@ def register(mcp: MCPServer[Any], *, use_cases: OrderChangeUseCases, principal: 
         qty: NewQtyArg = None,
         price: NewPriceArg = None,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, AmendOrderOut]:
+    ) -> Annotated[CallToolResult, AmendOrderResponse]:
         async def call() -> AmendOrderOut:
             request = AmendOrderInput(symbol, category, order_id, qty, price, idempotency_key)
             result = await use_cases.amend_order(principal(), request, client_description(ctx))
@@ -138,7 +143,7 @@ def register(mcp: MCPServer[Any], *, use_cases: OrderChangeUseCases, principal: 
         category: CategoryArg,
         ctx: Context,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, CancelAllOut]:
+    ) -> Annotated[CallToolResult, CancelAllResponse]:
         async def call() -> CancelAllOut:
             request = CancelAllOrdersInput(symbol, category, idempotency_key)
             result = await use_cases.cancel_all_orders(principal(), request, client_description(ctx))

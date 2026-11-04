@@ -13,12 +13,19 @@ canonical arguments, the exchange reads and the plan, the policy check under the
 is sent and its outcome found out. ``SubmitPlaceOrder`` is the order (ticket 011/012); cancel, amend
 and cancel-all are in ``order_changes`` (ticket 013).
 
+Confirmation (tickets 016, 017): if the policy requires it, the decision parks the action as a
+``PendingConfirmation`` instead of sending (``ConfirmationPending`` is raised to the caller), when the
+admin enabled a trusted channel; otherwise the action is refused with ``confirmation_channel_unavailable``
+(FR-25, fail closed). A human approves outside MCP; the ``ConfirmedActionExecutor`` then calls
+``run_confirmed``: the same reads, the same checks under ``lock_user`` with the policy, key and kill
+switch **as they are now**, held to the sizes and price bound that were shown (FR-48), and the same
+``_execute``. Hooks for an action to be confirmable: ``_confirm_notional``, ``_parse_payload`` and,
+when its sizes can change by execution time, ``_confirmed_plan``.
+
 Network I/O never happens inside a database transaction (D-10): everything the decision needs from
 the exchange is read first; the decision and its journal record are one transaction, so a refusal
 (FR-17) or an attempt is recorded exactly when it is decided. The attempt is committed before the
-request leaves, the outcome after the answer (ADR-008). Confirmation by a human is not built yet:
-if the policy requires it, the action is refused with ``confirmation_channel_unavailable`` and
-nothing is sent (FR-25, fail closed); trading without confirmation needs the admin to say so.
+request leaves, the outcome after the answer (ADR-008).
 
 Repeats (FR-26, ADR-014): a call claims its idempotency record before anything else touches the
 exchange; a repeat with the same key gets the first answer (or "still in progress"), never a second
@@ -27,16 +34,26 @@ call ends before its decision or with a transient failure; from the decision on 
 stored (``domain.idempotency.keeps_record``). A new attempt needs a new key.
 """
 
+import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any, Final, Protocol
 
 import anyio
 import anyio.lowlevel
 import structlog
 
+from guarded_exchange.application.confirmation import (
+    ConfirmationPending,
+    ConfirmationSupport,
+    PendingRequest,
+    decided_event,
+    earlier_pending,
+    open_pending,
+)
 from guarded_exchange.application.credentials import RequireTradingCredential
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.order_results import (
@@ -54,9 +71,22 @@ from guarded_exchange.application.ports import (
     UnitOfWork,
     UnitOfWorkFactory,
 )
-from guarded_exchange.domain.account import SymbolPosition
-from guarded_exchange.domain.actions import ActionKind, OrderKind, PlaceOrder, parse_place_order
+from guarded_exchange.domain.account import OrderSide, SymbolPosition
+from guarded_exchange.domain.actions import (
+    ActionKind,
+    ClosePosition,
+    OrderKind,
+    PlaceOrder,
+    parse_place_order,
+)
 from guarded_exchange.domain.audit import AuditEvent, AuditEventType, ClientDescription, JsonValue
+from guarded_exchange.domain.confirmation import (
+    ConfirmationStatus,
+    DecisionChannel,
+    PendingConfirmation,
+    action_digest,
+    intact,
+)
 from guarded_exchange.domain.credentials import ApiKeyPair, key_replaced_or_deleted
 from guarded_exchange.domain.errors import (
     CredentialsPermissionsChanged,
@@ -67,9 +97,11 @@ from guarded_exchange.domain.errors import (
     InstrumentRuleViolation,
     InvalidParams,
     OutcomeUnknown,
+    PendingLimitReached,
     PermissionDenied,
     PositionNotFound,
     RateLimited,
+    RiskDirectionChanged,
 )
 from guarded_exchange.domain.idempotency import (
     FINGERPRINT_WINDOW,
@@ -94,11 +126,13 @@ from guarded_exchange.domain.limits import (
     require_trading_environment,
     requires_confirmation,
 )
+from guarded_exchange.domain.money import exact_product
 from guarded_exchange.domain.orders import (
     BestPrices,
     OrderFill,
     OrderPlan,
     OrderRequest,
+    OrderTimeInForce,
     PlacedOrder,
     PriceBand,
     plan_order,
@@ -121,6 +155,8 @@ log = structlog.get_logger(__name__)
 
 AGENT_ACTOR: Final = "mcp:agent"
 """The journal's actor for actions an AI agent asked for (the user is the chain)."""
+EXECUTOR_ACTOR: Final = "system:executor"
+"""The journal's actor for a confirmed action the server executes after a human approved it."""
 
 INPUT_ERRORS: Final = (InvalidParams, InstrumentRuleViolation, PositionNotFound)
 """Errors in the request itself: answered before the decision and not journaled (PLAN, ticket 011 (5))."""
@@ -130,6 +166,7 @@ TRANSIENT_ERRORS: Final = (
     RateLimited,
     ExchangeCredentialsInvalid,
     CredentialsPermissionsChanged,
+    PendingLimitReached,
 )
 """Refusals about conditions, not about the action: once they are fixed, the same call may pass, so
 its idempotency record is released instead of answering it from storage (``keeps_record``)."""
@@ -217,6 +254,9 @@ class Attempt:
     environment: Environment
     client: ClientDescription | None
     claims: _Claims
+    confirmation_id: str | None = None
+    """Set when a human confirmed the action: ``action_id`` is the confirmation's id, there are no claims,
+    and the outcome also settles the confirmation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +284,9 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
         reconnaissance_deadline_s: float = DEFAULT_RECONNAISSANCE_DEADLINE_S,
         fingerprint_window: timedelta = FINGERPRINT_WINDOW,
         fill_read_deadline_s: float = DEFAULT_FILL_READ_DEADLINE_S,
+        confirmations: ConfirmationSupport | None = None,
     ) -> None:
+        self._confirmations = confirmations
         self._uow = uow
         self._credentials = credentials
         self._clock = clock
@@ -317,6 +359,32 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
         """The client order id of an action that creates an order; ``None`` for the others."""
         return None
 
+    def _confirm_notional(self, action: A, plan: P) -> Decimal | None:
+        """The value the confirmation threshold (FR-19) is compared with (``0``: only the action kind
+        decides); ``None``: the action cannot be confirmed yet, and its own ``_check`` refuses."""
+        return None
+
+    def _parse_payload(self, payload: Mapping[str, Any]) -> A:
+        """The action from its stored ``_payload`` (the confirmed path). Needed by confirmable actions."""
+        raise NotImplementedError(f"{type(self).__name__} cannot rebuild its action from a confirmation")
+
+    def _confirmed_plan(self, action: A, market: M, policy: EffectivePolicy, shown: Mapping[str, Any]) -> P:
+        """The plan to execute at confirmation time (FR-48): checked against the **current** policy and
+        market, and held to what was ``shown`` (never more than shown, never a worse price). Default: the
+        ordinary check, for actions whose plan cannot differ from what was shown."""
+        return self._check(action, market, policy)
+
+    async def _reconcile(
+        self, pending: PendingConfirmation, action: A
+    ) -> tuple[ConfirmationStatus, dict[str, JsonValue]]:
+        """FR-27: what became of an execution nobody finished (a crash). Read, never resend. Default:
+        unknown, with a hint. Raise to leave it ``executing`` and try again later."""
+        return ConfirmationStatus.UNKNOWN, {
+            "status": "unknown",
+            "reconnaissance": "not_attempted",
+            "hint": "the server stopped while executing this; check get_open_orders and get_positions",
+        }
+
     def _superseded(self, attempt: Attempt, holder: IdempotencyRecord | None) -> OutcomeUnknown:
         """The call's record expired before its decision: it sends nothing."""
         details = {"reason": "superseded"}
@@ -372,7 +440,7 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
             except BaseException:  # the decision did not commit: nothing journaled, nothing sent
                 await self._try_release(claims)
                 raise
-        if isinstance(decided, DomainError):
+        if isinstance(decided, DomainError | ConfirmationPending):
             raise decided
         return await self._execute(attempt, decided, cleared.keys)
 
@@ -559,9 +627,9 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
 
     # --- the decision: one write transaction ---------------------------------------------------
 
-    async def _decide(self, attempt: Attempt, action: A, market: M) -> P | DomainError:
-        """Refusal or plan, journaled in the same transaction that decided it (FR-17, ADR-008); the
-        idempotency record moves to ``sent`` (or gets the refusal) in it too."""
+    async def _decide(self, attempt: Attempt, action: A, market: M) -> P | DomainError | ConfirmationPending:
+        """Refusal, plan or parked confirmation, journaled in the same transaction that decided it
+        (FR-17, ADR-008); the idempotency record moves to ``sent`` (or gets the refusal) in it too."""
         async with self._uow(write=True) as uow:
             await uow.lock_user(attempt.user_id)
             now = self._clock.now()
@@ -584,6 +652,12 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
                 )
                 await self._settle(uow, attempt.claims, refusal_outcome(refusal), refusal)
                 return refusal
+            if isinstance(plan, ConfirmationPending):
+                # Parked, nothing sent: the key is free again; a repeat meets the pending confirmation
+                # (by key or by digest, D-20 (2)) instead of an idempotency record.
+                for record in attempt.claims.held():
+                    await uow.idempotency.release(record)
+                return plan
             await uow.audit.append(attempt.user_id, self._attempted(attempt, action, plan), self._clock.now())
             return plan
 
@@ -599,7 +673,9 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
         if held.held_by(shadow.action_id):
             await uow.idempotency.mark_sent(fresh, now)
 
-    async def _decide_locked(self, uow: UnitOfWork, attempt: Attempt, action: A, market: M) -> P:
+    async def _decide_locked(
+        self, uow: UnitOfWork, attempt: Attempt, action: A, market: M
+    ) -> P | ConfirmationPending:
         # Everything stored may have changed since the checks above (D-8): access, key, policy.
         user = await active_principal(uow, attempt.user_id)
         if user is None:
@@ -613,7 +689,49 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
         # FR-16, as of now (D-8): the switch may have been turned on since the early check.
         require_allowed(policy.kill_switch, self._risk(action, market), action.kind)
         await self._guard_locked(uow, attempt, action, market)
-        return self._check(action, market, policy)
+        plan = self._check(action, market, policy)
+        return await self._confirm_if_required(uow, attempt, action, market, policy, plan)
+
+    async def _confirm_if_required(  # noqa: PLR0917 - the decision's whole context
+        self,
+        uow: UnitOfWork,
+        attempt: Attempt,
+        action: A,
+        market: M,
+        policy: EffectivePolicy,
+        plan: P,
+    ) -> P | ConfirmationPending:
+        """FR-19, FR-25, FR-47 (b): the plan itself, or the action parked for a human."""
+        notional = self._confirm_notional(action, plan)
+        if notional is None:
+            return plan
+        support = self._confirmations
+        primary = attempt.claims.primary
+        key = primary.key if primary is not None and primary.kind is KeyKind.EXPLICIT else None
+        if support is not None:  # a repeat meets its earlier confirmation whatever the rule says now
+            digest = action_digest(
+                action.kind, self._payload(action), attempt.environment, attempt.credential_id
+            )
+            earlier = await earlier_pending(uow, attempt.user_id, key, digest, self._clock.now())
+            if earlier is not None:
+                return ConfirmationPending(earlier, created=False)
+        if not requires_confirmation(policy, action.kind, notional):
+            return plan
+        if support is None or not support.channel_available:
+            raise no_confirmation_channel(action.kind)  # fail closed, nothing is parked
+        request = PendingRequest(
+            pending_id=attempt.action_id,
+            user_id=attempt.user_id,
+            credential_id=attempt.credential_id,
+            environment=attempt.environment,
+            tool=action.kind,
+            action=self._payload(action),
+            risk=self._risk(action, market),
+            shown=self._attempt_details(plan),
+            idempotency_key=key,
+            client=attempt.client,
+        )
+        return await open_pending(uow, request, policy, self._clock.now(), actor=self._actor)
 
     # --- sending and the outcome ----------------------------------------------------------------
 
@@ -648,15 +766,19 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
         payload: dict[str, JsonValue] = {"action_id": attempt.action_id}
         if attempt.client_order_id is not None:
             payload["client_order_id"] = attempt.client_order_id
+        if attempt.confirmation_id is not None:
+            payload["confirmation_id"] = attempt.confirmation_id
         payload.update(outcome)
         try:
             async with self._uow(write=True) as uow:
                 await uow.audit.append(
                     attempt.user_id,
-                    AuditEvent(AuditEventType.ORDER_OUTCOME, self._actor, payload),
+                    AuditEvent(AuditEventType.ORDER_OUTCOME, self._actor_of(attempt), payload),
                     self._clock.now(),
                 )
                 await self._settle(uow, attempt.claims, kind, answer)
+                if attempt.confirmation_id is not None:
+                    await self._finish_confirmation(uow, attempt, kind, payload, answer)
         except Exception:
             log.exception(
                 "order_outcome_not_recorded",
@@ -681,6 +803,31 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
                 continue
             expires_at = expiry_when_done(record, self._clock.now(), self._fingerprint_window, outcome)
             await uow.idempotency.finish(record, status, self._store(answer), expires_at)
+
+    async def _finish_confirmation(
+        self,
+        uow: UnitOfWork,
+        attempt: Attempt,
+        kind: Outcome,
+        outcome: Mapping[str, JsonValue],
+        answer: R | DomainError,
+    ) -> None:
+        """The outcome of a confirmed action settles its confirmation in the same transaction."""
+        status = {
+            Outcome.ACCEPTED: ConfirmationStatus.EXECUTED,
+            Outcome.UNKNOWN: ConfirmationStatus.UNKNOWN,
+        }.get(kind, ConfirmationStatus.FAILED)
+        result: dict[str, JsonValue] = {"outcome": outcome, "answer": self._store(answer)}
+        await uow.confirmations.transition(
+            attempt.action_id,
+            expected=frozenset({ConfirmationStatus.EXECUTING}),
+            to=status,
+            at=self._clock.now(),
+            result=result,
+        )
+
+    def _actor_of(self, attempt: Attempt) -> str:
+        return EXECUTOR_ACTOR if attempt.confirmation_id is not None else self._actor
 
     async def _try_release(self, claims: _Claims) -> None:
         held = claims.held()
@@ -707,19 +854,219 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
         }
         if attempt.client_order_id is not None:
             base["client_order_id"] = attempt.client_order_id
+        if attempt.confirmation_id is not None:
+            base["confirmation_id"] = attempt.confirmation_id
         return base
 
     def _refused(self, attempt: Attempt, action: A, refusal: DomainError) -> AuditEvent:
         payload = {**self._base(attempt, action), "code": refusal.code, "details": dict(refusal.details)}
-        return AuditEvent(AuditEventType.ORDER_REFUSED, self._actor, payload)
+        return AuditEvent(AuditEventType.ORDER_REFUSED, self._actor_of(attempt), payload)
 
     def _attempted(self, attempt: Attempt, action: A, plan: P) -> AuditEvent:
-        payload = {
-            **self._base(attempt, action),
-            "decision": "allowed_without_confirmation",
-            **self._attempt_details(plan),
+        decision = "allowed_without_confirmation" if attempt.confirmation_id is None else "confirmed"
+        payload = {**self._base(attempt, action), "decision": decision, **self._attempt_details(plan)}
+        return AuditEvent(AuditEventType.ORDER_ATTEMPT, self._actor_of(attempt), payload)
+
+    # --- a confirmed action: executed by the server after a human approved it (tickets 016, 017) ---
+
+    async def run_confirmed(self, pending: PendingConfirmation) -> None:
+        """Execute one ``approved`` confirmation, exactly once, or record why not (FR-48, D-8).
+
+        Everything is decided again as of now: the reads happen first (D-10), then one write transaction
+        under ``lock_user`` re-checks access, the credential, the kill switch, the policy and limits,
+        holds the action to what was shown and takes the CAS ``approved -> executing``; only the winner
+        sends. The send and its outcome are shielded: once ``executing`` is committed the outcome is
+        always recorded. A failure of a transient kind before that leaves it ``approved`` for the next
+        scan, within the approval deadline (D-3).
+        """
+        attempt = Attempt(
+            user_id=pending.user_id,
+            action_id=pending.id,
+            client_order_id=self._client_order_id(pending.id),
+            credential_id=pending.credential_id,
+            environment=pending.environment,
+            client=None,
+            claims=_Claims(),
+            confirmation_id=pending.id,
+        )
+        try:
+            action = self._parse_payload(pending.action)
+            user = await self._principal(pending.user_id)
+            policy = await self._authorize(user)
+            cleared = await self._credentials(user.id)
+            if cleared.credential.id != pending.credential_id:
+                raise key_replaced_or_deleted()
+            market = await self._read(action, cleared.keys, policy)
+        except (ExchangeUnavailable, RateLimited) as retry:  # the exchange, not the action: try again
+            log.warning("confirmed_action_postponed", confirmation_id=pending.id, code=retry.code)
+            return
+        except DomainError as refusal:
+            await self._end_confirmed(pending.id, attempt, refusal, stage="pre_check")
+            return
+        with anyio.CancelScope(shield=True):
+            decided = await self._decide_confirmed(attempt, action, market)
+            if decided is None:
+                return
+            with contextlib.suppress(DomainError):  # recorded by ``_execute`` (journal and confirmation)
+                await self._execute(attempt, decided, cleared.keys)
+
+    async def _decide_confirmed(self, attempt: Attempt, action: A, market: M) -> P | None:
+        """The decision of ``run_confirmed``: the plan to send (confirmation now ``executing``), or
+        ``None`` (not ours any more, expired after approval, or refused and recorded)."""
+        async with self._uow(write=True) as uow:
+            await uow.lock_user(attempt.user_id)
+            now = self._clock.now()
+            current = await uow.confirmations.get(attempt.action_id)
+            if current is None or current.status is not ConfirmationStatus.APPROVED:
+                return None  # cancelled, taken by another executor, ...
+            deadline = current.approval_deadline
+            if deadline is not None and now > deadline:  # D-3: too late to start; not a price decision
+                if await uow.confirmations.transition(
+                    current.id,
+                    expected=frozenset({ConfirmationStatus.APPROVED}),
+                    to=ConfirmationStatus.EXPIRED_AFTER_APPROVAL,
+                    at=now,
+                    channel=DecisionChannel.SYSTEM,
+                ):
+                    event = decided_event(
+                        current,
+                        ConfirmationStatus.EXPIRED_AFTER_APPROVAL,
+                        DecisionChannel.SYSTEM,
+                        EXECUTOR_ACTOR,
+                        approved_at=current.approved_at,
+                    )
+                    await uow.audit.append(current.user_id, event, now)
+                return None
+            try:
+                plan = await self._recheck_locked(uow, current, attempt, action, market)
+            except DomainError as refusal:
+                await self._refuse_in(uow, current, attempt, refusal, stage="recheck")
+                return None
+            won = await uow.confirmations.transition(
+                current.id,
+                expected=frozenset({ConfirmationStatus.APPROVED}),
+                to=ConfirmationStatus.EXECUTING,
+                at=now,
+            )
+            if not won:
+                return None
+            await uow.audit.append(attempt.user_id, self._attempted(attempt, action, plan), now)
+            return plan
+
+    async def _recheck_locked(
+        self, uow: UnitOfWork, current: PendingConfirmation, attempt: Attempt, action: A, market: M
+    ) -> P:
+        """FR-48, D-8, as of now and under ``lock_user``: what was recorded is intact (FR-22), the user
+        and environment, the same credential, the profile, the kill switch for the risk **now**, the
+        action's own guard, and then the plan held to what was shown."""
+        if not intact(current):
+            raise PermissionDenied(
+                "the stored confirmation does not match its recorded digest; it was not executed",
+                next_step="Do not retry. Tell the user: the confirmation record was altered.",
+                details={"reason": "confirmation_tampered"},
+            )
+        user = await active_principal(uow, current.user_id)
+        if user is None:
+            raise no_access()
+        self._require_environment(user)
+        if user.environment is not current.environment:
+            raise PermissionDenied(
+                "the account moved to another environment after the confirmation was requested",
+                next_step="Do not retry. Request the action again in the current environment.",
+                details={"reason": "environment_changed"},
+            )
+        stored = await uow.credentials.get_active(user.id, self._exchange, user.environment)
+        if stored is None or stored.id != current.credential_id:
+            raise key_replaced_or_deleted()
+        policy = (await load_policy_view(uow, user)).effective
+        require_permission(policy, Permission.TRADE)
+        risk = self._risk(action, market)
+        if current.risk is RiskDirection.REDUCES and risk is RiskDirection.INCREASES:
+            raise RiskDirectionChanged(
+                "the action was approved as risk-reducing but would increase risk now; it was not executed",
+                next_step="Do not retry. Request the action again so the user can confirm what it is now.",
+                details={"was": current.risk.value, "now": risk.value},
+            )
+        require_allowed(policy.kill_switch, risk, action.kind)
+        await self._guard_locked(uow, attempt, action, market)
+        return self._confirmed_plan(action, market, policy, current.shown)
+
+    async def _end_confirmed(
+        self, pending_id: str, attempt: Attempt, refusal: DomainError, *, stage: str
+    ) -> None:
+        async with self._uow(write=True) as uow:
+            await uow.lock_user(attempt.user_id)
+            current = await uow.confirmations.get(pending_id)
+            if current is not None:
+                await self._refuse_in(uow, current, attempt, refusal, stage=stage)
+
+    async def _refuse_in(
+        self,
+        uow: UnitOfWork,
+        current: PendingConfirmation,
+        attempt: Attempt,
+        refusal: DomainError,
+        *,
+        stage: str,
+    ) -> None:
+        """``approved -> failed`` with the reason, for the agent (``get_confirmation_status``) and journal."""
+        now = self._clock.now()
+        reason: dict[str, JsonValue] = {
+            "status": "refused",
+            "code": refusal.code,
+            "details": dict(refusal.details),
         }
-        return AuditEvent(AuditEventType.ORDER_ATTEMPT, self._actor, payload)
+        won = await uow.confirmations.transition(
+            current.id,
+            expected=frozenset({ConfirmationStatus.APPROVED}),
+            to=ConfirmationStatus.FAILED,
+            at=now,
+            channel=DecisionChannel.SYSTEM,
+            result={"outcome": reason, "message": refusal.message},
+        )
+        if won:
+            payload: dict[str, JsonValue] = {
+                "tool": current.tool.value,
+                "action_id": current.id,
+                "confirmation_id": current.id,
+                "credential_id": current.credential_id,
+                "environment": current.environment.value,
+                "stage": stage,
+                "request": current.action,
+                "code": refusal.code,
+                "details": dict(refusal.details),
+            }
+            await uow.audit.append(
+                attempt.user_id, AuditEvent(AuditEventType.ORDER_REFUSED, EXECUTOR_ACTOR, payload), now
+            )
+
+    async def reconcile_confirmed(self, pending: PendingConfirmation) -> None:
+        """FR-27 for an execution nobody finished (the server stopped while ``executing``): find out by
+        reading, never resend; the confirmation gets its outcome, the journal says it was reconciled."""
+        action = self._parse_payload(pending.action)
+        status, outcome = await self._reconcile(pending, action)
+        payload: dict[str, JsonValue] = {
+            "action_id": pending.id,
+            "confirmation_id": pending.id,
+            "reconciled": True,
+            **outcome,
+        }
+        client_order_id = self._client_order_id(pending.id)
+        if client_order_id is not None:
+            payload["client_order_id"] = client_order_id
+        async with self._uow(write=True) as uow:
+            await uow.lock_user(pending.user_id)
+            now = self._clock.now()
+            if await uow.confirmations.transition(
+                pending.id,
+                expected=frozenset({ConfirmationStatus.EXECUTING}),
+                to=status,
+                at=now,
+                result={"outcome": payload},
+            ):
+                await uow.audit.append(
+                    pending.user_id, AuditEvent(AuditEventType.ORDER_OUTCOME, EXECUTOR_ACTOR, payload), now
+                )
 
 
 class SubmitPlaceOrder(ActionPath[PlaceOrder, _Market, OrderPlan, OrderResult]):
@@ -743,6 +1090,7 @@ class SubmitPlaceOrder(ActionPath[PlaceOrder, _Market, OrderPlan, OrderResult]):
         reconnaissance_deadline_s: float = DEFAULT_RECONNAISSANCE_DEADLINE_S,
         fingerprint_window: timedelta = FINGERPRINT_WINDOW,
         fill_read_deadline_s: float = DEFAULT_FILL_READ_DEADLINE_S,
+        confirmations: ConfirmationSupport | None = None,
     ) -> None:
         super().__init__(
             uow,
@@ -757,6 +1105,7 @@ class SubmitPlaceOrder(ActionPath[PlaceOrder, _Market, OrderPlan, OrderResult]):
             reconnaissance_deadline_s=reconnaissance_deadline_s,
             fingerprint_window=fingerprint_window,
             fill_read_deadline_s=fill_read_deadline_s,
+            confirmations=confirmations,
         )
         self._rules = rules
         self._market = market
@@ -857,11 +1206,57 @@ class SubmitPlaceOrder(ActionPath[PlaceOrder, _Market, OrderPlan, OrderResult]):
 
     def _check(self, action: PlaceOrder, market: _Market, policy: EffectivePolicy) -> OrderPlan:
         plan = self._plan(action, market, policy)
-        leverage = market.symbol_position.leverage if market.symbol_position is not None else None
-        check_limits(plan, policy, leverage=leverage)
-        if requires_confirmation(policy, action.kind, plan.notional):
-            raise no_confirmation_channel(action.kind)  # FR-25 until tickets 016/020
+        check_limits(plan, policy, leverage=_leverage(market))
         return plan
+
+    def _confirm_notional(self, action: PlaceOrder, plan: OrderPlan) -> Decimal:
+        return plan.notional
+
+    def _parse_payload(self, payload: Mapping[str, Any]) -> PlaceOrder:
+        return parse_place_order(
+            symbol=payload["symbol"],
+            category=payload["category"],
+            side=payload["side"],
+            order_type=payload["order_type"],
+            qty=payload["qty"],
+            price=payload["price"],
+            reduce_only=bool(payload["reduce_only"]),
+        )
+
+    def _confirmed_plan(
+        self, action: PlaceOrder, market: _Market, policy: EffectivePolicy, shown: Mapping[str, Any]
+    ) -> OrderPlan:
+        """FR-48: never more than the human saw, never a worse price. The quantity is the smaller of the
+        shown and the current one (a reduce-only order is cut to a position that shrank, GP-2); a market
+        order keeps its shown price bound, or the tighter one if the market or the policy moved that way.
+        What the bound leaves unfilled is cancelled by the IOC and reported as the real fill."""
+        fresh = self._plan(action, market, policy)
+        seen = shown["order"]
+        qty = min(Decimal(seen["qty"]), fresh.qty)
+        price = fresh.price
+        if action.order_type is OrderKind.MARKET:
+            bound = Decimal(seen["price"])
+            price = min(bound, price) if action.side is OrderSide.BUY else max(bound, price)
+        plan = _bounded(fresh, qty=qty, price=price)
+        check_limits(plan, policy, leverage=_leverage(market))
+        return plan
+
+    async def _reconcile(
+        self, pending: PendingConfirmation, action: PlaceOrder | ClosePosition
+    ) -> tuple[ConfirmationStatus, dict[str, JsonValue]]:
+        """FR-27: the order by its deterministic client order id. Found: executed as the exchange shows
+        it. Not found: unknown, never failed and never resent (the lists lag behind, the send may have
+        happened). A failed read raises: it stays ``executing`` and is tried again."""
+        support = self._confirmations
+        if support is None:
+            raise RuntimeError("no confirmation support wired: cannot open the credential's keys")
+        keys = await support.open_keys(pending.credential_id)
+        found = await self._trading.find_order(
+            keys, action.category, action.symbol, self._trading.client_order_id(pending.id)
+        )
+        if found is None:
+            return ConfirmationStatus.UNKNOWN, {"status": "unknown", "reconnaissance": "not_found"}
+        return ConfirmationStatus.EXECUTED, {**_accepted(found.order_id, found), "reconnaissance": "found"}
 
     async def _execute(self, attempt: Attempt, plan: OrderPlan, keys: ApiKeyPair) -> OrderResult:
         return await self._send(attempt, plan, keys)
@@ -1011,6 +1406,27 @@ class SubmitPlaceOrder(ActionPath[PlaceOrder, _Market, OrderPlan, OrderResult]):
             },
             untrusted_text=cause.untrusted_text,
         )
+
+
+def _leverage(market: _Market) -> Decimal | None:
+    return market.symbol_position.leverage if market.symbol_position is not None else None
+
+
+def _bounded(plan: OrderPlan, *, qty: Decimal, price: Decimal) -> OrderPlan:
+    """``plan`` with another quantity and (market orders) price bound; the sums follow (ADR-010)."""
+    if plan.time_in_force is OrderTimeInForce.GTC:  # a limit order keeps its price
+        return replace(
+            plan, qty=qty, notional=exact_product(qty, plan.price), order_value=exact_product(qty, plan.price)
+        )
+    notional_price = price if plan.action.side is OrderSide.BUY else max(plan.best_price or price, price)
+    return replace(
+        plan,
+        qty=qty,
+        price=price,
+        notional=exact_product(qty, notional_price),
+        notional_price=notional_price,
+        order_value=exact_product(qty, price),
+    )
 
 
 def _order_id_of(attempt: Attempt) -> str:

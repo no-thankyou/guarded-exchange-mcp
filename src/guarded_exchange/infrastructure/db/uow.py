@@ -19,6 +19,7 @@ from guarded_exchange.infrastructure.db.dialect import WRITE_OPTION, configure_s
 from guarded_exchange.infrastructure.db.repositories import (
     SqlAccessTokenRepository,
     SqlAuditLogRepository,
+    SqlConfirmationRepository,
     SqlCredentialRepository,
     SqlIdempotencyRepository,
     SqlPolicyRepository,
@@ -55,6 +56,7 @@ class SqlUnitOfWork:
         self._access_tokens = SqlAccessTokenRepository(connection, writable=write)
         self._credentials = SqlCredentialRepository(connection, writable=write)
         self._idempotency = SqlIdempotencyRepository(connection, writable=write)
+        self._confirmations = SqlConfirmationRepository(connection, writable=write)
 
     @property
     def users(self) -> SqlUserRepository:
@@ -79,6 +81,10 @@ class SqlUnitOfWork:
     @property
     def idempotency(self) -> SqlIdempotencyRepository:
         return self._idempotency
+
+    @property
+    def confirmations(self) -> SqlConfirmationRepository:
+        return self._confirmations
 
     async def lock_user(self, user_id: str) -> None:
         await lock_user(self._connection, user_id)

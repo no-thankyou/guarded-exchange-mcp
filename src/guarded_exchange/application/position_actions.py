@@ -26,6 +26,7 @@ from typing import Any, Final
 import anyio
 import structlog
 
+from guarded_exchange.application.confirmation import ConfirmationSupport
 from guarded_exchange.application.credentials import RequireTradingCredential
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.order_results import (
@@ -76,19 +77,19 @@ from guarded_exchange.domain.actions import (
     parse_set_trading_stop,
 )
 from guarded_exchange.domain.audit import ClientDescription, JsonValue
+from guarded_exchange.domain.confirmation import ConfirmationStatus, PendingConfirmation
 from guarded_exchange.domain.credentials import ApiKeyPair
 from guarded_exchange.domain.errors import (
     DomainError,
     ExchangeUnavailable,
     OutcomeUnknown,
     PositionNotFound,
+    RiskDirectionChanged,
 )
 from guarded_exchange.domain.idempotency import IdempotencyRecord, Outcome
 from guarded_exchange.domain.instruments import Category, require_supported_quote
 from guarded_exchange.domain.limits import (
     check_leverage_limits,
-    no_confirmation_channel,
-    requires_confirmation,
 )
 from guarded_exchange.domain.orders import OrderPlan
 from guarded_exchange.domain.policy import EffectivePolicy
@@ -169,6 +170,7 @@ class _PositionPath[A: TradingAction, M, P, R: PositionChangeResult](ActionPath[
         reconnaissance_delay_s: float = DEFAULT_RECONNAISSANCE_DELAY_S,
         reconnaissance_deadline_s: float = DEFAULT_RECONNAISSANCE_DEADLINE_S,
         read_back_deadline_s: float = DEFAULT_FILL_READ_DEADLINE_S,
+        confirmations: ConfirmationSupport | None = None,
     ) -> None:
         super().__init__(
             uow,
@@ -181,6 +183,7 @@ class _PositionPath[A: TradingAction, M, P, R: PositionChangeResult](ActionPath[
             reconnaissance_delay_s=reconnaissance_delay_s,
             reconnaissance_deadline_s=reconnaissance_deadline_s,
             fill_read_deadline_s=read_back_deadline_s,
+            confirmations=confirmations,
         )
         self._trading = trading
         self._actions = actions
@@ -341,9 +344,18 @@ class SubmitSetTradingStop(_PositionPath[SetTradingStop, StopPlan, StopPlan, Sto
         return plan_trading_stop(action, rules, state.position)
 
     def _check(self, action: SetTradingStop, market: StopPlan, policy: EffectivePolicy) -> StopPlan:
-        if requires_confirmation(policy, action.kind, _NO_THRESHOLD):
-            raise no_confirmation_channel(action.kind)  # FR-25 until tickets 016/020
         return market
+
+    def _confirm_notional(self, action: SetTradingStop, plan: StopPlan) -> Decimal:
+        return _NO_THRESHOLD
+
+    def _parse_payload(self, payload: Mapping[str, Any]) -> SetTradingStop:
+        return parse_set_trading_stop(
+            symbol=payload["symbol"],
+            category=payload["category"],
+            take_profit=payload["take_profit"],
+            stop_loss=payload["stop_loss"],
+        )
 
     def _attempt_details(self, plan: StopPlan) -> dict[str, JsonValue]:
         return {
@@ -424,9 +436,15 @@ class SubmitSetLeverage(_PositionPath[SetLeverage, LeveragePlan, LeveragePlan, L
 
     def _check(self, action: SetLeverage, market: LeveragePlan, policy: EffectivePolicy) -> LeveragePlan:
         check_leverage_limits(market, policy)
-        if requires_confirmation(policy, action.kind, _NO_THRESHOLD):
-            raise no_confirmation_channel(action.kind)  # FR-25 until tickets 016/020
         return market
+
+    def _confirm_notional(self, action: SetLeverage, plan: LeveragePlan) -> Decimal:
+        return _NO_THRESHOLD
+
+    def _parse_payload(self, payload: Mapping[str, Any]) -> SetLeverage:
+        return parse_set_leverage(
+            symbol=payload["symbol"], category=payload["category"], leverage=payload["leverage"]
+        )
 
     def _attempt_details(self, plan: LeveragePlan) -> dict[str, JsonValue]:
         return {"risk": plan.risk.value, "leverage": {"from": plan.current, "to": plan.action.leverage}}
@@ -487,8 +505,10 @@ class SubmitClosePosition(ActionPath[ClosePosition, _CloseRead, OrderPlan, Order
         reconnaissance_delay_s: float = DEFAULT_RECONNAISSANCE_DELAY_S,
         reconnaissance_deadline_s: float = DEFAULT_RECONNAISSANCE_DEADLINE_S,
         fill_read_deadline_s: float = DEFAULT_FILL_READ_DEADLINE_S,
+        confirmations: ConfirmationSupport | None = None,
     ) -> None:
         common: dict[str, Any] = {
+            "confirmations": confirmations,
             "clock": clock,
             "ids": ids,
             "exchange": exchange,
@@ -557,13 +577,36 @@ class SubmitClosePosition(ActionPath[ClosePosition, _CloseRead, OrderPlan, Order
         return _CloseRead(order, market)
 
     def _check(self, action: ClosePosition, market: _CloseRead, policy: EffectivePolicy) -> OrderPlan:
-        plan = self._placer._plan(market.order, market.market, policy)  # reduces: no size limits (G-2)
-        if requires_confirmation(policy, action.kind, plan.notional):
-            raise no_confirmation_channel(action.kind)  # FR-25 until tickets 016/020
-        return plan
+        return self._placer._plan(market.order, market.market, policy)  # reduces: no size limits (G-2)
+
+    def _confirm_notional(self, action: ClosePosition, plan: OrderPlan) -> Decimal:
+        return plan.notional
+
+    def _parse_payload(self, payload: Mapping[str, Any]) -> ClosePosition:
+        return parse_close_position(
+            symbol=payload["symbol"], category=payload["category"], qty=payload["qty"]
+        )
+
+    def _confirmed_plan(
+        self, action: ClosePosition, market: _CloseRead, policy: EffectivePolicy, shown: Mapping[str, Any]
+    ) -> OrderPlan:
+        """FR-48, GP-2: the reduce-only market order the human saw, cut to the position as it is now."""
+        if market.order.side.value != shown.get("close_side"):
+            raise RiskDirectionChanged(
+                "the position flipped side after the confirmation was requested; it was not executed",
+                next_step="Do not retry. Request the close again so the user can confirm what it is now.",
+                details={"reason": "position_changed"},
+            )
+        return self._placer._confirmed_plan(market.order, market.market, policy, shown)
+
+    async def _reconcile(
+        self, pending: PendingConfirmation, action: ClosePosition
+    ) -> tuple[ConfirmationStatus, dict[str, JsonValue]]:
+        return await self._placer._reconcile(pending, action)
 
     def _attempt_details(self, plan: OrderPlan) -> dict[str, JsonValue]:
-        return self._placer._attempt_details(plan)
+        # the side of the closing order: it tells the human (and the executor) which position is meant
+        return {**self._placer._attempt_details(plan), "close_side": plan.action.side.value}
 
     async def _execute(self, attempt: Attempt, plan: OrderPlan, keys: ApiKeyPair) -> OrderResult:
         return await self._placer._send(attempt, plan, keys)

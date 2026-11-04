@@ -5,6 +5,7 @@ from typing import Any
 
 from mcp.server import MCPServer
 
+from guarded_exchange.application.confirmation import ConfirmationSupport
 from guarded_exchange.application.credentials import (
     ReadCredential,
     RecheckCredential,
@@ -27,12 +28,14 @@ from guarded_exchange.application.position_actions import (
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
 from guarded_exchange.application.read_history import GetOrderHistory, GetTrades
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
+from guarded_exchange.application.resolve_confirmation import CancelConfirmation, GetConfirmationStatus
 from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.domain.credentials import EXCHANGE_BYBIT
 from guarded_exchange.domain.policy import Permission
 from guarded_exchange.domain.users import Environment
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, fixed_principal
 from guarded_exchange.interface.mcp.server import UseCases, create_server
+from guarded_exchange.interface.mcp.tools.confirmations import ConfirmationUseCases
 from guarded_exchange.interface.mcp.tools.order_changes import OrderChangeUseCases
 from guarded_exchange.interface.mcp.tools.position_actions import PositionActionUseCases
 from tests.fakes import (
@@ -60,6 +63,7 @@ def use_cases(
     key_reader: FakeKeyReader | None = None,
     changes: FakeOrderChanges | None = None,
     position_actions: FakePositionActions | None = None,
+    confirmations: ConfirmationSupport | None = None,
 ) -> UseCases:
     """The MCP use cases wired to fakes, as the composition root wires the real adapters."""
     exchange, clock, account = exchange or FakeExchange(), clock or FakeClock(), account or FakeAccount()
@@ -88,10 +92,14 @@ def use_cases(
             trading=trading or FakeTrading(),
             clock=clock,
             ids=SequentialIds("act"),
+            confirmations=confirmations,
             **scope,
         ),
         activate_kill_switch=ActivateKillSwitch(db, clock),
         order_changes=order_change_use_cases(db, cipher, recheck, rules, clock, trading, changes),
+        confirmations=ConfirmationUseCases(
+            get_status=GetConfirmationStatus(db, clock), cancel=CancelConfirmation(db, clock)
+        ),
         position_actions=position_action_use_cases(
             db, exchange, cipher, recheck, rules, clock, trading or FakeTrading(), position_actions
         ),
@@ -162,6 +170,7 @@ def server_for(
     tool_permissions: Mapping[str, Permission] = TOOL_PERMISSIONS,
     changes: FakeOrderChanges | None = None,
     position_actions: FakePositionActions | None = None,
+    confirmations: ConfirmationSupport | None = None,
 ) -> MCPServer[Any]:
     """The production server for principal ``user_id`` (``None``: nobody resolved)."""
     principal = fixed_principal(user_id) if user_id is not None else (lambda: None)
@@ -175,6 +184,7 @@ def server_for(
             trading=trading,
             changes=changes,
             position_actions=position_actions,
+            confirmations=confirmations,
         ),
         principal=principal,
         tool_permissions=tool_permissions,

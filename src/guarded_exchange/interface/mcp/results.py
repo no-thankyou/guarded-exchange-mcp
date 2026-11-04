@@ -8,8 +8,10 @@ import structlog
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel
 
+from guarded_exchange.application.confirmation import ConfirmationPending
 from guarded_exchange.domain.errors import DomainError
 from guarded_exchange.interface.mcp.errors import error_result, internal_error_result
+from guarded_exchange.interface.mcp.schemas_confirmation import ConfirmationOut
 
 log = structlog.get_logger(__name__)
 
@@ -35,6 +37,12 @@ async def run_tool(tool: str, mcp_request_id: str | None, call: Awaitable[BaseMo
     ):
         try:
             output = await call
+        except ConfirmationPending as parked:
+            # Not an error (FR-47 (b)): the action waits for the user. Any trading tool can end here.
+            log.info("tool_pending_confirmation", confirmation_id=parked.pending.id, duration_ms=_ms(started))
+            return success_result(
+                ConfirmationOut.from_domain(parked.pending, already_waiting=not parked.created)
+            )
         except DomainError as exc:
             log.info("tool_error", code=exc.code, duration_ms=_ms(started))
             return error_result(exc)

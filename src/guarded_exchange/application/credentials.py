@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Final
 
+from guarded_exchange.application.confirmation import invalidate_pending
 from guarded_exchange.application.policy import ADMIN_ACTOR, USER_ACTOR
 from guarded_exchange.application.ports import (
     Clock,
@@ -148,6 +149,8 @@ class _StoreCredential:
             now = self._clock.now()
             if existing is not None:
                 await uow.credentials.mark_deleted(existing.id, now)
+                # FR-29, D-9: what waited for a human under the old key is cancelled.
+                await invalidate_pending(uow, user.id, existing.id, now, reason="credential_replaced")
             credential = Credential(
                 id=self._ids.new_id(),
                 user_id=user.id,
@@ -246,7 +249,7 @@ class AddCredential(_StoreCredential):
 class ReplaceCredential(_StoreCredential):
     """Swap the active key for a new one; the old one is soft-deleted in the same transaction (D-9).
 
-    Cancelling pending confirmations of the old key is part of the pending machinery (ticket 016/017).
+    Confirmations waiting under the old key are cancelled in the same transaction (FR-29, ticket 016).
     """
 
     _REPLACE = True
@@ -255,8 +258,9 @@ class ReplaceCredential(_StoreCredential):
 class DeleteCredential:
     """Soft-delete the user's active key (FR-29, D-9): it is never used for new actions again.
 
-    The encrypted row stays while executing/unknown actions may still refer to it; erasing it is
-    part of the pending machinery (ticket 016/017).
+    Confirmations waiting under it are cancelled in the same transaction (ticket 016). The encrypted
+    row stays while executing/unknown actions may still refer to it (reconnaissance, ``OpenCredentialKeys``);
+    erasing it is later work.
     """
 
     def __init__(
@@ -280,6 +284,7 @@ class DeleteCredential:
                 )
             now = self._clock.now()
             await uow.credentials.mark_deleted(existing.id, now)
+            await invalidate_pending(uow, user.id, existing.id, now, reason="credential_deleted")
             await uow.audit.append(
                 user.id,
                 AuditEvent(
@@ -365,6 +370,23 @@ async def _open_keys(
     if sealed is None:
         raise key_replaced_or_deleted()
     return cipher.open(sealed, credential.binding)
+
+
+class OpenCredentialKeys:
+    """The keys of a credential by id, **deleted ones too**: only for finding out what became of an
+    action that was in flight when the server stopped (D-9, FR-27). Never used for a new action."""
+
+    def __init__(self, uow: UnitOfWorkFactory, cipher: CredentialCipher) -> None:
+        self._uow = uow
+        self._cipher = cipher
+
+    async def __call__(self, credential_id: str) -> ApiKeyPair:
+        async with self._uow(write=False) as uow:
+            credential = await uow.credentials.get(credential_id)
+            sealed = await uow.credentials.get_sealed(credential_id)
+        if credential is None or sealed is None:
+            raise key_replaced_or_deleted()
+        return self._cipher.open(sealed, credential.binding)
 
 
 @dataclass(frozen=True, slots=True)

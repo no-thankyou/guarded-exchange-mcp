@@ -23,6 +23,7 @@ from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, PrincipalPro
 from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
 from guarded_exchange.interface.mcp.tools import (
     account,
+    confirmations,
     history,
     kill_switch,
     market,
@@ -31,6 +32,7 @@ from guarded_exchange.interface.mcp.tools import (
     position_actions,
     trading,
 )
+from guarded_exchange.interface.mcp.tools.confirmations import ConfirmationUseCases
 from guarded_exchange.interface.mcp.tools.order_changes import OrderChangeUseCases
 from guarded_exchange.interface.mcp.tools.position_actions import PositionActionUseCases
 
@@ -60,6 +62,7 @@ class UseCases:
     place_order: SubmitPlaceOrder
     activate_kill_switch: ActivateKillSwitch
     order_changes: OrderChangeUseCases
+    confirmations: ConfirmationUseCases
     position_actions: PositionActionUseCases
 
 
@@ -106,6 +109,7 @@ def create_server(
     trading.register(mcp, place_order=use_cases.place_order, principal=principal)
     kill_switch.register(mcp, activate_kill_switch=use_cases.activate_kill_switch, principal=principal)
     order_changes.register(mcp, use_cases=use_cases.order_changes, principal=principal)
+    confirmations.register(mcp, use_cases=use_cases.confirmations, principal=principal)
     position_actions.register(mcp, use_cases=use_cases.position_actions, principal=principal)
     return mcp
 

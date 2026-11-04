@@ -21,6 +21,11 @@ from guarded_exchange.interface.mcp.access import PrincipalProvider
 from guarded_exchange.interface.mcp.results import run_tool
 from guarded_exchange.interface.mcp.schemas import PlaceOrderOut
 from guarded_exchange.interface.mcp.schemas_position_actions import SetLeverageOut, SetTradingStopOut
+from guarded_exchange.interface.mcp.schemas_responses import (
+    PlaceOrderResponse,
+    SetLeverageResponse,
+    SetTradingStopResponse,
+)
 from guarded_exchange.interface.mcp.tools.market import CategoryArg, SymbolArg
 from guarded_exchange.interface.mcp.tools.order_changes import KeyArg
 from guarded_exchange.interface.mcp.tools.trading import AmountStr, client_description
@@ -95,7 +100,7 @@ def register(mcp: MCPServer[Any], *, use_cases: PositionActionUseCases, principa
         take_profit: TakeProfitArg = None,
         stop_loss: StopLossArg = None,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, SetTradingStopOut]:
+    ) -> Annotated[CallToolResult, SetTradingStopResponse]:
         async def call() -> SetTradingStopOut:
             request = SetTradingStopInput(symbol, category, take_profit, stop_loss, idempotency_key)
             result = await use_cases.set_trading_stop(principal(), request, client_description(ctx))
@@ -115,7 +120,7 @@ def register(mcp: MCPServer[Any], *, use_cases: PositionActionUseCases, principa
         ctx: Context,
         qty: CloseQtyArg = None,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, PlaceOrderOut]:
+    ) -> Annotated[CallToolResult, PlaceOrderResponse]:
         async def call() -> PlaceOrderOut:
             request = ClosePositionInput(symbol, category, qty, idempotency_key)
             result = await use_cases.close_position(principal(), request, client_description(ctx))
@@ -132,7 +137,7 @@ def register(mcp: MCPServer[Any], *, use_cases: PositionActionUseCases, principa
         leverage: LeverageArg,
         ctx: Context,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, SetLeverageOut]:
+    ) -> Annotated[CallToolResult, SetLeverageResponse]:
         async def call() -> SetLeverageOut:
             request = SetLeverageInput(symbol, category, leverage, idempotency_key)
             result = await use_cases.set_leverage(principal(), request, client_description(ctx))
