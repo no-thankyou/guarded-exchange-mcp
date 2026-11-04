@@ -45,6 +45,11 @@ class AuditEventType(StrEnum):
     """What the exchange answered: accepted, rejected or unknown (FR-27)."""
     ORDER_REPEAT = "order_repeat"
     """A repeated call answered from its idempotency record; nothing was sent (FR-26, FR-36)."""
+    CONFIRMATION_REQUESTED = "confirmation_requested"
+    """An action that needs a human's confirmation was parked as a pending confirmation (FR-47)."""
+    CONFIRMATION_DECIDED = "confirmation_decided"
+    """The pending confirmation left ``pending``/``approved`` without being executed or with a human's
+    decision: approved, rejected, expired, cancelled, invalidated (FR-24, FR-29, FR-42: with its channel)."""
 
 
 _CLIENT_TEXT_MAX: Final = 64

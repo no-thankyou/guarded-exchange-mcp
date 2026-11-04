@@ -136,11 +136,12 @@ def requires_confirmation(policy: EffectivePolicy, kind: ActionKind, notional: D
 
 
 def no_confirmation_channel(kind: ActionKind) -> ConfirmationChannelUnavailable:
-    """FR-25 until a channel exists (tickets 016, 020): fail closed, nothing is sent."""
+    """FR-25: no trusted confirmation channel is enabled: fail closed, nothing is sent or parked."""
     return ConfirmationChannelUnavailable(
         f"your policy requires confirming {kind.value}, and no confirmation channel is available",
         next_step="Do not retry and do not try to confirm it yourself. Tell the user: the action needs "
-        "their confirmation, which this server cannot ask for yet; the admin can allow it without "
-        "confirmation (`admin policy set-ceiling --confirm ...`), outside the chat.",
+        "their confirmation, and no channel to ask for it is enabled; the admin can enable CLI confirmation "
+        "(GX_CONFIRM_CLI_ENABLED=true) or allow the action without confirmation "
+        "(`admin policy set-ceiling --confirm ...`), outside the chat.",
         details={"action": kind.value, "reason": "no_trusted_channel"},
     )

@@ -20,7 +20,7 @@ Each is an ``ActionPath``: the same auth, idempotency, decision under ``lock_use
 """
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final
@@ -28,6 +28,7 @@ from typing import Any, Final
 import anyio
 import structlog
 
+from guarded_exchange.application.confirmation import ConfirmationSupport
 from guarded_exchange.application.credentials import RequireTradingCredential
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.order_change_results import (
@@ -83,7 +84,7 @@ from guarded_exchange.domain.errors import (
 )
 from guarded_exchange.domain.idempotency import IdempotencyRecord, Outcome, is_stale
 from guarded_exchange.domain.instruments import Category, require_supported_quote
-from guarded_exchange.domain.limits import check_amend_limits, no_confirmation_channel, requires_confirmation
+from guarded_exchange.domain.limits import check_amend_limits
 from guarded_exchange.domain.order_changes import (
     CANCEL_ALL_MAX,
     OPEN_STATUSES,
@@ -180,6 +181,7 @@ class _OrderChangePath[A: TradingAction, M, P, R: ChangeResult](ActionPath[A, M,
         reconnaissance_delay_s: float = DEFAULT_RECONNAISSANCE_DELAY_S,
         reconnaissance_deadline_s: float = DEFAULT_RECONNAISSANCE_DEADLINE_S,
         read_back_deadline_s: float = DEFAULT_FILL_READ_DEADLINE_S,
+        confirmations: ConfirmationSupport | None = None,
     ) -> None:
         super().__init__(
             uow,
@@ -193,6 +195,7 @@ class _OrderChangePath[A: TradingAction, M, P, R: ChangeResult](ActionPath[A, M,
             reconnaissance_delay_s=reconnaissance_delay_s,
             reconnaissance_deadline_s=reconnaissance_deadline_s,
             fill_read_deadline_s=read_back_deadline_s,
+            confirmations=confirmations,
         )
         self._changes = changes
 
@@ -338,9 +341,15 @@ class SubmitCancelOrder(_OrderChangePath[CancelOrder, CancelPlan, CancelPlan, Ca
         return plan_cancel(action, order)
 
     def _check(self, action: CancelOrder, market: CancelPlan, policy: EffectivePolicy) -> CancelPlan:
-        if requires_confirmation(policy, action.kind, _NO_THRESHOLD):
-            raise no_confirmation_channel(action.kind)  # FR-25 until tickets 016/020
         return market
+
+    def _confirm_notional(self, action: CancelOrder, plan: CancelPlan) -> Decimal:
+        return _NO_THRESHOLD
+
+    def _parse_payload(self, payload: Mapping[str, Any]) -> CancelOrder:
+        return parse_cancel_order(
+            symbol=payload["symbol"], category=payload["category"], order_id=payload["order_id"]
+        )
 
     def _attempt_details(self, plan: CancelPlan) -> dict[str, JsonValue]:
         return {"risk": plan.risk.value, "order": _touched(plan.order)}
@@ -391,6 +400,7 @@ class SubmitAmendOrder(_OrderChangePath[AmendOrder, _AmendRead, AmendPlan, Amend
         reconnaissance_delay_s: float = DEFAULT_RECONNAISSANCE_DELAY_S,
         reconnaissance_deadline_s: float = DEFAULT_RECONNAISSANCE_DEADLINE_S,
         read_back_deadline_s: float = DEFAULT_FILL_READ_DEADLINE_S,
+        confirmations: ConfirmationSupport | None = None,
     ) -> None:
         super().__init__(
             uow,
@@ -404,6 +414,7 @@ class SubmitAmendOrder(_OrderChangePath[AmendOrder, _AmendRead, AmendPlan, Amend
             reconnaissance_delay_s=reconnaissance_delay_s,
             reconnaissance_deadline_s=reconnaissance_deadline_s,
             read_back_deadline_s=read_back_deadline_s,
+            confirmations=confirmations,
         )
         self._rules = rules
         self._trading = trading
@@ -481,9 +492,19 @@ class SubmitAmendOrder(_OrderChangePath[AmendOrder, _AmendRead, AmendPlan, Amend
     def _check(self, action: AmendOrder, market: _AmendRead, policy: EffectivePolicy) -> AmendPlan:
         plan = market.plan
         check_amend_limits(plan, policy, leverage=market.leverage)
-        if requires_confirmation(policy, action.kind, plan.notional):
-            raise no_confirmation_channel(action.kind)  # FR-25 until tickets 016/020
         return plan
+
+    def _confirm_notional(self, action: AmendOrder, plan: AmendPlan) -> Decimal:
+        return plan.notional
+
+    def _parse_payload(self, payload: Mapping[str, Any]) -> AmendOrder:
+        return parse_amend_order(
+            symbol=payload["symbol"],
+            category=payload["category"],
+            order_id=payload["order_id"],
+            qty=payload["qty"],
+            price=payload["price"],
+        )
 
     def _attempt_details(self, plan: AmendPlan) -> dict[str, JsonValue]:
         return {
@@ -563,9 +584,26 @@ class SubmitCancelAllOrders(_OrderChangePath[CancelAllOrders, CancelAllPlan, Can
     def _check(
         self, action: CancelAllOrders, market: CancelAllPlan, policy: EffectivePolicy
     ) -> CancelAllPlan:
-        if requires_confirmation(policy, action.kind, _NO_THRESHOLD):
-            raise no_confirmation_channel(action.kind)  # FR-25 until tickets 016/020
         return market
+
+    def _confirm_notional(self, action: CancelAllOrders, plan: CancelAllPlan) -> Decimal:
+        return _NO_THRESHOLD
+
+    def _parse_payload(self, payload: Mapping[str, Any]) -> CancelAllOrders:
+        return parse_cancel_all_orders(symbol=payload["symbol"], category=payload["category"])
+
+    def _confirmed_plan(
+        self,
+        action: CancelAllOrders,
+        market: CancelAllPlan,
+        policy: EffectivePolicy,
+        shown: Mapping[str, Any],
+    ) -> CancelAllPlan:
+        """FR-22, FR-48: only the orders the human was shown. An order that appeared after the snapshot
+        was never shown and stays; one that is gone is simply not cancelled again."""
+        shown_ids = {str(order["order_id"]) for order in shown.get("orders") or ()}
+        kept = tuple(order for order in market.orders if order.order_id in shown_ids)
+        return replace(market, orders=kept)
 
     def _attempt_details(self, plan: CancelAllPlan) -> dict[str, JsonValue]:
         return {

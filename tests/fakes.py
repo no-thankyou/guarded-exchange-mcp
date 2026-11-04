@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import anyio
 import anyio.lowlevel
@@ -29,6 +30,7 @@ from guarded_exchange.domain.account import (
     UntrustedText,
 )
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord, JsonValue, canonical_json
+from guarded_exchange.domain.confirmation import ConfirmationStatus, DecisionChannel, PendingConfirmation
 from guarded_exchange.domain.credentials import (
     EXCHANGE_BYBIT,
     ApiKeyPair,
@@ -412,6 +414,7 @@ class _State:
     access_tokens: dict[str, AccessToken] = field(default_factory=dict)
     credentials: dict[str, tuple[Credential, SealedSecret]] = field(default_factory=dict)
     idempotency: dict[tuple[str, KeyKind, str], IdempotencyRecord] = field(default_factory=dict)
+    confirmations: dict[str, PendingConfirmation] = field(default_factory=dict)
 
     def copy(self) -> "_State":
         return _State(
@@ -421,6 +424,7 @@ class _State:
             dict(self.access_tokens),
             dict(self.credentials),
             dict(self.idempotency),
+            dict(self.confirmations),
         )
 
 
@@ -689,6 +693,122 @@ class InMemoryIdempotencyRepository:
         return True
 
 
+class InMemoryConfirmationRepository:
+    """Same semantics as the SQL repository: every change is conditional on the expected states."""
+
+    def __init__(self, state: _State, *, writable: bool) -> None:
+        self._state = state
+        self._writable = writable
+
+    def _write(self, operation: str) -> None:
+        if not self._writable:
+            raise ReadOnlyViolation(f"confirmations.{operation} needs a write unit of work")
+
+    async def add(self, pending: PendingConfirmation) -> None:
+        self._write("add")
+        if pending.id in self._state.confirmations:
+            raise ValueError(f"duplicate confirmation {pending.id}")
+        self._state.confirmations[pending.id] = _roundtrip(pending)
+
+    async def get(self, pending_id: str) -> PendingConfirmation | None:
+        return self._state.confirmations.get(pending_id)
+
+    async def find_open_by_digest(
+        self, user_id: str, digest: str, now: datetime
+    ) -> PendingConfirmation | None:
+        found = [
+            p
+            for p in self._state.confirmations.values()
+            if p.user_id == user_id
+            and p.action_digest == digest
+            and p.status is ConfirmationStatus.PENDING
+            and p.expires_at > now
+        ]
+        return max(found, key=lambda p: p.created_at, default=None)
+
+    async def find_by_key(self, user_id: str, key: str, since: datetime) -> PendingConfirmation | None:
+        found = [
+            p
+            for p in self._state.confirmations.values()
+            if p.user_id == user_id and p.idempotency_key == key and p.created_at >= since
+        ]
+        return max(found, key=lambda p: p.created_at, default=None)
+
+    async def count_slots(self, user_id: str, now: datetime) -> int:
+        return sum(
+            1
+            for p in self._state.confirmations.values()
+            if p.user_id == user_id
+            and (
+                (p.status is ConfirmationStatus.PENDING and p.expires_at > now)
+                or p.status in {ConfirmationStatus.APPROVED, ConfirmationStatus.EXECUTING}
+            )
+        )
+
+    async def list_by_status(
+        self, statuses: frozenset[ConfirmationStatus], *, user_id: str | None = None, limit: int = 100
+    ) -> Sequence[PendingConfirmation]:
+        found = [
+            p
+            for p in self._state.confirmations.values()
+            if p.status in statuses and (user_id is None or p.user_id == user_id)
+        ]
+        return sorted(found, key=lambda p: (p.created_at, p.id))[:limit]
+
+    async def list_for_credential(
+        self, user_id: str, credential_id: str, statuses: frozenset[ConfirmationStatus]
+    ) -> Sequence[PendingConfirmation]:
+        found = [
+            p
+            for p in self._state.confirmations.values()
+            if p.user_id == user_id and p.credential_id == credential_id and p.status in statuses
+        ]
+        return sorted(found, key=lambda p: (p.created_at, p.id))
+
+    async def transition(
+        self,
+        pending_id: str,
+        *,
+        expected: frozenset[ConfirmationStatus],
+        to: ConfirmationStatus,
+        at: datetime,
+        live_at: datetime | None = None,
+        decided_by: str | None = None,
+        channel: DecisionChannel | None = None,
+        result: Mapping[str, JsonValue] | None = None,
+    ) -> bool:
+        self._write("transition")
+        current = self._state.confirmations.get(pending_id)
+        if current is None or current.status not in expected:
+            return False
+        if live_at is not None and current.expires_at <= live_at:
+            return False
+        changes: dict[str, Any] = {"status": to}
+        if to is ConfirmationStatus.APPROVED:
+            changes["approved_at"] = at
+        elif to is ConfirmationStatus.EXECUTING:
+            changes["exec_started_at"] = at
+        else:
+            changes["decided_at"] = at
+        if decided_by is not None:
+            changes["decided_by"] = decided_by
+        if channel is not None:
+            changes["channel"] = channel
+        if result is not None:
+            changes["result"] = json.loads(canonical_json(result))
+        self._state.confirmations[pending_id] = replace(current, **changes)
+        return True
+
+
+def _roundtrip(pending: PendingConfirmation) -> PendingConfirmation:
+    """Through canonical JSON, as storage does: decimals become their canonical text."""
+    return replace(
+        pending,
+        action=json.loads(canonical_json(pending.action)),
+        shown=json.loads(canonical_json(pending.shown)),
+    )
+
+
 class InMemoryUnitOfWork:
     def __init__(
         self,
@@ -705,6 +825,7 @@ class InMemoryUnitOfWork:
         self.access_tokens = InMemoryAccessTokenRepository(state, writable=write)
         self.credentials = InMemoryCredentialRepository(state, writable=write)
         self.idempotency = InMemoryIdempotencyRepository(state, writable=write)
+        self.confirmations = InMemoryConfirmationRepository(state, writable=write)
         self._write = write
         self._locks = locks
 

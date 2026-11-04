@@ -13,6 +13,11 @@ from typing import Protocol
 from guarded_exchange.domain.access_tokens import AccessToken
 from guarded_exchange.domain.account import AccountBalances, Order, Page, Position, SymbolPosition
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord, JsonValue
+from guarded_exchange.domain.confirmation import (
+    ConfirmationStatus,
+    DecisionChannel,
+    PendingConfirmation,
+)
 from guarded_exchange.domain.credentials import (
     ApiKeyPair,
     Credential,
@@ -434,6 +439,57 @@ class IdempotencyRepository(Protocol):
         ...
 
 
+class ConfirmationRepository(Protocol):
+    """Pending confirmations (ADR-005, ADR-006). Every state change is a conditional update on the
+    states the caller expects (CAS); needs a write unit of work."""
+
+    async def add(self, pending: PendingConfirmation) -> None: ...
+
+    async def get(self, pending_id: str) -> PendingConfirmation | None: ...
+
+    async def find_open_by_digest(
+        self, user_id: str, digest: str, now: datetime
+    ) -> PendingConfirmation | None:
+        """A ``pending`` (not yet expired at ``now``) confirmation of this user for the same call (D-20)."""
+        ...
+
+    async def find_by_key(self, user_id: str, key: str, since: datetime) -> PendingConfirmation | None:
+        """The latest confirmation created with this idempotency key at or after ``since``."""
+        ...
+
+    async def count_slots(self, user_id: str, now: datetime) -> int:
+        """Confirmations holding a slot: ``pending`` (not expired at ``now``), ``approved``, ``executing``."""
+        ...
+
+    async def list_by_status(
+        self, statuses: frozenset[ConfirmationStatus], *, user_id: str | None = None, limit: int = 100
+    ) -> Sequence[PendingConfirmation]:
+        """Oldest first."""
+        ...
+
+    async def list_for_credential(
+        self, user_id: str, credential_id: str, statuses: frozenset[ConfirmationStatus]
+    ) -> Sequence[PendingConfirmation]: ...
+
+    async def transition(
+        self,
+        pending_id: str,
+        *,
+        expected: frozenset[ConfirmationStatus],
+        to: ConfirmationStatus,
+        at: datetime,
+        live_at: datetime | None = None,
+        decided_by: str | None = None,
+        channel: DecisionChannel | None = None,
+        result: Mapping[str, JsonValue] | None = None,
+    ) -> bool:
+        """Move to ``to`` if the current status is in ``expected`` (and, with ``live_at``, the
+        confirmation has not expired at that time); ``True`` only for the caller that did it.
+        Sets ``approved_at`` for ``approved``, ``exec_started_at`` for ``executing``, otherwise
+        ``decided_at``."""
+        ...
+
+
 class MasterKeyStore(Protocol):
     """Where the local master key lives (PLAN ADR-009). Never exposes the key to use cases."""
 
@@ -482,6 +538,9 @@ class UnitOfWork(Protocol):
 
     @property
     def idempotency(self) -> IdempotencyRepository: ...
+
+    @property
+    def confirmations(self) -> ConfirmationRepository: ...
 
     async def lock_user(self, user_id: str) -> None:
         """Serialise read-modify-write of one user's state until the transaction ends (PLAN D-8).

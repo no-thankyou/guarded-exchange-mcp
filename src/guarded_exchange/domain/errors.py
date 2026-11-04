@@ -124,6 +124,31 @@ class ConfirmationChannelUnavailable(DomainError):
     code: ClassVar[str] = "confirmation_channel_unavailable"
 
 
+class PendingLimitReached(DomainError):
+    """Too many actions of this user wait for confirmation at the same time (FR-19, E-6); nothing was
+    asked of the human. Transient: a slot frees up when one is decided, cancelled or expires."""
+
+    code: ClassVar[str] = "pending_limit_reached"
+
+
+class ConfirmationExpired(DomainError):
+    """The confirmation request ran out of time before the human decided (FR-23)."""
+
+    code: ClassVar[str] = "confirmation_expired"
+
+
+class ConfirmationNotPending(DomainError):
+    """The confirmation is not waiting for a decision any more (decided, cancelled, executing, done)."""
+
+    code: ClassVar[str] = "confirmation_not_pending"
+
+
+class RiskDirectionChanged(DomainError):
+    """The human approved a risk-reducing action that would now increase risk (FR-48, D-8)."""
+
+    code: ClassVar[str] = "risk_direction_changed"
+
+
 class PositionNotFound(DomainError):
     """A risk-reducing action needs an open position it can reduce, and there is none (FR-43, D-18)."""
 

@@ -158,3 +158,57 @@ Index(
     idempotency_records.c.user_id,
     idempotency_records.c.expires_at,
 )
+
+# Pending confirmations (tickets 016/017, PLAN ADR-005/006, 5.2): an action parked until a human decides.
+# ``id`` doubles as the action id (the client order id is derived from it). ``action``, ``shown`` and
+# ``result`` are canonical JSON; the two digests let the executor detect a changed row (FR-22).
+pending_confirmations = Table(
+    "pending_confirmations",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("user_id", String(64), ForeignKey("users.id"), nullable=False),
+    Column("credential_id", String(64), nullable=False),
+    Column("environment", String(16), nullable=False),
+    Column("tool", String(32), nullable=False),
+    Column("action", Text, nullable=False),
+    Column("action_digest", String(64), nullable=False),
+    Column("terms_digest", String(64), nullable=False),
+    Column("risk", String(16), nullable=False),
+    Column("shown", Text, nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("idempotency_key", String(64), nullable=True),
+    Column("created_at", EpochMillis(), nullable=False),
+    Column("expires_at", EpochMillis(), nullable=False),
+    Column("approved_at", EpochMillis(), nullable=True),
+    Column("decided_at", EpochMillis(), nullable=True),
+    Column("decided_by", String(128), nullable=True),
+    Column("channel", String(16), nullable=True),
+    Column("exec_started_at", EpochMillis(), nullable=True),
+    Column("result", Text, nullable=True),
+    CheckConstraint("environment IN ('testnet', 'mainnet')", name="environment"),
+    CheckConstraint("risk IN ('increases', 'reduces')", name="risk"),
+    CheckConstraint(
+        "status IN ('pending', 'approved', 'executing', 'executed', 'failed', 'unknown', 'rejected', "
+        "'expired', 'expired_after_approval', 'cancelled')",
+        name="status",
+    ),
+    CheckConstraint("length(action_digest) = 64 AND length(terms_digest) = 64", name="digest_sha256"),
+)
+Index(
+    "ix_pending_confirmations_user_id_status", pending_confirmations.c.user_id, pending_confirmations.c.status
+)
+Index(
+    "ix_pending_confirmations_status_expires_at",
+    pending_confirmations.c.status,
+    pending_confirmations.c.expires_at,
+)
+Index(
+    "ix_pending_confirmations_user_id_action_digest",
+    pending_confirmations.c.user_id,
+    pending_confirmations.c.action_digest,
+)
+Index(
+    "ix_pending_confirmations_user_id_idempotency_key",
+    pending_confirmations.c.user_id,
+    pending_confirmations.c.idempotency_key,
+)

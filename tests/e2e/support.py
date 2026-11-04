@@ -22,12 +22,14 @@ from guarded_exchange.application.ports import UnitOfWorkFactory
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
 from guarded_exchange.application.read_history import GetOrderHistory, GetTrades
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
+from guarded_exchange.application.resolve_confirmation import CancelConfirmation, GetConfirmationStatus
 from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.domain.credentials import EXCHANGE_BYBIT
 from guarded_exchange.domain.policy import Permission
 from guarded_exchange.domain.users import Environment
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, fixed_principal
 from guarded_exchange.interface.mcp.server import UseCases, create_server
+from guarded_exchange.interface.mcp.tools.confirmations import ConfirmationUseCases
 from guarded_exchange.interface.mcp.tools.order_changes import OrderChangeUseCases
 from tests.fakes import (
     FakeAccount,
@@ -85,6 +87,9 @@ def use_cases(
         ),
         activate_kill_switch=ActivateKillSwitch(db, clock),
         order_changes=order_change_use_cases(db, cipher, recheck, rules, clock, trading, changes),
+        confirmations=ConfirmationUseCases(
+            get_status=GetConfirmationStatus(db, clock), cancel=CancelConfirmation(db, clock)
+        ),
     )
 
 

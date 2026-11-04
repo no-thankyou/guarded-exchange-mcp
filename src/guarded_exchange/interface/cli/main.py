@@ -14,6 +14,7 @@ from guarded_exchange.application.kill_switch import KillSwitchChange
 from guarded_exchange.application.policy import OverridesReset, PolicyView
 from guarded_exchange.domain.actions import ALL_ACTION_KINDS
 from guarded_exchange.domain.audit import canonical_decimal, canonical_time
+from guarded_exchange.domain.confirmation import PendingConfirmation
 from guarded_exchange.domain.credentials import WARNING_NO_IP_WHITELIST, ApiKeyPair, Credential
 from guarded_exchange.domain.errors import InvalidParams
 from guarded_exchange.domain.kill_switch import KillSwitch, KillSwitchActor
@@ -86,6 +87,17 @@ class KeyCommands:
     replace: Callable[[Path | None, str | None, ApiKeyPair, bool], StoredCredential]
     delete: Callable[[Path | None, str | None], Credential]
     show: Callable[[Path | None, str | None], tuple[User, Sequence[Credential]]]
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmCommands:
+    """The human's side of confirmation (FR-20, FR-42). Never reachable from MCP. Approve and reject work
+    only if the admin enabled the CLI channel (GX_CONFIRM_CLI_ENABLED)."""
+
+    list: Callable[[Path | None], Sequence[PendingConfirmation]]
+    show: Callable[[Path | None, str], PendingConfirmation]
+    approve: Callable[[Path | None, str], PendingConfirmation]
+    reject: Callable[[Path | None, str], PendingConfirmation]
 
 
 _ENV_FILE_HELP = "dotenv file with GX_* settings (else $GX_ENV_FILE; no implicit ./.env)."
@@ -422,8 +434,13 @@ PendingOpt = Annotated[int | None, typer.Option(help="Confirmations waiting at t
 # --- commands -----------------------------------------------------------------------------
 
 
-def build_cli(
-    serve: Serve, init: Init, policy: PolicyCommands, admin_commands: AdminCommands, keys: KeyCommands
+def build_cli(  # noqa: PLR0917 - one positional group per command family
+    serve: Serve,
+    init: Init,
+    policy: PolicyCommands,
+    admin_commands: AdminCommands,
+    keys: KeyCommands,
+    confirmations: ConfirmCommands | None = None,
 ) -> typer.Typer:
     app = typer.Typer(name="guarded-exchange", no_args_is_help=True, add_completion=False)
 
@@ -455,6 +472,8 @@ def build_cli(
     app.add_typer(_policy_cli(policy), name="policy")
     app.add_typer(_kill_switch_cli(policy, KillSwitchActor.USER), name="kill-switch")
     app.add_typer(_keys_cli(keys), name="keys")
+    if confirmations is not None:
+        app.add_typer(_confirm_cli(confirmations), name="confirm")
     admin = typer.Typer(no_args_is_help=True, help="Admin commands (service channel only, never MCP).")
     admin.add_typer(_admin_policy_cli(policy), name="policy")
     admin.add_typer(_kill_switch_cli(policy, KillSwitchActor.ADMIN), name="kill-switch")
@@ -462,6 +481,87 @@ def build_cli(
     admin.add_typer(_admin_token_cli(admin_commands), name="token")
     app.add_typer(admin, name="admin")
     return app
+
+
+def _confirm_cli(commands: ConfirmCommands) -> typer.Typer:
+    app = typer.Typer(
+        no_args_is_help=True,
+        help="Decide what the agent asked for (the agent cannot): list, approve or reject. Approving works "
+        "only if the admin enabled the CLI channel (GX_CONFIRM_CLI_ENABLED=true).",
+    )
+
+    @app.command("list")
+    def list_command(env_file: EnvFileOpt = None) -> None:
+        """Show the confirmations that wait for you or are being executed."""
+        found = commands.list(env_file)
+        typer.echo("\n\n".join(render_confirmation(p) for p in found) if found else "nothing waits for you")
+
+    @app.command("approve")
+    def approve_command(
+        confirmation_id: Annotated[str, typer.Argument(help="From `confirm list`.")],
+        yes: YesOpt = False,
+        env_file: EnvFileOpt = None,
+    ) -> None:
+        """Approve: the server executes exactly what is shown, re-checked at execution time."""
+        typer.echo(render_confirmation(commands.show(env_file, confirmation_id)))
+        if not yes:
+            _confirm_or_exit("Approve this?")
+        done = commands.approve(env_file, confirmation_id)
+        typer.echo(f"approved {done.id}; the server executes it within seconds (it must be running)")
+
+    @app.command("reject")
+    def reject_command(
+        confirmation_id: Annotated[str, typer.Argument(help="From `confirm list`.")],
+        env_file: EnvFileOpt = None,
+    ) -> None:
+        """Reject: nothing is executed; the agent is told."""
+        done = commands.reject(env_file, confirmation_id)
+        typer.echo(f"rejected {done.id}")
+
+    return app
+
+
+def render_confirmation(pending: PendingConfirmation) -> str:
+    """FR-21: exactly what the human is deciding on, from the server's own record."""
+    lines = [
+        f"confirmation {pending.id}  [{pending.status.value}]",
+        f"  action:      {pending.tool.value} on {pending.environment.value} (risk: {pending.risk.value})",
+        f"  expires:     {canonical_time(pending.expires_at)}",
+        "  asked:",
+        *_tree(pending.action, 2),
+        "  the server will execute (held to this):",
+        *_tree(pending.shown, 2),
+    ]
+    return "\n".join(lines)
+
+
+def _tree(value: object, depth: int) -> list[str]:
+    pad = "  " * depth
+    if isinstance(value, Mapping):
+        out: list[str] = []
+        for key, item in value.items():
+            if isinstance(item, Mapping | list | tuple):
+                out.append(f"{pad}{key}:")
+                out.extend(_tree(item, depth + 1))
+            else:
+                out.append(f"{pad}{key}: {'none' if item is None else _cell(item)}{_origin_note(key, item)}")
+        return out
+    if isinstance(value, list | tuple):
+        out = []
+        for item in value:
+            rows = _tree(item, depth + 1)
+            out.append(f"{pad}-")
+            out.extend(rows)
+        return out
+    return [f"{pad}{_cell(value)}"]
+
+
+def _origin_note(key: str, value: object) -> str:
+    if key != "origin":
+        return ""
+    if value == "external":
+        return "  <-- EXTERNAL order: not placed by this server (a person or another bot)"
+    return "  (judged by the client id prefix, not verified)"
 
 
 def _kill_switch_cli(policy: PolicyCommands, by: KillSwitchActor) -> typer.Typer:

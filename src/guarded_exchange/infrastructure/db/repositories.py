@@ -5,12 +5,18 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, Row, and_, case, delete, literal, or_, select, update
+from sqlalchemy import ColumnElement, Row, and_, case, delete, func, literal, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from guarded_exchange.domain.access_tokens import AccessToken
+from guarded_exchange.domain.actions import ActionKind
 from guarded_exchange.domain.audit import AuditEvent, AuditRecord, JsonValue, canonical_json
+from guarded_exchange.domain.confirmation import (
+    ConfirmationStatus,
+    DecisionChannel,
+    PendingConfirmation,
+)
 from guarded_exchange.domain.credentials import (
     Credential,
     CredentialStatus,
@@ -28,6 +34,7 @@ from guarded_exchange.domain.policy import (
     patch_to_payload,
     settings_to_payload,
 )
+from guarded_exchange.domain.risk import RiskDirection
 from guarded_exchange.domain.users import Environment, User, UserNameTaken, UserStatus
 from guarded_exchange.infrastructure.db.dialect import EpochMillis, insert_for
 from guarded_exchange.infrastructure.db.schema import (
@@ -36,6 +43,7 @@ from guarded_exchange.infrastructure.db.schema import (
     audit_log,
     exchange_credentials,
     idempotency_records,
+    pending_confirmations,
     policies,
     users,
 )
@@ -486,4 +494,157 @@ def _token_from_row(row: Row[tuple[object, ...]]) -> AccessToken:
         token_hash=str(mapping["token_hash"]),
         created_at=mapping["created_at"],
         revoked_at=mapping["revoked_at"],
+    )
+
+
+class SqlConfirmationRepository(_Repository):
+    async def add(self, pending: PendingConfirmation) -> None:
+        self._require_writable("confirmations.add")
+        await self._conn.execute(
+            pending_confirmations.insert().values(
+                id=pending.id,
+                user_id=pending.user_id,
+                credential_id=pending.credential_id,
+                environment=pending.environment.value,
+                tool=pending.tool.value,
+                action=canonical_json(pending.action),
+                action_digest=pending.action_digest,
+                terms_digest=pending.terms_digest,
+                risk=pending.risk.value,
+                shown=canonical_json(pending.shown),
+                status=pending.status.value,
+                idempotency_key=pending.idempotency_key,
+                created_at=pending.created_at,
+                expires_at=pending.expires_at,
+            )
+        )
+
+    async def get(self, pending_id: str) -> PendingConfirmation | None:
+        t = pending_confirmations
+        row = (await self._conn.execute(select(t).where(t.c.id == pending_id))).one_or_none()
+        return None if row is None else _pending_from_row(row)
+
+    async def find_open_by_digest(
+        self, user_id: str, digest: str, now: datetime
+    ) -> PendingConfirmation | None:
+        t = pending_confirmations
+        query = (
+            select(t)
+            .where(
+                t.c.user_id == user_id,
+                t.c.action_digest == digest,
+                t.c.status == ConfirmationStatus.PENDING.value,
+                t.c.expires_at > now,
+            )
+            .order_by(t.c.created_at.desc())
+            .limit(1)
+        )
+        row = (await self._conn.execute(query)).first()
+        return None if row is None else _pending_from_row(row)
+
+    async def find_by_key(self, user_id: str, key: str, since: datetime) -> PendingConfirmation | None:
+        t = pending_confirmations
+        query = (
+            select(t)
+            .where(t.c.user_id == user_id, t.c.idempotency_key == key, t.c.created_at >= since)
+            .order_by(t.c.created_at.desc())
+            .limit(1)
+        )
+        row = (await self._conn.execute(query)).first()
+        return None if row is None else _pending_from_row(row)
+
+    async def count_slots(self, user_id: str, now: datetime) -> int:
+        t = pending_confirmations
+        holding = or_(
+            and_(t.c.status == ConfirmationStatus.PENDING.value, t.c.expires_at > now),
+            t.c.status.in_([ConfirmationStatus.APPROVED.value, ConfirmationStatus.EXECUTING.value]),
+        )
+        count = await self._conn.execute(
+            select(func.count()).select_from(t).where(t.c.user_id == user_id, holding)
+        )
+        return int(count.scalar_one())
+
+    async def list_by_status(
+        self, statuses: frozenset[ConfirmationStatus], *, user_id: str | None = None, limit: int = 100
+    ) -> Sequence[PendingConfirmation]:
+        t = pending_confirmations
+        query = select(t).where(t.c.status.in_([s.value for s in statuses]))
+        if user_id is not None:
+            query = query.where(t.c.user_id == user_id)
+        rows = await self._conn.execute(query.order_by(t.c.created_at, t.c.id).limit(limit))
+        return [_pending_from_row(row) for row in rows]
+
+    async def list_for_credential(
+        self, user_id: str, credential_id: str, statuses: frozenset[ConfirmationStatus]
+    ) -> Sequence[PendingConfirmation]:
+        t = pending_confirmations
+        rows = await self._conn.execute(
+            select(t)
+            .where(
+                t.c.user_id == user_id,
+                t.c.credential_id == credential_id,
+                t.c.status.in_([s.value for s in statuses]),
+            )
+            .order_by(t.c.created_at, t.c.id)
+        )
+        return [_pending_from_row(row) for row in rows]
+
+    async def transition(
+        self,
+        pending_id: str,
+        *,
+        expected: frozenset[ConfirmationStatus],
+        to: ConfirmationStatus,
+        at: datetime,
+        live_at: datetime | None = None,
+        decided_by: str | None = None,
+        channel: DecisionChannel | None = None,
+        result: Mapping[str, JsonValue] | None = None,
+    ) -> bool:
+        self._require_writable("confirmations.transition")
+        t = pending_confirmations
+        values: dict[str, Any] = {"status": to.value}
+        if to is ConfirmationStatus.APPROVED:
+            values["approved_at"] = at
+        elif to is ConfirmationStatus.EXECUTING:
+            values["exec_started_at"] = at
+        else:
+            values["decided_at"] = at
+        if decided_by is not None:
+            values["decided_by"] = decided_by
+        if channel is not None:
+            values["channel"] = channel.value
+        if result is not None:
+            values["result"] = canonical_json(result)
+        conditions = [t.c.id == pending_id, t.c.status.in_([s.value for s in expected])]
+        if live_at is not None:
+            conditions.append(t.c.expires_at > live_at)
+        changed = await self._conn.execute(update(t).where(*conditions).values(**values))
+        return changed.rowcount == 1
+
+
+def _pending_from_row(row: Row[tuple[object, ...]]) -> PendingConfirmation:
+    m = row._mapping
+    raw_channel, raw_result = m["channel"], m["result"]
+    return PendingConfirmation(
+        id=str(m["id"]),
+        user_id=str(m["user_id"]),
+        credential_id=str(m["credential_id"]),
+        environment=Environment(m["environment"]),
+        tool=ActionKind(m["tool"]),
+        action=json.loads(str(m["action"])),
+        action_digest=str(m["action_digest"]),
+        terms_digest=str(m["terms_digest"]),
+        risk=RiskDirection(m["risk"]),
+        shown=json.loads(str(m["shown"])),
+        status=ConfirmationStatus(m["status"]),
+        created_at=m["created_at"],
+        expires_at=m["expires_at"],
+        idempotency_key=m["idempotency_key"],
+        approved_at=m["approved_at"],
+        decided_at=m["decided_at"],
+        decided_by=m["decided_by"],
+        channel=None if raw_channel is None else DecisionChannel(raw_channel),
+        exec_started_at=m["exec_started_at"],
+        result=None if raw_result is None else json.loads(str(raw_result)),
     )

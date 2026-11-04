@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     # Instrument rules (tick size, qty step, minimums) are cached in memory for this long.
     instrument_rules_ttl_s: int = Field(default=600, ge=1, le=86_400)
 
+    # FR-42, E-5: the CLI (`confirm approve|reject`) is a trusted confirmation channel only if the admin
+    # says so. Off by default: an agent with shell access on the same machine could call the CLI itself.
+    # Set it for the server and for the CLI alike (the server decides whether to park an action, the CLI
+    # whether to accept the decision).
+    confirm_cli_enabled: bool = False
+
     # Local storage (PLAN ADR-007): SQLite file, master key file outside its directory.
     db_path: Path = Field(default_factory=default_db_path)
     master_key_file: Path = Field(default_factory=default_master_key_file)
