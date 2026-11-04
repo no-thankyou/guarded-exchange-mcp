@@ -8,6 +8,7 @@ exceptions, never transport-specific ones.
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
+from decimal import Decimal
 from typing import Protocol
 
 from guarded_exchange.domain.access_tokens import AccessToken
@@ -176,6 +177,28 @@ class OrderChanges(Protocol):
 
     async def amend_order(self, keys: ApiKeyPair, amendment: OrderAmendment) -> None:
         """Ask the exchange to change one order's quantity and/or price; raises like ``cancel_order``."""
+        ...
+
+
+class PositionActions(Protocol):
+    """Changing a perpetual's leverage and its position's stop-loss / take-profit (FR-6, FR-8, ticket
+    014). Never retried automatically (ADR-002). The result is confirmed by reading the position
+    (``TradingExchange.get_symbol_position``, D-21)."""
+
+    async def set_leverage(self, keys: ApiKeyPair, symbol: str, leverage: Decimal) -> None:
+        """Set the leverage; "already at this value" is success (D-26: the adapter knows the code).
+
+        Raises:
+            OutcomeUnknown: the request may have reached the exchange; never retried.
+            ExchangeRejected / InvalidParams / ExchangeCredentialsInvalid / RateLimited /
+                ExchangeUnavailable: the exchange did not act on the request.
+        """
+        ...
+
+    async def set_trading_stop(
+        self, keys: ApiKeyPair, symbol: str, take_profit: Decimal | None, stop_loss: Decimal | None
+    ) -> None:
+        """Set the given levels (``None``: untouched) on the open position; raises like ``set_leverage``."""
         ...
 
 

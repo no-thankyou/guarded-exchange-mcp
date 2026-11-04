@@ -60,6 +60,11 @@ from guarded_exchange.application.policy import (
     TightenPolicy,
 )
 from guarded_exchange.application.ports import Authenticator, CredentialCipher, UnitOfWorkFactory
+from guarded_exchange.application.position_actions import (
+    SubmitClosePosition,
+    SubmitSetLeverage,
+    SubmitSetTradingStop,
+)
 from guarded_exchange.application.read_account import GetBalances, GetOpenOrders, GetPositions
 from guarded_exchange.application.read_history import GetOrderHistory, GetTrades
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
@@ -108,6 +113,7 @@ from guarded_exchange.interface.mcp.http import create_http_server, http_app, se
 from guarded_exchange.interface.mcp.server import UseCases, create_server, serve_stdio
 from guarded_exchange.interface.mcp.tools.confirmations import ConfirmationUseCases
 from guarded_exchange.interface.mcp.tools.order_changes import OrderChangeUseCases
+from guarded_exchange.interface.mcp.tools.position_actions import PositionActionUseCases
 
 
 def _version() -> str:
@@ -193,6 +199,15 @@ def build_use_cases(
         confirmations=ConfirmationUseCases(
             get_status=GetConfirmationStatus(uow, clock), cancel=CancelConfirmation(uow, clock)
         ),
+        position_actions=_position_actions(
+            settings,
+            uow,
+            trade_key=trade_key,
+            rules=rules,
+            exchange=exchange,
+            clock=clock,
+            confirmations=confirmations,
+        ),
     )
 
 
@@ -205,6 +220,9 @@ def confirmable_paths(use_cases: UseCases) -> Mapping[ActionKind, ConfirmablePat
         ActionKind.CANCEL_ORDER: changes.cancel_order,
         ActionKind.AMEND_ORDER: changes.amend_order,
         ActionKind.CANCEL_ALL_ORDERS: changes.cancel_all_orders,
+        ActionKind.SET_TRADING_STOP: use_cases.position_actions.set_trading_stop,
+        ActionKind.CLOSE_POSITION: use_cases.position_actions.close_position,
+        ActionKind.SET_LEVERAGE: use_cases.position_actions.set_leverage,
     }
 
 
@@ -233,6 +251,53 @@ def _order_changes(
         cancel_order=SubmitCancelOrder(uow, trade_key, **common),
         amend_order=SubmitAmendOrder(uow, trade_key, rules, trading=exchange, **common),
         cancel_all_orders=SubmitCancelAllOrders(uow, trade_key, **common),
+    )
+
+
+def _position_actions(
+    settings: Settings,
+    uow: UnitOfWorkFactory,
+    *,
+    trade_key: RequireTradingCredential,
+    rules: InstrumentRulesCache,
+    exchange: BybitClient,
+    clock: SystemClock,
+    confirmations: ConfirmationSupport,
+) -> PositionActionUseCases:
+    """SL/TP, close and leverage (ticket 014) on the same adapter and bounds as ``place_order``."""
+    common: dict[str, Any] = {
+        "trading": exchange,
+        "clock": clock,
+        "ids": UuidGenerator(),
+        "exchange": EXCHANGE_BYBIT,
+        "environment": settings.bybit_environment,
+        "send_deadline_s": settings.order_send_deadline_s,
+        "confirmations": confirmations,
+    }
+    return PositionActionUseCases(
+        set_trading_stop=SubmitSetTradingStop(
+            uow,
+            trade_key,
+            rules,
+            actions=exchange,
+            read_back_deadline_s=settings.order_fill_read_deadline_s,
+            **common,
+        ),
+        close_position=SubmitClosePosition(
+            uow,
+            trade_key,
+            rules,
+            market=exchange,
+            fill_read_deadline_s=settings.order_fill_read_deadline_s,
+            **common,
+        ),
+        set_leverage=SubmitSetLeverage(
+            uow,
+            trade_key,
+            actions=exchange,
+            read_back_deadline_s=settings.order_fill_read_deadline_s,
+            **common,
+        ),
     )
 
 

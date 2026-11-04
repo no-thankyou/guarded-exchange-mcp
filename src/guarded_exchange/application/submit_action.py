@@ -71,7 +71,13 @@ from guarded_exchange.application.ports import (
     UnitOfWorkFactory,
 )
 from guarded_exchange.domain.account import OrderSide, SymbolPosition
-from guarded_exchange.domain.actions import ActionKind, OrderKind, PlaceOrder, parse_place_order
+from guarded_exchange.domain.actions import (
+    ActionKind,
+    ClosePosition,
+    OrderKind,
+    PlaceOrder,
+    parse_place_order,
+)
 from guarded_exchange.domain.audit import AuditEvent, AuditEventType, ClientDescription, JsonValue
 from guarded_exchange.domain.confirmation import (
     ConfirmationStatus,
@@ -215,6 +221,10 @@ class _Market:
     band: PriceBand
     best: BestPrices | None
     symbol_position: SymbolPosition | None
+
+
+MarketView = _Market
+"""The market data of a ``place_order``-style decision, for actions that reuse its planning (ticket 014)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1220,7 +1230,7 @@ class SubmitPlaceOrder(ActionPath[PlaceOrder, _Market, OrderPlan, OrderResult]):
         return plan
 
     async def _reconcile(
-        self, pending: PendingConfirmation, action: PlaceOrder
+        self, pending: PendingConfirmation, action: PlaceOrder | ClosePosition
     ) -> tuple[ConfirmationStatus, dict[str, JsonValue]]:
         """FR-27: the order by its deterministic client order id. Found: executed as the exchange shows
         it. Not found: unknown, never failed and never resent (the lists lag behind, the send may have

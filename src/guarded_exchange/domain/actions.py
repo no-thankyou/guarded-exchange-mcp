@@ -2,9 +2,9 @@
 
 ``ActionKind`` names every kind (the policy's confirmation rule uses it, FR-19). The action objects
 arrive with their tickets: ``PlaceOrder`` (011), ``CancelOrder``, ``AmendOrder`` and
-``CancelAllOrders`` (013). An action holds exactly what the agent asked for, normalised and checked
-for shape; sizing against the instrument and the market is the plan's job (``domain.orders``,
-``domain.order_changes``).
+``CancelAllOrders`` (013), ``SetTradingStop``, ``ClosePosition`` and ``SetLeverage`` (014). An action
+holds exactly what the agent asked for, normalised and checked for shape; sizing against the instrument
+and the market is the plan's job (``domain.orders``, ``domain.order_changes``, ``domain.position_actions``).
 """
 
 import re
@@ -207,3 +207,101 @@ def parse_amend_order(
 
 def parse_cancel_all_orders(*, symbol: str, category: str) -> CancelAllOrders:
     return CancelAllOrders(symbol=normalize_symbol(symbol), category=parse_category(category))
+
+
+# --- positions of perpetuals (ticket 014: FR-6, FR-7, FR-8, FR-43) --------------------------------
+
+
+def _require_perpetual(category: Category, tool: str) -> None:
+    if category is not Category.LINEAR:
+        raise InvalidParams(
+            f"{tool} applies to perpetuals (linear) only: spot has no positions",
+            next_step="Use category linear. To sell a spot holding, place a sell order.",
+            details={"field": "category", "reason": "linear_only"},
+        )
+
+
+def _require_positive(name: str, value: Decimal | None) -> None:
+    if value is not None and (not value.is_finite() or value <= 0):
+        raise InvalidParams(f"{name} must be greater than zero", details={"field": name})
+
+
+@dataclass(frozen=True, slots=True)
+class SetTradingStop:
+    """Set or move the stop-loss and/or take-profit of the open position (FR-6). ``None``: unchanged.
+    Removing a level is not offered (it would take protection away)."""
+
+    symbol: str
+    category: Category
+    take_profit: Decimal | None
+    stop_loss: Decimal | None
+
+    kind = ActionKind.SET_TRADING_STOP
+
+    def __post_init__(self) -> None:
+        _require_perpetual(self.category, "set_trading_stop")
+        if self.take_profit is None and self.stop_loss is None:
+            raise InvalidParams(
+                "nothing to set: pass take_profit, stop_loss or both",
+                next_step="Pass the trigger price(s) in USDT.",
+                details={"reason": "no_change"},
+            )
+        _require_positive("take_profit", self.take_profit)
+        _require_positive("stop_loss", self.stop_loss)
+
+
+@dataclass(frozen=True, slots=True)
+class ClosePosition:
+    """Close the open position of a perpetual, fully (``qty`` None) or partly (FR-7)."""
+
+    symbol: str
+    category: Category
+    qty: Decimal | None
+
+    kind = ActionKind.CLOSE_POSITION
+
+    def __post_init__(self) -> None:
+        _require_perpetual(self.category, "close_position")
+        _require_positive("qty", self.qty)
+
+
+@dataclass(frozen=True, slots=True)
+class SetLeverage:
+    """Set the leverage of a perpetual (FR-8)."""
+
+    symbol: str
+    category: Category
+    leverage: Decimal
+
+    kind = ActionKind.SET_LEVERAGE
+
+    def __post_init__(self) -> None:
+        _require_perpetual(self.category, "set_leverage")
+        _require_positive("leverage", self.leverage)
+
+
+def parse_set_trading_stop(
+    *, symbol: str, category: str, take_profit: str | None, stop_loss: str | None
+) -> SetTradingStop:
+    return SetTradingStop(
+        symbol=normalize_symbol(symbol),
+        category=parse_category(category),
+        take_profit=None if take_profit is None else parse_amount("take_profit", take_profit),
+        stop_loss=None if stop_loss is None else parse_amount("stop_loss", stop_loss),
+    )
+
+
+def parse_close_position(*, symbol: str, category: str, qty: str | None) -> ClosePosition:
+    return ClosePosition(
+        symbol=normalize_symbol(symbol),
+        category=parse_category(category),
+        qty=None if qty is None else parse_amount("qty", qty),
+    )
+
+
+def parse_set_leverage(*, symbol: str, category: str, leverage: str) -> SetLeverage:
+    return SetLeverage(
+        symbol=normalize_symbol(symbol),
+        category=parse_category(category),
+        leverage=parse_amount("leverage", leverage),
+    )

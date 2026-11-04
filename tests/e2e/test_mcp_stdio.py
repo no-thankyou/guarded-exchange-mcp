@@ -117,6 +117,8 @@ async def test_stdio_server_answers_and_keeps_stdout_protocol_only(
         "get_trades",
         "get_my_policy",
         "activate_kill_switch",  # FR-44: a read-only user may still stop trading
+        "get_confirmation_status",  # visible to a read-only user; there is no approve tool
+        "cancel_confirmation",
     ]
     # FR-2/FR-28: the local user has no exchange key yet -> a clear refusal, nothing sent to the exchange
     assert no_key.is_error is True

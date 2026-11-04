@@ -15,6 +15,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Final
 from urllib.parse import urlencode
 
@@ -23,17 +24,19 @@ import structlog
 
 from guarded_exchange.domain.account import AccountBalances, Order, Page, Position, SymbolPosition
 from guarded_exchange.domain.credentials import ApiKeyPair, KeyPermissions
-from guarded_exchange.domain.errors import DomainError, ExchangeUnavailable, NotFound
+from guarded_exchange.domain.errors import DomainError, ExchangeRejected, ExchangeUnavailable, NotFound
 from guarded_exchange.domain.history import HistoryPage, HistoryPeriod, Trade
 from guarded_exchange.domain.instruments import Category, InstrumentRules
 from guarded_exchange.domain.market import CandleInterval, Candles, Orderbook, Ticker
 from guarded_exchange.domain.order_changes import OrderAmendment
 from guarded_exchange.domain.orders import OrderFill, OrderRequest, PlacedOrder, PriceBand
 from guarded_exchange.infrastructure.bybit.errors import (
+    NOT_MODIFIED,
     RET_OK,
     RETRYABLE_RET_CODES,
     error_for_create,
     error_for_order_change,
+    error_for_position_change,
     error_for_ret_code,
     outcome_unknown,
     unavailable,
@@ -64,9 +67,11 @@ from guarded_exchange.infrastructure.bybit.mapper import (
     price_band_from_result,
     require_changed_order,
     rules_from_result,
+    set_leverage_body,
     symbol_position_from_result,
     ticker_from_result,
     trades_from_result,
+    trading_stop_body,
     wire_exchange_cursor,
 )
 from guarded_exchange.infrastructure.bybit.signing import signed_headers
@@ -342,6 +347,29 @@ class BybitClient:
             "/v5/order/amend", order_amend_body(amendment), keys=keys, errors=error_for_order_change
         )
         require_changed_order(envelope.result, order_id=amendment.order_id)
+
+    # --- leverage and trading stop (ticket 014): ``PositionActions`` port ----------------------
+
+    async def set_leverage(self, keys: ApiKeyPair, symbol: str, leverage: Decimal) -> None:
+        """``POST /v5/position/set-leverage``, once. "Not modified" (110043) means the leverage already
+        has this value: success (FR-8)."""
+        await self._post_position_change(
+            "/v5/position/set-leverage", set_leverage_body(symbol, leverage), keys
+        )
+
+    async def set_trading_stop(
+        self, keys: ApiKeyPair, symbol: str, take_profit: Decimal | None, stop_loss: Decimal | None
+    ) -> None:
+        """``POST /v5/position/trading-stop``, once; "not modified" (34040) is success too."""
+        body = trading_stop_body(symbol, take_profit, stop_loss)
+        await self._post_position_change("/v5/position/trading-stop", body, keys)
+
+    async def _post_position_change(self, path: str, body: Mapping[str, object], keys: ApiKeyPair) -> None:
+        try:
+            await self._post(path, body, keys=keys, errors=error_for_position_change)
+        except ExchangeRejected as exc:
+            if exc.details.get("reason") != NOT_MODIFIED:
+                raise
 
     async def _post(
         self,

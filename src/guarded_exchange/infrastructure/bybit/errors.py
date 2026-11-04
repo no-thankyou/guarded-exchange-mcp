@@ -260,3 +260,53 @@ def error_for_order_change(  # noqa: PLR0911 - one return per class of answer
             untrusted_text=ret_msg,
         )
     return error_for_ret_code(ret_code, ret_msg, retry_after_s=retry_after_s)
+
+
+# --- leverage and trading stop (ticket 014) ---------------------------------------------------------
+
+NOT_MODIFIED_RET_CODES: Final = frozenset(
+    {
+        110043,  # Set leverage has not been modified (the leverage already has this value)
+        34040,  # Not modified: this TP/SL value is already set
+    }
+)
+"""The state asked for is already the state: the adapter treats it as success (FR-8; checked against
+https://bybit-exchange.github.io/docs/v5/error on 2026-11-04). ``error_for_position_change`` marks it
+with ``details.reason == NOT_MODIFIED``."""
+NOT_MODIFIED: Final = "not_modified"
+
+
+def error_for_position_change(
+    ret_code: int, ret_msg: str, *, retry_after_s: float | None = None
+) -> DomainError:
+    """``retCode`` of ``POST /v5/position/set-leverage`` or ``/trading-stop`` -> domain exception.
+
+    The rule of ``order/create`` (ticket 012): a definite refusal only within the documented refusal
+    families; anything else is ``OutcomeUnknown`` and the use case reads the position to find out.
+    """
+    details = {"exchange_code": str(ret_code)}
+    if ret_code in NOT_MODIFIED_RET_CODES:
+        return ExchangeRejected(
+            "the exchange says the value is already set",
+            details={**details, "reason": NOT_MODIFIED},
+            untrusted_text=ret_msg,
+        )
+    if ret_code in CREDENTIAL_RET_CODES or ret_code in RATE_LIMITED_RET_CODES:
+        return error_for_ret_code(ret_code, ret_msg, retry_after_s=retry_after_s)
+    if ret_code in UNKNOWN_OUTCOME_RET_CODES or not _definite_refusal(ret_code):
+        return OutcomeUnknown(
+            "the exchange did not confirm the change (it failed without a reason or answered with a code "
+            "this server does not recognise as a refusal)",
+            details={**details, "reason": "exchange_internal_error"},
+            untrusted_text=ret_msg,
+        )
+    if ret_code == _PARAM_ERROR:
+        return InvalidParams(
+            "the exchange rejected the values",
+            next_step="Check the prices against the position (a stop-loss on the losing side of the mark "
+            "price, a take-profit on the winning side) and the leverage against get_instrument_rules; "
+            "report the exchange reason to the user.",
+            details=details,
+            untrusted_text=ret_msg,
+        )
+    return error_for_ret_code(ret_code, ret_msg, retry_after_s=retry_after_s)
