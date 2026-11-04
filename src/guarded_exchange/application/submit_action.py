@@ -51,6 +51,7 @@ from guarded_exchange.application.confirmation import (
     ConfirmationSupport,
     PendingRequest,
     decided_event,
+    earlier_pending,
     open_pending,
 )
 from guarded_exchange.application.credentials import RequireTradingCredential
@@ -83,6 +84,7 @@ from guarded_exchange.domain.confirmation import (
     ConfirmationStatus,
     DecisionChannel,
     PendingConfirmation,
+    action_digest,
     intact,
 )
 from guarded_exchange.domain.credentials import ApiKeyPair, key_replaced_or_deleted
@@ -701,12 +703,24 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
     ) -> P | ConfirmationPending:
         """FR-19, FR-25, FR-47 (b): the plan itself, or the action parked for a human."""
         notional = self._confirm_notional(action, plan)
-        if notional is None or not requires_confirmation(policy, action.kind, notional):
+        if notional is None:
             return plan
         support = self._confirmations
+        primary = attempt.claims.primary
+        key = primary.key if primary is not None and primary.kind is KeyKind.EXPLICIT else None
+        if support is not None:  # a repeat meets its earlier confirmation whatever the rule says now
+            digest = action_digest(
+                action.kind, self._payload(action), attempt.environment, attempt.credential_id
+            )
+            earlier = await earlier_pending(uow, attempt.user_id, key, digest, self._clock.now())
+            if earlier is not None:
+                return ConfirmationPending(
+                    earlier, created=False, ask_client_ui=support.client_ui_usable(policy)
+                )
+        if not requires_confirmation(policy, action.kind, notional):
+            return plan
         if support is None or not support.channel_available(policy):
             raise no_confirmation_channel(action.kind)  # fail closed, nothing is parked
-        primary = attempt.claims.primary
         request = PendingRequest(
             pending_id=attempt.action_id,
             user_id=attempt.user_id,
@@ -716,7 +730,7 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
             action=self._payload(action),
             risk=self._risk(action, market),
             shown=self._attempt_details(plan),
-            idempotency_key=primary.key if primary is not None and primary.kind is KeyKind.EXPLICIT else None,
+            idempotency_key=key,
             client=attempt.client,
         )
         parked = await open_pending(uow, request, policy, self._clock.now(), actor=self._actor)

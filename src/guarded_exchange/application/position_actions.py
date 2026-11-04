@@ -84,6 +84,7 @@ from guarded_exchange.domain.errors import (
     ExchangeUnavailable,
     OutcomeUnknown,
     PositionNotFound,
+    RiskDirectionChanged,
 )
 from guarded_exchange.domain.idempotency import IdempotencyRecord, Outcome
 from guarded_exchange.domain.instruments import Category, require_supported_quote
@@ -590,6 +591,12 @@ class SubmitClosePosition(ActionPath[ClosePosition, _CloseRead, OrderPlan, Order
         self, action: ClosePosition, market: _CloseRead, policy: EffectivePolicy, shown: Mapping[str, Any]
     ) -> OrderPlan:
         """FR-48, GP-2: the reduce-only market order the human saw, cut to the position as it is now."""
+        if market.order.side.value != shown.get("close_side"):
+            raise RiskDirectionChanged(
+                "the position flipped side after the confirmation was requested; it was not executed",
+                next_step="Do not retry. Request the close again so the user can confirm what it is now.",
+                details={"reason": "position_changed"},
+            )
         return self._placer._confirmed_plan(market.order, market.market, policy, shown)
 
     async def _reconcile(
@@ -598,7 +605,8 @@ class SubmitClosePosition(ActionPath[ClosePosition, _CloseRead, OrderPlan, Order
         return await self._placer._reconcile(pending, action)
 
     def _attempt_details(self, plan: OrderPlan) -> dict[str, JsonValue]:
-        return self._placer._attempt_details(plan)
+        # the side of the closing order: it tells the human (and the executor) which position is meant
+        return {**self._placer._attempt_details(plan), "close_side": plan.action.side.value}
 
     async def _execute(self, attempt: Attempt, plan: OrderPlan, keys: ApiKeyPair) -> OrderResult:
         return await self._placer._send(attempt, plan, keys)

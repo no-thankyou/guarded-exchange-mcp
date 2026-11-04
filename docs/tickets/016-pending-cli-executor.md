@@ -37,3 +37,12 @@
 7. Рестарт: `EXECUTING` старше 30 с, не в работе процесса → разведка (place/close: `find_order`; остальные — `UNKNOWN`); `APPROVED` старше 30 с → `EXPIRED_AFTER_APPROVAL`. Один процесс; лидерство — 019.
 8. Происхождение `system` по префиксу id в CLI помечено «не проверено»; сверка с журналом (из заметок 013) — не сделана (в `TouchedOrder` нет client id).
 9. Проверки: pytest, ruff check, ruff format --check, mypy, lint-imports — зелёные; `docs/traceability.md` перегенерирован.
+
+### Ревью, раунд 1 (2026-11-04)
+Исправлено: повтор вызова (по ключу в любом статусе pending за 24 ч или по digest открытых PENDING/APPROVED/EXECUTING) ищет свой pending **до** правила подтверждения (`earlier_pending` в `_confirm_if_required`) и получает его, даже если подтверждение уже не требуется (цена упала ниже порога, потолок ослаблен) — иначе уходило два ордера под одним ключом. Регрессионные тесты: `test_a_keyed_repeat_after_execution_...`, `..._while_approved_...`, `test_a_repeat_while_pending_after_the_price_dropped_below_the_threshold_stays_one_order[k-1|None]`. M-1: граница цены FR-48 для buy и sell (`test_a_buy_is_held_...`, `test_a_sell_is_held_...`; мутант `price = price` убит). Повтор ключа закрытого pending говорит «новая попытка — новый ключ». `close_position` отказывает, если сторона позиции сменилась (`position_changed`; в `shown` добавлено `close_side`). Тест перепроверки профиля под lock.
+
+### v2 (замечания ревью, не сделано)
+- Executor исполняет `APPROVED` последовательно: долгое исполнение одного может задержать следующий за дедлайн `approved_at + 30 с` (он тогда `EXPIRED_AFTER_APPROVAL`); при росте нагрузки — параллельные задачи.
+- Скан берёт `limit=50` на статус (`_listed`): при большом числе записей часть ждёт следующего прохода.
+- D-7: eager-отмена `PENDING/APPROVED` при включении kill switch.
+- После сбоя записи исхода pending остаётся `EXECUTING`, потом разведка даёт `UNKNOWN` без деталей отправки (`details`), кроме `reconnaissance`.

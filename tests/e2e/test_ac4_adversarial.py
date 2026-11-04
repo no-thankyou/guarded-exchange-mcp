@@ -226,7 +226,7 @@ async def test_cancelling_is_not_approving_and_another_users_confirmation_is_not
     setup = Setup(cli=True)
     await setup.grant()
     async with Client(setup.server()) as client:
-        cid = (await client.call_tool("place_order", MARKET_BUY)).structured_content["confirmation_id"]  # type: ignore[index]
+        cid = (await client.call_tool("place_order", MARKET_BUY)).structured_content["confirmation_id"]
         cancelled = await client.call_tool("cancel_confirmation", {"confirmation_id": cid})
         status = await client.call_tool("get_confirmation_status", {"confirmation_id": cid})
         stranger = await client.call_tool("cancel_confirmation", {"confirmation_id": "someone-elses-0001"})

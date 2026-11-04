@@ -93,12 +93,13 @@ class Setup:
         )
 
     async def grant(self, **extra: Any) -> None:
-        patch = PolicyPatch(
-            profile=Profile.TRADE,
-            allowlist=frozenset({InstrumentRef(Category.LINEAR, "BTCUSDT")}),
-            confirm_actions=ALL_ACTION_KINDS,
+        fields: dict[str, Any] = {
+            "profile": Profile.TRADE,
+            "allowlist": frozenset({InstrumentRef(Category.LINEAR, "BTCUSDT")}),
+            "confirm_actions": ALL_ACTION_KINDS,
             **extra,
-        )
+        }
+        patch = PolicyPatch(**fields)
         await SetCeiling(self.db, self.clock)(self.user.name, patch)
 
     def pendings(self) -> list[Any]:
@@ -307,7 +308,7 @@ async def test_a_declined_confirmation_cannot_be_revived_by_replaying_an_accept(
     await setup.grant()
     async with Client(setup.server(), elicitation_callback=Human(ACCEPT)) as client:
         first = await _first_round(client)
-        no = {"confirm": ElicitResult(action="decline")}
+        no: InputResponses = {"confirm": ElicitResult(action="decline")}
         await client.session.call_tool(
             "set_trading_stop", STOP, input_responses=no, request_state=first.request_state
         )
@@ -462,7 +463,7 @@ async def test_a_form_accept_and_a_cli_approve_at_the_same_time_execute_once() -
     assert winner in {"client_ui", "cli"}
     assert len(setup.actions.stops) == 1
     assert (setup.pendings())[0].status is ConfirmationStatus.EXECUTED
-    assert (setup.pendings())[0].channel.value == winner  # type: ignore[union-attr]
+    assert (setup.pendings())[0].channel.value == winner
     assert sum(isinstance(o, Exception) for o in outcomes) <= 1  # the loser is told, or just reads the state
 
 
@@ -482,3 +483,17 @@ async def test_a_cli_approval_first_leaves_the_form_answer_with_the_state_it_fou
     assert _structured(result)["status"] == "approved"
     assert [d.payload["channel"] for d in setup.decisions()] == ["cli"]
     assert setup.actions.stops == []  # the executor, not the form, executes a CLI approval
+
+
+async def test_a_repeat_during_the_elicitation_gets_the_same_pending_and_sends_nothing() -> None:
+    setup = Setup()
+    await setup.grant()
+    async with Client(setup.server(), elicitation_callback=Human(ACCEPT)) as client:
+        first = await _first_round(client, "place_order", MARKET_BUY)
+        await setup.grant(confirm_actions=frozenset())  # the rule is gone, the earlier pending is not
+        repeat = await _first_round(client, "place_order", MARKET_BUY)
+
+    assert first.request_state
+    assert repeat.request_state
+    assert len(setup.pendings()) == 1
+    assert setup.trading.sent == []
