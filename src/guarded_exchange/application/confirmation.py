@@ -12,7 +12,7 @@ it is raised so that no action type needs a second return type. The MCP layer tu
 """
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Final
 
@@ -24,6 +24,7 @@ from guarded_exchange.domain.audit import AuditEvent, AuditEventType, ClientDesc
 from guarded_exchange.domain.confirmation import (
     INVALIDATABLE,
     KEY_MEMORY,
+    SLOT_STATUSES,
     ConfirmationStatus,
     DecisionChannel,
     PendingConfirmation,
@@ -106,7 +107,7 @@ async def open_pending(
         ttl_s=policy.confirmation_ttl_s,
         idempotency_key=request.idempotency_key,
     )
-    repeat = await _earlier(uow, pending, now)
+    repeat = await earlier_pending(uow, pending.user_id, pending.idempotency_key, pending.action_digest, now)
     if repeat is not None:
         return ConfirmationPending(repeat, created=False)
     if await uow.confirmations.count_slots(pending.user_id, now) >= policy.max_pending:
@@ -142,23 +143,28 @@ async def open_pending(
     return ConfirmationPending(pending, created=True)
 
 
-async def _earlier(
-    uow: UnitOfWork, pending: PendingConfirmation, now: datetime
+async def earlier_pending(
+    uow: UnitOfWork, user_id: str, key: str | None, digest: str, now: datetime
 ) -> PendingConfirmation | None:
-    if pending.idempotency_key is not None:
-        keyed = await uow.confirmations.find_by_key(
-            pending.user_id, pending.idempotency_key, now - KEY_MEMORY
-        )
+    """The confirmation an identical call already created (D-20 (2)), in any state for the same
+    idempotency key (24 h), or still open for the same call. Asked **before** the confirmation rule: a
+    repeat must meet its earlier confirmation even if the rule no longer applies (price moved, ceiling
+    relaxed), or the call would send while the first one still waits for the human."""
+    if key is not None:
+        keyed = await uow.confirmations.find_by_key(user_id, key, now - KEY_MEMORY)
         if keyed is not None:
-            if keyed.action_digest != pending.action_digest:
+            if keyed.action_digest != digest:
                 raise IdempotencyConflict(
                     "this idempotency_key was already used for a call with other arguments; nothing was sent",
                     next_step="Use a new idempotency_key for a new action; reuse a key only to repeat "
                     "exactly the same call.",
                     details={"reason": "different_arguments"},
                 )
-            return keyed
-    return await uow.confirmations.find_open_by_digest(pending.user_id, pending.action_digest, now)
+            return replace(keyed, status=keyed.status_at(now))
+    for pending in await uow.confirmations.list_by_status(SLOT_STATUSES, user_id=user_id):
+        if pending.action_digest == digest and pending.status_at(now) in SLOT_STATUSES:
+            return pending
+    return None
 
 
 def decided_event(

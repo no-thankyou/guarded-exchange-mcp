@@ -32,6 +32,24 @@ _NEXT: Final = {
 }
 
 
+_NEW_ATTEMPT: Final = (
+    " This call repeated an earlier one that is already over: a new attempt needs a new idempotency_key."
+)
+_CLOSED: Final = frozenset(
+    {
+        ConfirmationStatus.REJECTED,
+        ConfirmationStatus.EXPIRED,
+        ConfirmationStatus.EXPIRED_AFTER_APPROVAL,
+        ConfirmationStatus.CANCELLED,
+        ConfirmationStatus.FAILED,
+    }
+)
+
+
+def _is_repeat_of_closed(pending: PendingConfirmation, already_waiting: bool | None) -> bool:
+    return already_waiting is True and pending.status in _CLOSED
+
+
 class ConfirmationOut(BaseModel):
     """One confirmation: what was asked, what the user is shown, where it stands."""
 
@@ -75,5 +93,6 @@ class ConfirmationOut(BaseModel):
             shown_to_user=dict(pending.shown),
             result=None if pending.result is None else dict(pending.result),
             already_waiting=already_waiting,
-            next_step=_NEXT[pending.status],
+            next_step=_NEXT[pending.status]
+            + (_NEW_ATTEMPT if _is_repeat_of_closed(pending, already_waiting) else ""),
         )

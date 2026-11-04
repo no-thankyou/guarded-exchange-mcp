@@ -897,3 +897,141 @@ async def test_the_exchange_failing_to_answer_is_an_unknown_outcome_of_the_confi
 
     assert world.stored(pending).status is S.UNKNOWN
     assert len(world.trading.sent) == 1
+
+
+# --- review round 1 ----------------------------------------------------------------------------
+
+
+def _ticker(world: World, **prices: str) -> None:
+    key = ("BTCUSDT", Category.LINEAR)
+    changes: dict[str, Any] = {name: Decimal(value) for name, value in prices.items()}
+    world.exchange.tickers[key] = replace(world.exchange.tickers[key], **changes)
+
+
+async def test_a_keyed_repeat_after_execution_does_not_send_again_when_the_rule_no_longer_applies() -> None:
+    world = make_world()
+    await world.grant(confirm_actions=frozenset(), confirm_above_notional_usdt=Decimal(50))
+    pending = await world.parked(world.buy(idempotency_key="k-1"))
+    await world.approve(pending)
+    await world.executor.run_once()
+    await world.grant(confirm_actions=frozenset(), confirm_above_notional_usdt=None)  # the admin relaxes it
+
+    world.clock.advance(timedelta(seconds=5))
+    with pytest.raises(ConfirmationPending) as repeat:
+        await world.buy(idempotency_key="k-1")
+
+    assert (repeat.value.pending.id, repeat.value.pending.status) == (pending.id, S.EXECUTED)
+    assert len(world.trading.sent) == 1
+
+
+async def test_a_keyed_repeat_while_approved_does_not_send_again_when_the_rule_no_longer_applies() -> None:
+    world = make_world()
+    await world.grant(confirm_actions=frozenset(), confirm_above_notional_usdt=Decimal(50))
+    pending = await world.parked(world.buy(idempotency_key="k-1"))
+    await world.approve(pending)
+    await world.grant(confirm_actions=frozenset(), confirm_above_notional_usdt=None)
+
+    with pytest.raises(ConfirmationPending):
+        await world.buy(idempotency_key="k-1")
+    await world.executor.run_once()
+
+    assert len(world.trading.sent) == 1
+
+
+@pytest.mark.parametrize("key", ["k-1", None])
+async def test_a_repeat_while_pending_after_the_price_dropped_below_the_threshold_stays_one_order(
+    key: str | None,
+) -> None:
+    world = make_world()
+    await world.grant(confirm_actions=frozenset(), confirm_above_notional_usdt=Decimal(80))
+    pending = await world.parked(world.buy(idempotency_key=key))
+    _ticker(world, bid_price="77000", ask_price="77000.1", last_price="77000")  # now below the threshold
+
+    with pytest.raises(ConfirmationPending) as repeat:
+        await world.buy(idempotency_key=key)
+    await world.approve(pending)
+    await world.executor.run_once()
+
+    assert repeat.value.pending.id == pending.id
+    assert len(world.trading.sent) == 1
+
+
+async def test_a_keyed_repeat_of_a_rejected_confirmation_says_a_new_attempt_needs_a_new_key() -> None:
+    from guarded_exchange.interface.mcp.schemas_confirmation import ConfirmationOut  # noqa: PLC0415
+
+    world = make_world()
+    await world.grant()
+    pending = await world.parked(world.buy(idempotency_key="k-1"))
+    await world.resolve.reject(pending.id)
+
+    with pytest.raises(ConfirmationPending) as repeat:
+        await world.buy(idempotency_key="k-1")
+    out = ConfirmationOut.from_domain(repeat.value.pending, already_waiting=not repeat.value.created)
+
+    assert out.status == "rejected"
+    assert "new idempotency_key" in out.next_step
+    assert world.trading.sent == []
+
+
+@pytest.mark.req("FR-48")
+async def test_a_buy_is_held_to_the_shown_price_when_the_fresh_bound_is_worse_but_inside_the_band() -> None:
+    world = make_world()
+    await world.grant(slippage_pct=Decimal("0.1"))
+    pending = await world.parked(world.buy())
+    shown = Decimal(j(pending.shown)["order"]["price"])
+    await world.approve(pending)
+
+    _ticker(world, ask_price="81000")  # the fresh worst price is about 81081, below the band edge 81747.7
+    await world.executor.run_once()
+
+    assert [o.price for o in world.trading.sent] == [shown]
+
+
+@pytest.mark.req("FR-48")
+async def test_a_sell_is_held_to_the_shown_price_when_the_fresh_bound_is_worse_but_inside_the_band() -> None:
+    world = make_world()
+    await world.grant(slippage_pct=Decimal("0.1"))
+    pending = await world.parked(world.buy(side="sell"))
+    shown = Decimal(j(pending.shown)["order"]["price"])
+    await world.approve(pending)
+
+    _ticker(world, bid_price="80300")  # the fresh worst price is about 80220, above the band edge 80128.9
+    await world.executor.run_once()
+
+    assert [o.price for o in world.trading.sent] == [shown]
+
+
+async def test_a_close_is_refused_when_the_position_flipped_side_while_it_waited() -> None:
+    world = make_world()
+    await world.grant()
+    pending = await world.parked(world.close(world.user.id, ClosePositionInput("BTCUSDT", "linear"), CLIENT))
+    await world.approve(pending)
+
+    world.hold(side=PositionSide.SHORT)
+    await world.executor.run_once()
+
+    stored = world.stored(pending)
+    assert stored.status is S.FAILED
+    assert j(stored.result)["outcome"]["details"]["reason"] == "position_changed"
+    assert world.trading.sent == []
+
+
+async def test_the_profile_is_checked_again_under_the_lock_not_only_before_the_reads() -> None:
+    world = make_world()
+    await world.grant()
+    pending = await world.parked(world.buy())
+    await world.approve(pending)
+
+    def lower_profile() -> None:  # between the early authorisation and the decision transaction
+        record = world.db.state.policies[world.user.id]
+        world.db.state.policies[world.user.id] = replace(
+            record, overrides=replace(record.overrides, profile=Profile.READ_ONLY)
+        )
+
+    world.trading.before_band = lower_profile
+    await world.executor.run_once()
+
+    stored = world.stored(pending)
+    assert stored.status is S.FAILED
+    assert j(stored.result)["outcome"]["code"] == "permission_denied"
+    assert world.trading.sent == []
