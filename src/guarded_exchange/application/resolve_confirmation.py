@@ -34,12 +34,12 @@ from guarded_exchange.domain.errors import (
     NotFound,
 )
 
-_NOT_FOUND = "there is no such confirmation"
+_NO_SUCH = "there is no such confirmation"
 
 
-def _not_found() -> NotFound:
+def not_found() -> NotFound:
     return NotFound(
-        _NOT_FOUND,
+        _NO_SUCH,
         next_step="Check the confirmation_id as the call that parked the action returned it.",
         details={"reason": "confirmation_not_found"},
     )
@@ -51,6 +51,23 @@ def _not_pending(pending: PendingConfirmation, now_status: ConfirmationStatus) -
         next_step="Nothing to do; read its state with get_confirmation_status.",
         details={"status": now_status.value},
     )
+
+
+async def expire_waiting(uow: UnitOfWork, pending: PendingConfirmation, now: datetime) -> None:
+    """A waiting confirmation past its expiry becomes ``expired`` (journaled); caller holds ``lock_user``."""
+    if await uow.confirmations.transition(
+        pending.id,
+        expected=DECIDABLE,
+        to=ConfirmationStatus.EXPIRED,
+        at=now,
+        channel=DecisionChannel.SYSTEM,
+        decided_by=SYSTEM_ACTOR,
+    ):
+        await uow.audit.append(
+            pending.user_id,
+            decided_event(pending, ConfirmationStatus.EXPIRED, DecisionChannel.SYSTEM, SYSTEM_ACTOR),
+            now,
+        )
 
 
 class ResolveConfirmation:
@@ -79,14 +96,14 @@ class ResolveConfirmation:
         async with self._uow(write=True) as uow:
             first = await uow.confirmations.get(pending_id)
             if first is None:
-                raise _not_found()
+                raise not_found()
             await uow.lock_user(first.user_id)
             pending = await uow.confirmations.get(pending_id)
             if pending is None:
-                raise _not_found()
+                raise not_found()
             now = self._clock.now()
             if pending.status is ConfirmationStatus.PENDING and pending.expired(now):
-                await self._expire(uow, pending, now)
+                await expire_waiting(uow, pending, now)
                 failure = ConfirmationExpired(
                     f"confirmation {pending.id} expired at {pending.expires_at.isoformat()}; "
                     "nothing was executed",
@@ -113,22 +130,6 @@ class ResolveConfirmation:
         decided = await self._get(pending_id)
         return decided if decided is not None else replace(pending, status=to)
 
-    @staticmethod
-    async def _expire(uow: UnitOfWork, pending: PendingConfirmation, now: datetime) -> None:
-        if await uow.confirmations.transition(
-            pending.id,
-            expected=DECIDABLE,
-            to=ConfirmationStatus.EXPIRED,
-            at=now,
-            channel=DecisionChannel.SYSTEM,
-            decided_by=SYSTEM_ACTOR,
-        ):
-            await uow.audit.append(
-                pending.user_id,
-                decided_event(pending, ConfirmationStatus.EXPIRED, DecisionChannel.SYSTEM, SYSTEM_ACTOR),
-                now,
-            )
-
     async def _get(self, pending_id: str) -> PendingConfirmation | None:
         async with self._uow(write=False) as uow:
             return await uow.confirmations.get(pending_id)
@@ -153,7 +154,7 @@ class CancelConfirmation:
             await uow.lock_user(user.id)
             pending = await uow.confirmations.get(pending_id)
             if pending is None or pending.user_id != user.id:
-                raise _not_found()
+                raise not_found()
             now = self._clock.now()
             if await uow.confirmations.transition(
                 pending.id,
@@ -190,7 +191,7 @@ class GetConfirmationStatus:
                 raise no_access()
             pending = await uow.confirmations.get(pending_id)
         if pending is None or pending.user_id != user.id:
-            raise _not_found()
+            raise not_found()
         return replace(pending, status=pending.status_at(self._clock.now()))
 
 
@@ -218,5 +219,5 @@ class ShowConfirmation:
         async with self._uow(write=False) as uow:
             pending = await uow.confirmations.get(pending_id)
         if pending is None:
-            raise _not_found()
+            raise not_found()
         return pending

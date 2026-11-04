@@ -6,7 +6,7 @@ from typing import Annotated, Any
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import CallToolResult, ToolAnnotations
+from mcp.types import CallToolResult, InputRequiredResult, ToolAnnotations
 from pydantic import Field
 
 from guarded_exchange.application.order_changes import (
@@ -17,11 +17,11 @@ from guarded_exchange.application.order_changes import (
     SubmitCancelAllOrders,
     SubmitCancelOrder,
 )
-from guarded_exchange.domain.actions import ORDER_ID_PATTERN
+from guarded_exchange.domain.actions import ORDER_ID_PATTERN, ActionKind
 from guarded_exchange.domain.idempotency import IDEMPOTENCY_KEY_PATTERN
 from guarded_exchange.domain.order_changes import CANCEL_ALL_MAX
 from guarded_exchange.interface.mcp.access import PrincipalProvider
-from guarded_exchange.interface.mcp.results import run_tool
+from guarded_exchange.interface.mcp.confirm_ui import ClientUiChannel, run_confirmable
 from guarded_exchange.interface.mcp.schemas_order_changes import AmendOrderOut, CancelAllOut, CancelOrderOut
 from guarded_exchange.interface.mcp.schemas_responses import (
     AmendOrderResponse,
@@ -95,7 +95,13 @@ class OrderChangeUseCases:
     cancel_all_orders: SubmitCancelAllOrders
 
 
-def register(mcp: MCPServer[Any], *, use_cases: OrderChangeUseCases, principal: PrincipalProvider) -> None:
+def register(
+    mcp: MCPServer[Any],
+    *,
+    client_ui: ClientUiChannel,
+    use_cases: OrderChangeUseCases,
+    principal: PrincipalProvider,
+) -> None:
     @mcp.tool(
         name="cancel_order", title="Cancel order", description=CANCEL_ORDER_DESCRIPTION, annotations=_CHANGES
     )
@@ -105,13 +111,13 @@ def register(mcp: MCPServer[Any], *, use_cases: OrderChangeUseCases, principal: 
         order_id: OrderIdArg,
         ctx: Context,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, CancelOrderResponse]:
+    ) -> Annotated[CallToolResult, CancelOrderResponse] | InputRequiredResult:
         async def call() -> CancelOrderOut:
             request = CancelOrderInput(symbol, category, order_id, idempotency_key)
             result = await use_cases.cancel_order(principal(), request, client_description(ctx))
             return CancelOrderOut.from_domain(result)
 
-        return await run_tool("cancel_order", ctx.request_id, call())
+        return await run_confirmable(ActionKind.CANCEL_ORDER, ctx, call, client_ui)
 
     @mcp.tool(
         name="amend_order", title="Amend order", description=AMEND_ORDER_DESCRIPTION, annotations=_CHANGES
@@ -124,13 +130,13 @@ def register(mcp: MCPServer[Any], *, use_cases: OrderChangeUseCases, principal: 
         qty: NewQtyArg = None,
         price: NewPriceArg = None,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, AmendOrderResponse]:
+    ) -> Annotated[CallToolResult, AmendOrderResponse] | InputRequiredResult:
         async def call() -> AmendOrderOut:
             request = AmendOrderInput(symbol, category, order_id, qty, price, idempotency_key)
             result = await use_cases.amend_order(principal(), request, client_description(ctx))
             return AmendOrderOut.from_domain(result)
 
-        return await run_tool("amend_order", ctx.request_id, call())
+        return await run_confirmable(ActionKind.AMEND_ORDER, ctx, call, client_ui)
 
     @mcp.tool(
         name="cancel_all_orders",
@@ -143,10 +149,10 @@ def register(mcp: MCPServer[Any], *, use_cases: OrderChangeUseCases, principal: 
         category: CategoryArg,
         ctx: Context,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, CancelAllResponse]:
+    ) -> Annotated[CallToolResult, CancelAllResponse] | InputRequiredResult:
         async def call() -> CancelAllOut:
             request = CancelAllOrdersInput(symbol, category, idempotency_key)
             result = await use_cases.cancel_all_orders(principal(), request, client_description(ctx))
             return CancelAllOut.from_domain(result)
 
-        return await run_tool("cancel_all_orders", ctx.request_id, call())
+        return await run_confirmable(ActionKind.CANCEL_ALL_ORDERS, ctx, call, client_ui)

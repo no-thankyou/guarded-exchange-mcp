@@ -1,7 +1,8 @@
 """The console agent against the real server in-process, on a scripted provider (FR-39, AC-5).
 
-The confirmation demo needs the UI channel (ticket 020); until then the server fails closed with
-``confirmation_channel_unavailable`` and the agent must pass that to the model, not crash.
+The confirmation demo goes through the client-UI channel (ticket 020, MRTR): the console asks the human,
+the model never sees the form. Without that channel the server fails closed with
+``confirmation_channel_unavailable`` and the agent passes that to the model, not crash.
 """
 
 import pytest
@@ -10,6 +11,8 @@ from mcp import Client
 from guarded_agent.console import ConsoleElicitation
 from guarded_agent.loop import Agent, AgentRun, McpToolSession
 from guarded_agent.provider import AssistantTurn, ScriptedProvider, ToolCall
+from guarded_exchange.application.confirmation import ConfirmationSupport
+from guarded_exchange.application.credentials import OpenCredentialKeys
 from guarded_exchange.application.policy import SetCeiling
 from guarded_exchange.domain.actions import ActionKind
 from guarded_exchange.domain.credentials import ApiKeyPair, KeyPermissions
@@ -45,7 +48,9 @@ SCRIPT = [
 ]
 
 
-async def _demo(*, confirm: bool, answers: list[str]) -> tuple[AgentRun, FakeTrading, list[str]]:
+async def _demo(
+    *, confirm: bool, answers: list[str], ui: bool = False
+) -> tuple[AgentRun, FakeTrading, list[str]]:
     db, clock, cipher = InMemoryDatabase(), FakeClock(), FakeCipher()
     user = db.add_user()
     db.add_credential(user, cipher, KEYS, permissions=TRADING_KEY)
@@ -62,6 +67,9 @@ async def _demo(*, confirm: bool, answers: list[str]) -> tuple[AgentRun, FakeTra
         cipher=cipher,
         trading=trading,
         clock=clock,
+        confirmations=ConfirmationSupport(cli_enabled=False, open_keys=OpenCredentialKeys(db, cipher))
+        if ui
+        else None,
     )
     policy = PolicyPatch(
         profile=Profile.TRADE,
@@ -103,9 +111,8 @@ async def test_without_a_ui_channel_the_agent_gets_confirmation_channel_unavaila
     assert said == []
 
 
-@pytest.mark.skip(reason="needs 020: the server asks for confirmation through elicitation (MRTR)")
 async def test_ac5_the_human_confirms_in_the_console_and_the_order_is_sent() -> None:
-    run, trading, said = await _demo(confirm=True, answers=["a", "y"])
+    run, trading, said = await _demo(confirm=True, answers=["a", "y"], ui=True)
 
     assert said
     assert "BTCUSDT" in said[0]
@@ -113,9 +120,8 @@ async def test_ac5_the_human_confirms_in_the_console_and_the_order_is_sent() -> 
     assert _sent(trading) == 1
 
 
-@pytest.mark.skip(reason="needs 020: the server asks for confirmation through elicitation (MRTR)")
 async def test_ac5_a_declined_confirmation_sends_nothing() -> None:
-    run, trading, said = await _demo(confirm=True, answers=["d"])
+    run, trading, said = await _demo(confirm=True, answers=["d"], ui=True)
 
     assert said
     assert run.steps[1].result.is_error

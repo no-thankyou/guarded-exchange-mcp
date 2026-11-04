@@ -11,15 +11,16 @@ from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import CallToolResult, ToolAnnotations
+from mcp.types import CallToolResult, InputRequiredResult, ToolAnnotations
 from pydantic import Field
 
 from guarded_exchange.application.submit_action import PlaceOrderInput, SubmitPlaceOrder
+from guarded_exchange.domain.actions import ActionKind
 from guarded_exchange.domain.audit import ClientDescription
 from guarded_exchange.domain.idempotency import IDEMPOTENCY_KEY_PATTERN
 from guarded_exchange.domain.money import AMOUNT_PATTERN
 from guarded_exchange.interface.mcp.access import PrincipalProvider
-from guarded_exchange.interface.mcp.results import run_tool
+from guarded_exchange.interface.mcp.confirm_ui import ClientUiChannel, run_confirmable
 from guarded_exchange.interface.mcp.schemas import PlaceOrderOut
 from guarded_exchange.interface.mcp.schemas_responses import PlaceOrderResponse
 from guarded_exchange.interface.mcp.tools.market import CategoryArg, SymbolArg
@@ -85,7 +86,13 @@ def client_description(ctx: Context) -> ClientDescription | None:
     return ClientDescription.sanitized(params.client_info.name, params.client_info.version)
 
 
-def register(mcp: MCPServer[Any], *, place_order: SubmitPlaceOrder, principal: PrincipalProvider) -> None:
+def register(
+    mcp: MCPServer[Any],
+    *,
+    client_ui: ClientUiChannel,
+    place_order: SubmitPlaceOrder,
+    principal: PrincipalProvider,
+) -> None:
     @mcp.tool(
         name="place_order", title="Place order", description=PLACE_ORDER_DESCRIPTION, annotations=_TRADING
     )
@@ -99,7 +106,7 @@ def register(mcp: MCPServer[Any], *, place_order: SubmitPlaceOrder, principal: P
         price: PriceArg = None,
         reduce_only: ReduceOnlyArg = False,
         idempotency_key: IdempotencyKeyArg = None,
-    ) -> Annotated[CallToolResult, PlaceOrderResponse]:
+    ) -> Annotated[CallToolResult, PlaceOrderResponse] | InputRequiredResult:
         async def call() -> PlaceOrderOut:
             request = PlaceOrderInput(
                 symbol=symbol,
@@ -113,4 +120,4 @@ def register(mcp: MCPServer[Any], *, place_order: SubmitPlaceOrder, principal: P
             )
             return PlaceOrderOut.from_domain(await place_order(principal(), request, client_description(ctx)))
 
-        return await run_tool("place_order", ctx.request_id, call())
+        return await run_confirmable(ActionKind.PLACE_ORDER, ctx, call, client_ui)

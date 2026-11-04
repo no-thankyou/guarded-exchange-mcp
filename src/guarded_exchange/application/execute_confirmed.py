@@ -46,88 +46,33 @@ class ConfirmablePath(Protocol):
     async def reconcile_confirmed(self, pending: PendingConfirmation) -> None: ...
 
 
-class ConfirmedActionExecutor:
+class ExecuteConfirmed:
+    """Executes one ``approved`` confirmation through its action path - the single way an approval becomes
+    an action, whoever approved it: the background executor (CLI approvals) and the UI channel's second
+    round (same call, FR-47 (a)) both come here. The path's CAS ``approved -> executing`` keeps it to one
+    execution; a second caller finds nothing to do."""
+
     def __init__(
-        self,
-        uow: UnitOfWorkFactory,
-        clock: Clock,
-        paths: Mapping[ActionKind, ConfirmablePath],
-        *,
-        scan_interval_s: float = DEFAULT_SCAN_INTERVAL_S,
+        self, uow: UnitOfWorkFactory, clock: Clock, paths: Mapping[ActionKind, ConfirmablePath]
     ) -> None:
         self._uow = uow
         self._clock = clock
         self._paths = paths
-        self._scan_interval_s = scan_interval_s
-        self._running: set[str] = set()
+        self.running: set[str] = set()
         """Confirmations this process is executing right now: not reconciled behind its back."""
 
-    async def run(self) -> None:
-        """Scan until cancelled. A failing pass is logged and the next one tries again."""
-        while True:
-            try:
-                await self.run_once()
-            except Exception:
-                log.exception("confirmed_executor_pass_failed")
-            await anyio.sleep(self._scan_interval_s)
-
-    async def run_once(self) -> None:
-        await self._expire_waiting()
-        approved = await self._listed({ConfirmationStatus.APPROVED})
-        for pending in approved:
-            await self._execute(pending)
-        now = self._clock.now()
-        for pending in await self._listed({ConfirmationStatus.EXECUTING}):
-            started = pending.exec_started_at
-            if pending.id in self._running or started is None or now < started + RECONCILE_AFTER:
-                continue
-            await self._reconcile(pending)
-
-    async def _listed(self, statuses: set[ConfirmationStatus]) -> list[PendingConfirmation]:
-        async with self._uow(write=False) as uow:
-            return list(await uow.confirmations.list_by_status(frozenset(statuses), limit=_BATCH))
-
-    async def _expire_waiting(self) -> None:
-        now = self._clock.now()
-        for pending in await self._listed({ConfirmationStatus.PENDING}):
-            if not pending.expired(now):
-                continue
-            async with self._uow(write=True) as uow:
-                await uow.lock_user(pending.user_id)
-                if await uow.confirmations.transition(
-                    pending.id,
-                    expected=frozenset({ConfirmationStatus.PENDING}),
-                    to=ConfirmationStatus.EXPIRED,
-                    at=now,
-                    channel=DecisionChannel.SYSTEM,
-                    decided_by=SYSTEM_ACTOR,
-                ):
-                    event = decided_event(
-                        pending, ConfirmationStatus.EXPIRED, DecisionChannel.SYSTEM, SYSTEM_ACTOR
-                    )
-                    await uow.audit.append(pending.user_id, event, now)
-
-    async def _execute(self, pending: PendingConfirmation) -> None:
+    async def __call__(self, pending: PendingConfirmation) -> None:
         path = self._paths.get(pending.tool)
         if path is None:
             await self._fail_unsupported(pending)
             return
-        self._running.add(pending.id)
+        self.running.add(pending.id)
         try:
             await path.run_confirmed(pending)
         except Exception:
             log.exception("confirmed_action_failed_to_run", confirmation_id=pending.id)
         finally:
-            self._running.discard(pending.id)
-
-    async def _reconcile(self, pending: PendingConfirmation) -> None:
-        path = self._paths.get(pending.tool)
-        if path is None:
-            return
-        try:
-            await path.reconcile_confirmed(pending)
-        except Exception:
-            log.exception("confirmed_action_reconciliation_failed", confirmation_id=pending.id)
+            self.running.discard(pending.id)
 
     async def _fail_unsupported(self, pending: PendingConfirmation) -> None:
         """Fail closed: a tool with no registered path is never executed."""
@@ -158,3 +103,79 @@ class ConfirmedActionExecutor:
                 await uow.audit.append(
                     pending.user_id, AuditEvent(AuditEventType.ORDER_REFUSED, SYSTEM_ACTOR, payload), now
                 )
+
+
+class ConfirmedActionExecutor:
+    def __init__(
+        self,
+        uow: UnitOfWorkFactory,
+        clock: Clock,
+        paths: Mapping[ActionKind, ConfirmablePath],
+        *,
+        scan_interval_s: float = DEFAULT_SCAN_INTERVAL_S,
+        execute: ExecuteConfirmed | None = None,
+    ) -> None:
+        """``execute``: share it with the UI channel so both know what this process is executing."""
+        self._uow = uow
+        self._clock = clock
+        self._paths = paths
+        self._scan_interval_s = scan_interval_s
+        self._execute_confirmed = execute or ExecuteConfirmed(uow, clock, paths)
+
+    async def run(self) -> None:
+        """Scan until cancelled. A failing pass is logged and the next one tries again."""
+        while True:
+            try:
+                await self.run_once()
+            except Exception:
+                log.exception("confirmed_executor_pass_failed")
+            await anyio.sleep(self._scan_interval_s)
+
+    async def run_once(self) -> None:
+        await self._expire_waiting()
+        approved = await self._listed({ConfirmationStatus.APPROVED})
+        for pending in approved:
+            await self._execute_confirmed(pending)
+        now = self._clock.now()
+        for pending in await self._listed({ConfirmationStatus.EXECUTING}):
+            started = pending.exec_started_at
+            if (
+                pending.id in self._execute_confirmed.running
+                or started is None
+                or now < started + RECONCILE_AFTER
+            ):
+                continue
+            await self._reconcile(pending)
+
+    async def _listed(self, statuses: set[ConfirmationStatus]) -> list[PendingConfirmation]:
+        async with self._uow(write=False) as uow:
+            return list(await uow.confirmations.list_by_status(frozenset(statuses), limit=_BATCH))
+
+    async def _expire_waiting(self) -> None:
+        now = self._clock.now()
+        for pending in await self._listed({ConfirmationStatus.PENDING}):
+            if not pending.expired(now):
+                continue
+            async with self._uow(write=True) as uow:
+                await uow.lock_user(pending.user_id)
+                if await uow.confirmations.transition(
+                    pending.id,
+                    expected=frozenset({ConfirmationStatus.PENDING}),
+                    to=ConfirmationStatus.EXPIRED,
+                    at=now,
+                    channel=DecisionChannel.SYSTEM,
+                    decided_by=SYSTEM_ACTOR,
+                ):
+                    event = decided_event(
+                        pending, ConfirmationStatus.EXPIRED, DecisionChannel.SYSTEM, SYSTEM_ACTOR
+                    )
+                    await uow.audit.append(pending.user_id, event, now)
+
+    async def _reconcile(self, pending: PendingConfirmation) -> None:
+        path = self._paths.get(pending.tool)
+        if path is None:
+            return
+        try:
+            await path.reconcile_confirmed(pending)
+        except Exception:
+            log.exception("confirmed_action_reconciliation_failed", confirmation_id=pending.id)

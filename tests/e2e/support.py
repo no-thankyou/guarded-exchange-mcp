@@ -30,6 +30,7 @@ from guarded_exchange.application.read_history import GetOrderHistory, GetTrades
 from guarded_exchange.application.read_market import GetCandles, GetInstrumentRules, GetOrderbook, GetTicker
 from guarded_exchange.application.resolve_confirmation import CancelConfirmation, GetConfirmationStatus
 from guarded_exchange.application.submit_action import SubmitPlaceOrder
+from guarded_exchange.bootstrap import with_client_ui
 from guarded_exchange.domain.credentials import EXCHANGE_BYBIT
 from guarded_exchange.domain.policy import Permission
 from guarded_exchange.domain.users import Environment
@@ -66,6 +67,37 @@ def use_cases(
     confirmations: ConfirmationSupport | None = None,
 ) -> UseCases:
     """The MCP use cases wired to fakes, as the composition root wires the real adapters."""
+    clock = clock or FakeClock()
+    cases = _use_cases(
+        db,
+        exchange,
+        clock,
+        account=account,
+        cipher=cipher,
+        trading=trading,
+        key_reader=key_reader,
+        changes=changes,
+        position_actions=position_actions,
+        confirmations=confirmations,
+    )
+    if confirmations is None:
+        return cases
+    return with_client_ui(cases, db, clock, confirmations)
+
+
+def _use_cases(
+    db: UnitOfWorkFactory,
+    exchange: FakeExchange | None = None,
+    clock: FakeClock | None = None,
+    *,
+    account: FakeAccount | None = None,
+    cipher: FakeCipher | None = None,
+    trading: FakeTrading | None = None,
+    key_reader: FakeKeyReader | None = None,
+    changes: FakeOrderChanges | None = None,
+    position_actions: FakePositionActions | None = None,
+    confirmations: ConfirmationSupport | None = None,
+) -> UseCases:
     exchange, clock, account = exchange or FakeExchange(), clock or FakeClock(), account or FakeAccount()
     cipher = cipher or FakeCipher()
     scope: dict[str, Any] = {"exchange": EXCHANGE_BYBIT, "environment": Environment.TESTNET}
@@ -96,12 +128,22 @@ def use_cases(
             **scope,
         ),
         activate_kill_switch=ActivateKillSwitch(db, clock),
-        order_changes=order_change_use_cases(db, cipher, recheck, rules, clock, trading, changes),
+        order_changes=order_change_use_cases(
+            db, cipher, recheck, rules, clock, trading, changes, confirmations
+        ),
         confirmations=ConfirmationUseCases(
             get_status=GetConfirmationStatus(db, clock), cancel=CancelConfirmation(db, clock)
         ),
         position_actions=position_action_use_cases(
-            db, exchange, cipher, recheck, rules, clock, trading or FakeTrading(), position_actions
+            db,
+            exchange,
+            cipher,
+            recheck,
+            rules,
+            clock,
+            trading or FakeTrading(),
+            position_actions,
+            confirmations,
         ),
     )
 
@@ -115,6 +157,7 @@ def position_action_use_cases(  # noqa: PLR0917 - the fakes the composition root
     clock: FakeClock,
     trading: FakeTrading,
     actions: FakePositionActions | None,
+    confirmations: ConfirmationSupport | None = None,
 ) -> PositionActionUseCases:
     scope: dict[str, Any] = {"exchange": EXCHANGE_BYBIT, "environment": Environment.TESTNET}
     credentials = RequireTradingCredential(db, cipher, recheck, clock, **scope)
@@ -123,6 +166,7 @@ def position_action_use_cases(  # noqa: PLR0917 - the fakes the composition root
         "clock": clock,
         "ids": SequentialIds("pos"),
         "reconnaissance_delay_s": 0,
+        "confirmations": confirmations,
         **scope,
     }
     fake = actions or FakePositionActions(trading)
@@ -141,6 +185,7 @@ def order_change_use_cases(  # noqa: PLR0917 - the fakes the composition root wo
     clock: FakeClock,
     trading: FakeTrading | None,
     changes: FakeOrderChanges | None,
+    confirmations: ConfirmationSupport | None = None,
 ) -> OrderChangeUseCases:
     scope: dict[str, Any] = {"exchange": EXCHANGE_BYBIT, "environment": Environment.TESTNET}
     credentials = RequireTradingCredential(db, cipher, recheck, clock, **scope)
@@ -149,6 +194,7 @@ def order_change_use_cases(  # noqa: PLR0917 - the fakes the composition root wo
         "clock": clock,
         "ids": SequentialIds("chg"),
         "reconnaissance_delay_s": 0,
+        "confirmations": confirmations,
         **scope,
     }
     return OrderChangeUseCases(
@@ -171,6 +217,7 @@ def server_for(
     changes: FakeOrderChanges | None = None,
     position_actions: FakePositionActions | None = None,
     confirmations: ConfirmationSupport | None = None,
+    request_state_key: bytes | None = None,
 ) -> MCPServer[Any]:
     """The production server for principal ``user_id`` (``None``: nobody resolved)."""
     principal = fixed_principal(user_id) if user_id is not None else (lambda: None)
@@ -188,4 +235,5 @@ def server_for(
         ),
         principal=principal,
         tool_permissions=tool_permissions,
+        request_state_key=request_state_key,
     )

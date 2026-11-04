@@ -3,7 +3,7 @@
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -29,6 +29,7 @@ from guarded_exchange.application.auth import (
     PrincipalUnavailable,
     ResolveLocalPrincipal,
 )
+from guarded_exchange.application.client_ui_confirmation import ClientUiConfirmation
 from guarded_exchange.application.confirmation import ConfirmationSupport
 from guarded_exchange.application.credentials import (
     AddCredential,
@@ -42,7 +43,11 @@ from guarded_exchange.application.credentials import (
     RequireTradingCredential,
     StoredCredential,
 )
-from guarded_exchange.application.execute_confirmed import ConfirmablePath, ConfirmedActionExecutor
+from guarded_exchange.application.execute_confirmed import (
+    ConfirmablePath,
+    ConfirmedActionExecutor,
+    ExecuteConfirmed,
+)
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.kill_switch import ActivateKillSwitch, KillSwitchChange, SetKillSwitch
 from guarded_exchange.application.order_changes import (
@@ -59,7 +64,7 @@ from guarded_exchange.application.policy import (
     SetCeiling,
     TightenPolicy,
 )
-from guarded_exchange.application.ports import Authenticator, CredentialCipher, UnitOfWorkFactory
+from guarded_exchange.application.ports import Authenticator, Clock, CredentialCipher, UnitOfWorkFactory
 from guarded_exchange.application.position_actions import (
     SubmitClosePosition,
     SubmitSetLeverage,
@@ -87,7 +92,7 @@ from guarded_exchange.domain.users import User
 from guarded_exchange.infrastructure.bybit.client import BybitClient, RetryPolicy
 from guarded_exchange.infrastructure.bybit.http import make_http_client
 from guarded_exchange.infrastructure.clock import SystemClock, UuidGenerator
-from guarded_exchange.infrastructure.crypto import AesGcmCredentialCipher, Keyring
+from guarded_exchange.infrastructure.crypto import AesGcmCredentialCipher, KeyPurpose, Keyring
 from guarded_exchange.infrastructure.db.migrate import (
     StorageNotReady,
     check_storage,
@@ -160,7 +165,7 @@ def build_use_cases(
         exchange=EXCHANGE_BYBIT,
         environment=environment,
     )
-    return UseCases(
+    use_cases = UseCases(
         get_ticker=GetTicker(exchange),
         get_orderbook=GetOrderbook(exchange),
         get_candles=GetCandles(exchange),
@@ -209,6 +214,16 @@ def build_use_cases(
             confirmations=confirmations,
         ),
     )
+    return with_client_ui(use_cases, uow, clock, confirmations)
+
+
+def with_client_ui(
+    use_cases: UseCases, uow: UnitOfWorkFactory, clock: Clock, confirmations: ConfirmationSupport
+) -> UseCases:
+    """Attach the client-UI confirmation channel (ticket 020): it feeds the same pending records and
+    executes through the same paths as the background executor (no second execution path)."""
+    execute = ExecuteConfirmed(uow, clock, confirmable_paths(use_cases))
+    return replace(use_cases, client_ui=ClientUiConfirmation(uow, clock, confirmations, execute))
 
 
 def confirmable_paths(use_cases: UseCases) -> Mapping[ActionKind, ConfirmablePath]:
@@ -316,6 +331,7 @@ async def app_server(
     authenticator: Authenticator | None = None,
     transport: httpx2.AsyncBaseTransport | None = None,
     start_executor: bool = False,
+    request_state_key: bytes | None = None,
 ) -> AsyncIterator[GuardedMCPServer]:
     """Build a fully wired server and close its resources on exit.
 
@@ -325,6 +341,8 @@ async def app_server(
     ``transport`` is a test seam (``httpx2.MockTransport``); production passes ``None``.
     ``start_executor``: also run the ``ConfirmedActionExecutor`` for as long as the server lives (the
     serve commands do; it executes what a human approved, FR-47 (b)).
+    ``request_state_key``: seals the confirmation form's ``requestState`` (HKDF sub-key of the master key,
+    D-5); ``None``: a process-local key.
     """
     if (principal is None) == (authenticator is None):
         raise ValueError("pass exactly one of principal (stdio) or authenticator (http)")
@@ -332,14 +350,23 @@ async def app_server(
         http = await stack.enter_async_context(_exchange_http(settings, transport))
         use_cases = build_use_cases(settings, http, uow, cipher)
         if start_executor:
-            executor = ConfirmedActionExecutor(uow, SystemClock(), confirmable_paths(use_cases))
+            shared = use_cases.client_ui.execute if use_cases.client_ui is not None else None
+            executor = ConfirmedActionExecutor(
+                uow, SystemClock(), confirmable_paths(use_cases), execute=shared
+            )
             await stack.enter_async_context(_executing(executor))
         if authenticator is not None:
             yield create_http_server(
-                use_cases, authenticator, public_url=public_url(settings), version=_version()
+                use_cases,
+                authenticator,
+                public_url=public_url(settings),
+                version=_version(),
+                request_state_key=request_state_key,
             )
         elif principal is not None:
-            yield create_server(use_cases, principal=principal, version=_version())
+            yield create_server(
+                use_cases, principal=principal, version=_version(), request_state_key=request_state_key
+            )
 
 
 @asynccontextmanager
@@ -526,6 +553,7 @@ async def _serve_stdio(settings: Settings, keyring: Keyring) -> None:
             cipher=AesGcmCredentialCipher(keyring),
             principal=fixed_principal(principal.id),
             start_executor=True,
+            request_state_key=keyring.subkey(KeyPurpose.REQUEST_STATE),
         ) as mcp:
             await _serve_with_recheck(lambda: serve_stdio(mcp), settings, uow, keyring)
 
@@ -539,6 +567,7 @@ async def _serve_http(settings: Settings, keyring: Keyring) -> None:
             cipher=AesGcmCredentialCipher(keyring),
             authenticator=AuthenticateBearerToken(uow),
             start_executor=True,
+            request_state_key=keyring.subkey(KeyPurpose.REQUEST_STATE),
         ) as mcp,
     ):
         app = http_app(

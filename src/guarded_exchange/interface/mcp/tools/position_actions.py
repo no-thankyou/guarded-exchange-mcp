@@ -6,7 +6,7 @@ from typing import Annotated, Any
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import CallToolResult, ToolAnnotations
+from mcp.types import CallToolResult, InputRequiredResult, ToolAnnotations
 from pydantic import Field
 
 from guarded_exchange.application.position_actions import (
@@ -17,8 +17,9 @@ from guarded_exchange.application.position_actions import (
     SubmitSetLeverage,
     SubmitSetTradingStop,
 )
+from guarded_exchange.domain.actions import ActionKind
 from guarded_exchange.interface.mcp.access import PrincipalProvider
-from guarded_exchange.interface.mcp.results import run_tool
+from guarded_exchange.interface.mcp.confirm_ui import ClientUiChannel, run_confirmable
 from guarded_exchange.interface.mcp.schemas import PlaceOrderOut
 from guarded_exchange.interface.mcp.schemas_position_actions import SetLeverageOut, SetTradingStopOut
 from guarded_exchange.interface.mcp.schemas_responses import (
@@ -86,7 +87,13 @@ class PositionActionUseCases:
     set_leverage: SubmitSetLeverage
 
 
-def register(mcp: MCPServer[Any], *, use_cases: PositionActionUseCases, principal: PrincipalProvider) -> None:
+def register(
+    mcp: MCPServer[Any],
+    *,
+    client_ui: ClientUiChannel,
+    use_cases: PositionActionUseCases,
+    principal: PrincipalProvider,
+) -> None:
     @mcp.tool(
         name="set_trading_stop",
         title="Set stop-loss / take-profit",
@@ -100,13 +107,13 @@ def register(mcp: MCPServer[Any], *, use_cases: PositionActionUseCases, principa
         take_profit: TakeProfitArg = None,
         stop_loss: StopLossArg = None,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, SetTradingStopResponse]:
+    ) -> Annotated[CallToolResult, SetTradingStopResponse] | InputRequiredResult:
         async def call() -> SetTradingStopOut:
             request = SetTradingStopInput(symbol, category, take_profit, stop_loss, idempotency_key)
             result = await use_cases.set_trading_stop(principal(), request, client_description(ctx))
             return SetTradingStopOut.from_domain(result)
 
-        return await run_tool("set_trading_stop", ctx.request_id, call())
+        return await run_confirmable(ActionKind.SET_TRADING_STOP, ctx, call, client_ui)
 
     @mcp.tool(
         name="close_position",
@@ -120,13 +127,13 @@ def register(mcp: MCPServer[Any], *, use_cases: PositionActionUseCases, principa
         ctx: Context,
         qty: CloseQtyArg = None,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, PlaceOrderResponse]:
+    ) -> Annotated[CallToolResult, PlaceOrderResponse] | InputRequiredResult:
         async def call() -> PlaceOrderOut:
             request = ClosePositionInput(symbol, category, qty, idempotency_key)
             result = await use_cases.close_position(principal(), request, client_description(ctx))
             return PlaceOrderOut.from_domain(result)
 
-        return await run_tool("close_position", ctx.request_id, call())
+        return await run_confirmable(ActionKind.CLOSE_POSITION, ctx, call, client_ui)
 
     @mcp.tool(
         name="set_leverage", title="Set leverage", description=SET_LEVERAGE_DESCRIPTION, annotations=_CHANGES
@@ -137,10 +144,10 @@ def register(mcp: MCPServer[Any], *, use_cases: PositionActionUseCases, principa
         leverage: LeverageArg,
         ctx: Context,
         idempotency_key: KeyArg = None,
-    ) -> Annotated[CallToolResult, SetLeverageResponse]:
+    ) -> Annotated[CallToolResult, SetLeverageResponse] | InputRequiredResult:
         async def call() -> SetLeverageOut:
             request = SetLeverageInput(symbol, category, leverage, idempotency_key)
             result = await use_cases.set_leverage(principal(), request, client_description(ctx))
             return SetLeverageOut.from_domain(result)
 
-        return await run_tool("set_leverage", ctx.request_id, call())
+        return await run_confirmable(ActionKind.SET_LEVERAGE, ctx, call, client_ui)

@@ -704,7 +704,7 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
         if notional is None or not requires_confirmation(policy, action.kind, notional):
             return plan
         support = self._confirmations
-        if support is None or not support.channel_available:
+        if support is None or not support.channel_available(policy):
             raise no_confirmation_channel(action.kind)  # fail closed, nothing is parked
         primary = attempt.claims.primary
         request = PendingRequest(
@@ -719,7 +719,9 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
             idempotency_key=primary.key if primary is not None and primary.kind is KeyKind.EXPLICIT else None,
             client=attempt.client,
         )
-        return await open_pending(uow, request, policy, self._clock.now(), actor=self._actor)
+        parked = await open_pending(uow, request, policy, self._clock.now(), actor=self._actor)
+        parked.ask_client_ui = support.client_ui_usable(policy)
+        return parked
 
     # --- sending and the outcome ----------------------------------------------------------------
 

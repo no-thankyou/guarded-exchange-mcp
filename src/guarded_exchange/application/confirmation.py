@@ -11,7 +11,9 @@ it is raised so that no action type needs a second return type. The MCP layer tu
 ``pending_confirmation`` answer (FR-47 (b)).
 """
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
@@ -38,6 +40,7 @@ from guarded_exchange.domain.users import Environment
 log = structlog.get_logger(__name__)
 
 CLI_ACTOR: Final = "cli:user"
+CLIENT_UI_ACTOR: Final = "client_ui:user"
 SYSTEM_ACTOR: Final = "system:confirmations"
 AGENT_ACTOR: Final = "mcp:agent"
 
@@ -45,27 +48,55 @@ OpenKeys = Callable[[str], Awaitable[ApiKeyPair]]
 """The keys of a credential by id, deleted ones too (D-9: reconnaissance of an in-flight action)."""
 
 
+_UI_OFFERED: ContextVar[bool] = ContextVar("client_ui_offered", default=False)
+
+
+@contextmanager
+def offering_client_ui(offered: bool) -> Iterator[None]:
+    """The MCP layer states, for one call, that this client can show the confirmation form (it declared
+    ``elicitation.form`` on protocol 2026-07-28). Only a capability: whether the form is *trusted* is the
+    policy's call (FR-42), decided in ``ConfirmationSupport.client_ui_usable``."""
+    token = _UI_OFFERED.set(offered)
+    try:
+        yield
+    finally:
+        _UI_OFFERED.reset(token)
+
+
 @dataclass(frozen=True, slots=True)
 class ConfirmationSupport:
     """How an action path asks for confirmation. ``cli_enabled`` is the admin's explicit switch for the
-    CLI as a trusted channel (FR-42, E-5); without it nothing is parked and an action that needs
-    confirming is refused (FR-25). ``open_keys`` serves the reconnaissance of an interrupted execution."""
+    CLI as a trusted channel (FR-42, E-5); ``client_ui_enabled`` allows the client's own form (still
+    subject to the policy's ``trust_client_ui`` / ``prefer_external_channel``). Without any usable channel
+    nothing is parked and an action that needs confirming is refused (FR-25). ``open_keys`` serves the
+    reconnaissance of an interrupted execution."""
 
     cli_enabled: bool
     open_keys: OpenKeys
+    client_ui_enabled: bool = True
 
-    @property
-    def channel_available(self) -> bool:
-        return self.cli_enabled
+    def client_ui_trusted(self, policy: EffectivePolicy) -> bool:
+        """Whether a decision from the client's UI counts for this policy (FR-42, D-6)."""
+        return self.client_ui_enabled and policy.trust_client_ui and not policy.prefer_external_channel
+
+    def client_ui_usable(self, policy: EffectivePolicy) -> bool:
+        """Whether this call may be confirmed in the client's UI: trusted **and** offered by this client."""
+        return self.client_ui_trusted(policy) and _UI_OFFERED.get()
+
+    def channel_available(self, policy: EffectivePolicy) -> bool:
+        return self.cli_enabled or self.client_ui_usable(policy)
 
 
 class ConfirmationPending(Exception):
     """The action was parked and waits for the human (or already did: a repeat of the same call)."""
 
-    def __init__(self, pending: PendingConfirmation, *, created: bool) -> None:
+    def __init__(self, pending: PendingConfirmation, *, created: bool, ask_client_ui: bool = False) -> None:
         super().__init__(f"confirmation {pending.id} is {pending.status.value}")
         self.pending = pending
         self.created = created
+        self.ask_client_ui = ask_client_ui
+        """The policy trusts the client's UI and this client offered it: the MCP layer may ask the human
+        there, in the same call (FR-47 (a)); otherwise the agent gets the ``pending`` answer."""
 
 
 @dataclass(frozen=True, slots=True)

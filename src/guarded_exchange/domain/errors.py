@@ -137,6 +137,19 @@ class ConfirmationExpired(DomainError):
     code: ClassVar[str] = "confirmation_expired"
 
 
+class ConfirmationDeclined(DomainError):
+    """The human did not confirm in the client's UI (declined, cancelled the form, or submitted it without
+    ticking the box); nothing was executed (FR-20)."""
+
+    code: ClassVar[str] = "confirmation_declined"
+
+
+class ConfirmationNotExecuted(DomainError):
+    """The action was approved but the re-check at execution time refused it, so nothing was sent (FR-48)."""
+
+    code: ClassVar[str] = "confirmation_not_executed"
+
+
 class ConfirmationNotPending(DomainError):
     """The confirmation is not waiting for a decision any more (decided, cancelled, executing, done)."""
 

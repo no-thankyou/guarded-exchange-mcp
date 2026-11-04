@@ -106,7 +106,12 @@ def auth_settings(public_url: str) -> AuthSettings:
 
 
 def create_http_server(
-    use_cases: UseCases, authenticator: Authenticator, *, public_url: str, version: str = ""
+    use_cases: UseCases,
+    authenticator: Authenticator,
+    *,
+    public_url: str,
+    version: str = "",
+    request_state_key: bytes | None = None,
 ) -> GuardedMCPServer:
     """The same tools as on stdio; the principal comes from the bearer token only."""
     return create_server(
@@ -115,6 +120,7 @@ def create_http_server(
         version=version,
         token_verifier=BearerTokenVerifier(authenticator),
         auth=auth_settings(public_url),
+        request_state_key=request_state_key,
     )
 
 
