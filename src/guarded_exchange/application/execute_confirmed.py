@@ -62,14 +62,22 @@ class ConfirmedActionExecutor:
         self._running: set[str] = set()
         """Confirmations this process is executing right now: not reconciled behind its back."""
 
-    async def run(self) -> None:
-        """Scan until cancelled. A failing pass is logged and the next one tries again."""
-        while True:
+    async def run(self, stop: anyio.Event | None = None) -> None:
+        """Scan until ``stop`` is set (or the task is cancelled). A failing pass is logged and the next
+        one tries again.
+
+        ``stop`` is the graceful way out: it is only looked at between passes, so a pass is never cut
+        in the middle of a database call (cancelling an aiosqlite call mid-way leaves its worker thread
+        posting to a closed event loop, and the process then never exits).
+        """
+        stop = stop or anyio.Event()
+        while not stop.is_set():
             try:
                 await self.run_once()
             except Exception:
                 log.exception("confirmed_executor_pass_failed")
-            await anyio.sleep(self._scan_interval_s)
+            with anyio.move_on_after(self._scan_interval_s):
+                await stop.wait()
 
     async def run_once(self) -> None:
         await self._expire_waiting()
