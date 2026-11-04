@@ -48,6 +48,7 @@ from guarded_exchange.domain.market import (
     OrderbookLevel,
     Ticker,
 )
+from guarded_exchange.domain.order_changes import OrderAmendment
 from guarded_exchange.domain.orders import (
     FillStatus,
     OrderFill,
@@ -1166,5 +1167,71 @@ def order_fill_from_result(
             filled_qty=filled,  # empty otherwise: not known (D-15), never read as 0
             avg_fill_price=_positive_or_none(item.avg_price),
         )
+    except (InvalidOperation, ValueError) as exc:
+        raise unavailable(f"inconsistent {endpoint}") from exc
+
+
+# --- cancel and amend (ticket 013) ----------------------------------------------------------------
+
+PLAIN_ORDERS_FILTER: Final = "Order"
+"""``orderFilter`` for plain (active) orders only: never conditional orders or a position's TP/SL.
+https://bybit-exchange.github.io/docs/v5/order/open-order (checked 2026-11-03)."""
+
+
+def order_cancel_body(category: Category, symbol: str, order_id: str) -> dict[str, str | int | bool]:
+    """``POST /v5/order/cancel`` by the exchange order id. Spot takes ``orderFilter`` (default ``Order``);
+    it is sent explicitly, so the request can only ever address a plain order."""
+    body: dict[str, str | int | bool] = {"category": category.value, "symbol": symbol, "orderId": order_id}
+    if category is Category.SPOT:
+        body["orderFilter"] = PLAIN_ORDERS_FILTER
+    return body
+
+
+def order_amend_body(amendment: OrderAmendment) -> dict[str, str | int | bool]:
+    """``POST /v5/order/amend``: only what changes (``qty`` is the new total quantity)."""
+    body: dict[str, str | int | bool] = {
+        "category": amendment.category.value,
+        "symbol": amendment.symbol,
+        "orderId": amendment.order_id,
+    }
+    if amendment.qty is not None:
+        body["qty"] = _wire_decimal(amendment.qty)
+    if amendment.price is not None:
+        body["price"] = _wire_decimal(amendment.price)
+    return body
+
+
+def require_changed_order(result: dict[str, Any], *, order_id: str) -> None:
+    """``order/cancel`` and ``order/amend`` answer ``{orderId, orderLinkId}`` of the order they accepted
+    the request for. Anything else after a successful ``retCode`` is ``OutcomeUnknown``: the exchange
+    said yes to *something*, so the change may have happened."""
+    parsed = _validated(_CreateResultDTO, result)
+    if parsed is None or parsed.order_id != order_id:
+        raise OutcomeUnknown(
+            "the exchange accepted the request but its answer was not understood",
+            details={"reason": "unexpected_change_response"},
+        )
+
+
+def order_by_id_from_result(
+    result: dict[str, Any], *, category: Category, symbol: str, order_id: str, endpoint: str
+) -> Order | None:
+    """The order with ``order_id`` from ``order/realtime?orderId=`` or ``order/history?orderId=``;
+    ``None`` if not listed. Another order or symbol is not this order (unavailable); a hedge-mode row
+    is ``UnsupportedPositionMode``."""
+    parsed = _validated(_OrdersResultDTO, result)
+    if parsed is None:
+        raise unavailable(f"unexpected {endpoint} format")
+    if not parsed.items:
+        return None
+    if len(parsed.items) != 1:
+        raise unavailable(f"{endpoint} returned several orders for one order id")
+    item = parsed.items[0]
+    if item.order_id != order_id or item.symbol != symbol:
+        raise unavailable(f"{endpoint} returned another order")
+    if category is Category.LINEAR and item.position_idx != _ONE_WAY:
+        raise UnsupportedPositionMode()
+    try:
+        return _order(item, category)
     except (InvalidOperation, ValueError) as exc:
         raise unavailable(f"inconsistent {endpoint}") from exc

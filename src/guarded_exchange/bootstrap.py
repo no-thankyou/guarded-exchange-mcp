@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Final, NoReturn
+from typing import Any, Final, NoReturn
 
 import anyio
 import httpx2
@@ -42,6 +42,11 @@ from guarded_exchange.application.credentials import (
 )
 from guarded_exchange.application.instrument_rules import InstrumentRulesCache
 from guarded_exchange.application.kill_switch import ActivateKillSwitch, KillSwitchChange, SetKillSwitch
+from guarded_exchange.application.order_changes import (
+    SubmitAmendOrder,
+    SubmitCancelAllOrders,
+    SubmitCancelOrder,
+)
 from guarded_exchange.application.policy import (
     AuthorizeAccess,
     OverridesReset,
@@ -88,6 +93,7 @@ from guarded_exchange.interface.mcp.access import PrincipalProvider, fixed_princ
 from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
 from guarded_exchange.interface.mcp.http import create_http_server, http_app, serve_http
 from guarded_exchange.interface.mcp.server import UseCases, create_server, serve_stdio
+from guarded_exchange.interface.mcp.tools.order_changes import OrderChangeUseCases
 
 
 def _version() -> str:
@@ -157,6 +163,35 @@ def build_use_cases(
             fill_read_deadline_s=settings.order_fill_read_deadline_s,
         ),
         activate_kill_switch=ActivateKillSwitch(uow, clock),
+        order_changes=_order_changes(
+            settings, uow, trade_key=trade_key, rules=rules, exchange=exchange, clock=clock
+        ),
+    )
+
+
+def _order_changes(
+    settings: Settings,
+    uow: UnitOfWorkFactory,
+    *,
+    trade_key: RequireTradingCredential,
+    rules: InstrumentRulesCache,
+    exchange: BybitClient,
+    clock: SystemClock,
+) -> OrderChangeUseCases:
+    """Cancel, amend and cancel-all (ticket 013) on the same adapter and bounds as ``place_order``."""
+    common: dict[str, Any] = {
+        "changes": exchange,
+        "clock": clock,
+        "ids": UuidGenerator(),
+        "exchange": EXCHANGE_BYBIT,
+        "environment": settings.bybit_environment,
+        "send_deadline_s": settings.order_send_deadline_s,
+        "read_back_deadline_s": settings.order_fill_read_deadline_s,
+    }
+    return OrderChangeUseCases(
+        cancel_order=SubmitCancelOrder(uow, trade_key, **common),
+        amend_order=SubmitAmendOrder(uow, trade_key, rules, trading=exchange, **common),
+        cancel_all_orders=SubmitCancelAllOrders(uow, trade_key, **common),
     )
 
 

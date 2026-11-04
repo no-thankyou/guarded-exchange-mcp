@@ -1,14 +1,17 @@
 """Trading actions (SPEC 4.2, PLAN 5.1).
 
 ``ActionKind`` names every kind (the policy's confirmation rule uses it, FR-19). The action objects
-arrive with their tickets: ``PlaceOrder`` (011) for now. An action holds exactly what the agent
-asked for, normalised and checked for shape; sizing against the instrument and the market is the
-order plan's job (``domain.orders``).
+arrive with their tickets: ``PlaceOrder`` (011), ``CancelOrder``, ``AmendOrder`` and
+``CancelAllOrders`` (013). An action holds exactly what the agent asked for, normalised and checked
+for shape; sizing against the instrument and the market is the plan's job (``domain.orders``,
+``domain.order_changes``).
 """
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
+from typing import Final
 
 from guarded_exchange.domain.account import OrderSide
 from guarded_exchange.domain.errors import InvalidParams
@@ -112,3 +115,95 @@ def parse_place_order(
         price=None if price is None else parse_amount("price", price),
         reduce_only=reduce_only,
     )
+
+
+# --- changing existing orders (ticket 013: FR-5, FR-43) -------------------------------------------
+
+ORDER_ID_PATTERN: Final = r"^[A-Za-z0-9-]{1,64}$"
+"""An exchange order id as ``get_open_orders`` shows it (Bybit: a UUID; spot: digits)."""
+_ORDER_ID_RE: Final = re.compile(ORDER_ID_PATTERN)
+
+
+def parse_order_id(raw: str) -> str:
+    """The exchange order id as given (exact) or ``InvalidParams``; the message never quotes it."""
+    value = raw.strip()
+    if not _ORDER_ID_RE.fullmatch(value):
+        raise InvalidParams(
+            "order_id must be the exchange order id: 1-64 letters, digits or -",
+            next_step="Take order_id from get_open_orders (not the client_order_id).",
+            details={"field": "order_id"},
+        )
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class CancelOrder:
+    """Cancel one open order of the account, ours or external (FR-5)."""
+
+    symbol: str
+    category: Category
+    order_id: str
+
+    kind = ActionKind.CANCEL_ORDER
+
+
+@dataclass(frozen=True, slots=True)
+class AmendOrder:
+    """Change the quantity and/or the limit price of one open order (FR-5). ``None``: unchanged.
+
+    ``qty`` is the order's new **total** quantity in the base asset (what is already filled counts).
+    """
+
+    symbol: str
+    category: Category
+    order_id: str
+    qty: Decimal | None
+    price: Decimal | None
+
+    kind = ActionKind.AMEND_ORDER
+
+    def __post_init__(self) -> None:
+        if self.qty is None and self.price is None:
+            raise InvalidParams(
+                "nothing to change: pass qty, price or both",
+                next_step="Pass the new total qty and/or the new limit price of the order.",
+                details={"reason": "no_change"},
+            )
+        for name, value in (("qty", self.qty), ("price", self.price)):
+            if value is not None and (not value.is_finite() or value <= 0):
+                raise InvalidParams(f"{name} must be greater than zero", details={"field": name})
+
+
+@dataclass(frozen=True, slots=True)
+class CancelAllOrders:
+    """Cancel every plain open order on one instrument, ours and external (FR-5).
+
+    Conditional orders and a position's TP/SL are not plain orders and are left alone (ticket 013).
+    """
+
+    symbol: str
+    category: Category
+
+    kind = ActionKind.CANCEL_ALL_ORDERS
+
+
+def parse_cancel_order(*, symbol: str, category: str, order_id: str) -> CancelOrder:
+    return CancelOrder(
+        symbol=normalize_symbol(symbol), category=parse_category(category), order_id=parse_order_id(order_id)
+    )
+
+
+def parse_amend_order(
+    *, symbol: str, category: str, order_id: str, qty: str | None, price: str | None
+) -> AmendOrder:
+    return AmendOrder(
+        symbol=normalize_symbol(symbol),
+        category=parse_category(category),
+        order_id=parse_order_id(order_id),
+        qty=None if qty is None else parse_amount("qty", qty),
+        price=None if price is None else parse_amount("price", price),
+    )
+
+
+def parse_cancel_all_orders(*, symbol: str, category: str) -> CancelAllOrders:
+    return CancelAllOrders(symbol=normalize_symbol(symbol), category=parse_category(category))

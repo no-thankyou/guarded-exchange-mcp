@@ -142,10 +142,10 @@ def plan_order(
     if (rules.instrument.symbol, rules.instrument.category) != (action.symbol, action.category):
         raise ValueError("rules of another instrument")
     risk = classify(action)
-    _require_status(rules, risk)
+    require_status(rules, risk)
     qty, adjustment = _size(action, rules, position)
     if action.price is not None:  # a limit order (PlaceOrder: limit <=> price)
-        price = _limit_price(action.side, action.price, rules, band)
+        price = check_limit_price(action.side, action.price, rules, band)
         plan = OrderPlan(
             action=action,
             risk=risk,
@@ -185,7 +185,9 @@ def plan_order(
     return plan
 
 
-def _require_status(rules: InstrumentRules, risk: RiskDirection) -> None:
+def require_status(rules: InstrumentRules, risk: RiskDirection) -> None:
+    """A risk-increasing action needs an instrument open for trading; a reducing one may also go to
+    one being delisted (``REDUCING_STATUSES``)."""
     allowed = {InstrumentStatus.TRADING} if risk is RiskDirection.INCREASES else REDUCING_STATUSES
     if rules.status not in allowed:
         raise InstrumentRuleViolation(
@@ -224,7 +226,9 @@ def _size(
     return qty, adjustment
 
 
-def _limit_price(side: OrderSide, price: Decimal, rules: InstrumentRules, band: PriceBand) -> Decimal:
+def check_limit_price(side: OrderSide, price: Decimal, rules: InstrumentRules, band: PriceBand) -> Decimal:
+    """``price`` if it is on the tick and inside the exchange's price band, else the rule it breaks
+    with the nearest valid values (GP-1)."""
     tick = rules.tick_size
     if not is_multiple(price, tick):
         lower, upper = neighbours(price, tick)

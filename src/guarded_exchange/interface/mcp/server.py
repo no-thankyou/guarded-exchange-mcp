@@ -21,7 +21,16 @@ from guarded_exchange.application.submit_action import SubmitPlaceOrder
 from guarded_exchange.domain.policy import Permission
 from guarded_exchange.interface.mcp.access import TOOL_PERMISSIONS, PrincipalProvider, ToolGate
 from guarded_exchange.interface.mcp.guarded_server import GuardedMCPServer
-from guarded_exchange.interface.mcp.tools import account, history, kill_switch, market, policy, trading
+from guarded_exchange.interface.mcp.tools import (
+    account,
+    history,
+    kill_switch,
+    market,
+    order_changes,
+    policy,
+    trading,
+)
+from guarded_exchange.interface.mcp.tools.order_changes import OrderChangeUseCases
 
 SERVER_NAME = "guarded-exchange"
 INSTRUCTIONS = (
@@ -48,6 +57,7 @@ class UseCases:
     authorize: AuthorizeAccess
     place_order: SubmitPlaceOrder
     activate_kill_switch: ActivateKillSwitch
+    order_changes: OrderChangeUseCases
 
 
 def create_server(
@@ -92,6 +102,7 @@ def create_server(
     policy.register(mcp, use_cases.read_policy, principal)
     trading.register(mcp, place_order=use_cases.place_order, principal=principal)
     kill_switch.register(mcp, activate_kill_switch=use_cases.activate_kill_switch, principal=principal)
+    order_changes.register(mcp, use_cases=use_cases.order_changes, principal=principal)
     return mcp
 
 
