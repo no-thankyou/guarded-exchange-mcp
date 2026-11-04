@@ -21,6 +21,7 @@ from guarded_exchange.domain.money import AMOUNT_PATTERN
 from guarded_exchange.interface.mcp.access import PrincipalProvider
 from guarded_exchange.interface.mcp.results import run_tool
 from guarded_exchange.interface.mcp.schemas import PlaceOrderOut
+from guarded_exchange.interface.mcp.schemas_responses import PlaceOrderResponse
 from guarded_exchange.interface.mcp.tools.market import CategoryArg, SymbolArg
 
 PLACE_ORDER_DESCRIPTION = (
@@ -98,7 +99,7 @@ def register(mcp: MCPServer[Any], *, place_order: SubmitPlaceOrder, principal: P
         price: PriceArg = None,
         reduce_only: ReduceOnlyArg = False,
         idempotency_key: IdempotencyKeyArg = None,
-    ) -> Annotated[CallToolResult, PlaceOrderOut]:
+    ) -> Annotated[CallToolResult, PlaceOrderResponse]:
         async def call() -> PlaceOrderOut:
             request = PlaceOrderInput(
                 symbol=symbol,

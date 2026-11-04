@@ -885,7 +885,7 @@ class ActionPath[A: TradingAction, M, P, R](ABC):
             if cleared.credential.id != pending.credential_id:
                 raise key_replaced_or_deleted()
             market = await self._read(action, cleared.keys, policy)
-        except TRANSIENT_ERRORS as retry:
+        except (ExchangeUnavailable, RateLimited) as retry:  # the exchange, not the action: try again
             log.warning("confirmed_action_postponed", confirmation_id=pending.id, code=retry.code)
             return
         except DomainError as refusal:
