@@ -4,6 +4,30 @@ A guarded [MCP](https://modelcontextprotocol.io) server that lets an AI agent tr
 
 > Portfolio / demo project. v1 is testnet-only, single process per database. Requirements: [`docs/SPEC.md`](docs/SPEC.md), design: [`docs/PLAN.md`](docs/PLAN.md), work items: [`docs/tickets/`](docs/tickets/).
 
+## What it looks like
+
+An illustrative session (Claude Code with the server connected, Bybit Demo account):
+
+```text
+> Set a stop loss 3% below the entry of my BTCUSDT position.
+
+● get_positions
+  BTCUSDT linear long 0.010 @ 67,200.0
+● set_trading_stop(symbol=BTCUSDT, stop_loss=65184.0)
+  status: pending, confirmation required
+```
+
+The server does not send the order. It parks the action and shows a form with its **own** plan, not the model's description:
+
+```text
+Confirm action?
+  set_trading_stop  BTCUSDT (linear)
+  stop loss: 65184.0  (-3.0% from entry 67200.0)
+  [x] Approve        Enter to submit
+```
+
+After the human approves, the server executes it and writes the decision to the audit journal. If the form is declined, nothing is sent and the agent only sees `declined`. No MCP tool can approve or reject: the model cannot confirm its own action. The kill switch blocks all new orders until a human turns it off in the CLI.
+
 ## Quick start (one command, no Docker)
 
 Requirements: [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 if missing), Linux or macOS. No exchange keys are needed for market data.
