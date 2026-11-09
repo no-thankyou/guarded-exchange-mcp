@@ -4,8 +4,6 @@ A guarded [MCP](https://modelcontextprotocol.io) server that lets an AI agent tr
 
 > Portfolio / demo project. v1 is testnet-only, single process per database. Requirements: [`docs/SPEC.md`](docs/SPEC.md), design: [`docs/PLAN.md`](docs/PLAN.md), work items: [`docs/tickets/`](docs/tickets/).
 
-<!-- PENDING (owner): GIF demo, recorded by the project owner following "Demo script" below. Embed it here as ![demo](docs/demo.gif). -->
-
 ## Quick start (one command, no Docker)
 
 Requirements: [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 if missing), Linux or macOS. No exchange keys are needed for market data.
@@ -111,21 +109,19 @@ The `fake` provider is a scripted stand-in that checks the harness itself, not a
 
 ### Results with a real model
 
-> **PLACEHOLDER (to be filled by the project owner):** run `uv run python -m evals --provider anthropic --runs 3` (optionally also `--provider openai`), then paste the model name, date, number of runs, cost and the metrics table from `evals/report.md` here. The tool-description before/after experiment (ticket 031) is v2.
+`claude-haiku-5-5`, 43 cases x 3 runs (129 scored case-runs), 2026-11-09, cost $0.11 of the $0.50 budget.
 
-## Acceptance criteria
-
-| AC | Status | Evidence |
+| Metric | Rate | Hits / total |
 |---|---|---|
-| AC-1 Claude Code/Desktop scenario "show positions, set a stop 3% below entry" with human confirmation, journaled | automated part done; **manual client check PENDING (owner)** | [`tests/e2e/test_mcp_client_ui.py`](tests/e2e/test_mcp_client_ui.py), [`tests/e2e/test_mcp_confirmation.py`](tests/e2e/test_mcp_confirmation.py), [`spikes/003/README.md`](spikes/003/README.md) |
-| AC-2 Two users with different policies, isolated; read-only user cannot trade | partial in v1 (read-only user); isolation and revocation are v2 | [`tests/e2e/test_mcp_policy.py`](tests/e2e/test_mcp_policy.py), [`tests/integration/test_http_auth.py`](tests/integration/test_http_auth.py) |
-| AC-3 Every in-scope FR covered by an automated test, CI green without network | done (FR-46 and FR-50 are v2) | [`docs/traceability.md`](docs/traceability.md), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`tests/unit/test_network_guard.py`](tests/unit/test_network_guard.py) |
-| AC-4 The model cannot execute a confirmation-gated action without a human | done | [`tests/e2e/test_ac4_adversarial.py`](tests/e2e/test_ac4_adversarial.py) |
-| AC-5 Agent client runs the demo scenario with console confirmation | done | [`tests/e2e/test_agent_demo.py`](tests/e2e/test_agent_demo.py), [`agent/guarded_agent/`](agent/guarded_agent/) |
-| AC-6 Evals report published | harness done; **real-model report PENDING (owner)**, see [Evals](#evals) | [`evals/`](evals/), [`tests/unit/evals/test_evals.py`](tests/unit/evals/test_evals.py) |
-| AC-7 English README, GIF demo, one-command start | README and start done; **GIF PENDING (owner)** | this file |
+| dangerous pass rate | **100%** | 57 / 57 |
+| refuse or clarify accuracy | 100% | 84 / 84 |
+| tool accuracy (when a call was expected) | 40% | 18 / 45 |
+| overall pass rate | 79% | 102 / 129 |
 
-## Demo script (for recording the GIF)
+The safety result is the one that matters here: in all 57 dangerous case-runs the model never made a state-changing call it should not have. The cost is caution: on legitimate trade requests (market/limit orders, closing half a position) this small model often stopped before the order (`no_call`, or the wrong tool for a partial close) in 27 of 45 case-runs. Larger models were not run: the harness has no price table for them yet. The tool-description before/after experiment is v2.
+
+
+## Demo walkthrough
 
 1. `uv run guarded-exchange init`, add a Bybit demo key (`uv run guarded-exchange keys add`), set the policy: `uv run guarded-exchange admin policy set-ceiling --profile trade --allow linear:BTCUSDT`.
 2. Start Claude Code with the server connected (see Quick start) or run `uv run guarded-agent`.
